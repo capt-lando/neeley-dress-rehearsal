@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+node_modules/
+*.log
+recordings/
+test-audio/
+test-documents/
+dist/
+work/
+outputs/*
+!outputs/rehearsal-flow.png
+!outputs/rehearsal-flow-prompt.txt
+CONTINUE-HERE.md
+previous-preview.jpg

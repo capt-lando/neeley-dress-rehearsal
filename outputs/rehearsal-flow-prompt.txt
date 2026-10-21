@@ -1,0 +1,74 @@
+Created using the built-in image generation tool.
+
+INITIAL GENERATION PROMPT
+
+Use case: infographic-diagram.
+Create a finished premium product architecture infographic for Neeley Dress Rehearsal, a presentation rehearsal tool for TCU Neeley students. This is an explanatory image, not a website screenshot. Wide landscape 16:9, high resolution, exceptionally crisp readable typography. Cool, polished, detailed through layout and illustration, NOT wordy. Deep TCU-like purple #4D1979, white and soft lavender, faint technical dot grid, restrained lilac glow, thin precise arrow connectors, tactile layered paper cards, elegant serif headline and clean sans serif labels. Mostly light background, central coaching prompt saturated purple as the visual hero. No invented university seal, no mascot, no photoreal people. Subtle microphone, audio waveform, browser chip, paper, key, and highlight icons.
+
+Title, exact: "Neeley Dress Rehearsal"
+Subtitle, exact: "From rehearsal to feedback"
+
+DESIGN THE LAYOUT BEFORE RENDERING:
+Six numbered stages run chronologically from left to right across the image, with clear generous spacing and highly legible labels. The last stage is a large output area on the right, allowed to extend down into a roomy lower tier. A narrow upper rail carries optional preparation inputs into stage 04. A lower rail shows local statistics feeding both the prompt and the final report. Thin arrowheads must communicate actual data flow, not random decoration. No tangled or crossing connectors. Make meaningful structure, graphics, highlights, and data-flow detail rather than lengthy paragraphs.
+
+STAGE 01: "Prepare"
+A compact stack of three input cards, exact labels "Full script", "Talking points", "Name", with small shared "Optional" label. Full script and talking points follow a visible upper connector directly into stage04, not into the speech model. Name follows that same context route. Tiny useful labels near the two documents: "Context" under script, "Checklist" under talking points.
+
+STAGE 02: "Record"
+An elegant microphone and waveform visual. Exact short labels "Choose mic", "Record · Pause · Stop". A small secondary input pill "Or upload audio" joins the SAME audio route. Audio arrow goes ONLY to stage03. A tiny clock label "Duration" branches to stage04.
+Small caption under this stage: "Record in a place with no background noise."
+
+STAGE 03: "Transcribe locally"
+Browser-with-chip icon processing waveform into document lines, short label "English speech model". A small download cloud above labeled "Hugging Face" sends a DOWNWARD arrow labeled "Model download" into the local model. This is downloading public model weights, NOT uploading audio; do NOT draw any audio arrow to Hugging Face.
+Within or just below this stage show "Replay → transcript", then a small pencil icon "Review & correct". The EDITABLE FULL TRANSCRIPT then flows to stage04.
+Below this stage a small card "Local word stats", with only "Words · fillers · repetitions · pace". It derives from transcript and duration and sends one line upward to prompt and another lower bypass line toward final "Word stats" output. The AI does not invent counts.
+
+STAGE 04: "Build the coaching prompt"
+This is the largest, visually dominant purple card, like a beautiful glowing layered document. Title inside card exact: "THE COACHING PROMPT". Show clearly converging inputs as a tidy stack, exact short lines:
+"Full transcript"
+"Script + talking points"
+"Name + duration"
+"Measured word stats"
+Two tiny focus labels at bottom: "Speech quality" and "Target coverage", visually separate to indicate that deviating from the script is not automatically a flaw.
+The outbound arrow to05 is clearly labeled "Analyze · text only". Do not show the API key entering this prompt.
+
+STAGE 05: "AI coach"
+Cloud/processor card containing exact provider text on three tidy lines: "ChatGPT", "Claude", "Gemini"; small label "Choose one".
+A key icon in a separate pill ABOVE the provider card reads "Your one API key". A distinct small arrow points directly from this key pill to the provider card, bypassing prompt/audio.
+A return arrow from provider output runs through a small filter/checkmark node reading "Check quotes + calculate rating" then into06. That verification happens in browser, not in the cloud. Only stage05 is labeled "AI provider"; add small "On your device" captions under the local areas.
+
+STAGE 06: "Review"
+Output family with a detailed mini document showing 5 carefully colored highlight strokes (purple, green, blue, amber, rose) labeled "Annotated transcript".
+Beside/below it a polished three-part sheet, title "Breakdown sheet", with exactly these numbered rows:
+"1  Word stats"
+"2  Blunders + coverage"
+"3  Thesis + speech rating"
+Small visual bars and a subtle rating dial may illustrate the report without an invented numerical score.
+Footer aligned across the composition:
+"Audio stays on your device. Only coaching text goes to AI."
+Then 3 small refined badges: "No speech key" · "One coaching key" · "No app backend"
+A very small but readable note at bottom: "Without an AI key: local stats and checks only."
+
+Accuracy requirements: script and talking points are optional and separately routed directly to coaching; local ASR uses open model files without any Hugging Face token; audio is never sent to the AI provider; the one key authenticates the chosen coaching provider, not the prompt; AI feedback is checked and combined with deterministic local word statistics; annotations and ratings need the coaching API. Don't imply a score comes from speech recognition. Use only the specified brief words, no long explanatory paragraphs, no additional slogans. Ensure arrows and labels remain unambiguous and all English text is spelled correctly.
+
+REFINEMENT PROMPT
+
+Refine this existing Neeley Dress Rehearsal infographic. Preserve the purple/white style, serif title, six numbered stages, all the beautiful individual input symbols, microphone, local speech browser illustration, dominant purple coaching prompt, provider card, and report graphics. Keep the same wide landscape format and legibility. This is a targeted data-flow cleanup, not a redesign.
+
+1. REMOVE the redundant upper "Optional preparation (goes to prompt)" row of repeated script/talking-points/name tiles. Those inputs already exist inside stage01. Use the resulting open upper space for neat overhead connector paths: visible arrows must originate at the actual Full script, Talking points, and Name cards INSIDE stage01 and end at the top of stage04's coaching prompt. A short label on that route can read "Optional context + checklist". Do not duplicate input tiles.
+2. REMOVE the short horizontal arrow between stage01 Prepare and stage02 Record. Plan inputs are routed straight to the prompt using the overhead connectors. Keep Record -> Transcribe -> Prompt -> AI data path clear.
+3. The Duration chip should connect by a thin overhead route to stage04's "Name + duration" input, not point down into the English model. Audio from the microphone continues to the local transcription model normally.
+4. REMOVE the direct arrow from the AI provider card to the annotated transcript. The provider output must flow downward through the existing local "Check quotes + calculate rating" node first, then that checked output forks into TWO arrows: one to Annotated transcript and one to Breakdown sheet. Make those two arrows unmistakable. The Local word stats lower bypass arrow continues separately into the word-stats area of the Breakdown sheet.
+5. REMOVE the extra upper-right "PRACTICE → REFINE → PRESENT" slogan pill. Leave the delicate waveform motif.
+6. Maintain exact footer privacy text and badges. Keep "Record in a place with no background noise." readable.
+
+All other approved labels and composition remain. Ensure connectors do not intersect text, tiny labels don't become blurry, and no new text or invented data is added.
+
+FINAL CONNECTOR CORRECTION
+
+Make a precise connector-only correction to this infographic. Keep every text label, all six stages, layout, typography, colors, documents, icons and footer exactly as they are. Do not add or move objects. Correct only these purple connector lines:
+- Hugging Face must have EXACTLY ONE outgoing arrow: the short downward 'Model download' arrow into the laptop. ERASE the erroneous line leaving the RIGHT SIDE of the Hugging Face tile and running toward the transcript. It must not exist.
+- Duration must have EXACTLY ONE outgoing route: the existing overhead route into the coaching prompt. ERASE the short line going right and then DOWN from Duration into the laptop.
+- The editable transcript must travel from the RIGHT EDGE OF THE LAPTOP to the LEFT OUTER EDGE of the large purple coaching prompt, stopping at its boundary. Do NOT aim this arrow at the 'Name + duration' row. Make it a clear horizontal arrow near the 'Editable full transcript' label, entering the large container.
+- The local word stats upward branch may join the same left-edge input junction of the coaching prompt; it must not point toward the laptop.
+The resulting truth is: microphone/audio -> laptop -> transcript -> prompt; public Hugging Face MODEL DOWNLOAD -> laptop only; duration -> prompt only. All other arrows, including AI -> Check quotes -> both outputs, remain unchanged. Absolutely no added connections or text. This is a technical factual correction, preserve the rest.
