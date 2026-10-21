@@ -51,6 +51,8 @@ function syncAnalysisControls() {
   const blocked = state.busy || state.rubricLoading || state.startingRecording || state.recording || state.requestingMic || Boolean(state.liveTake);
   $('analyze-button').disabled = blocked;
   $('reanalyze-button').disabled = blocked;
+  $('coaching-action').disabled = blocked;
+  $('coaching-settings').disabled = blocked;
   $('analyze-button').textContent = state.busy ? 'Working on your feedback…' : state.rubricLoading ? 'Reading rubric…' : state.liveTake ? 'Finishing your transcript…' : 'Analyze rehearsal ↗';
 }
 function errorMessage(error) { return error?.message || 'Something went wrong. Please try again.'; }
@@ -148,6 +150,7 @@ function updateConfig(config) {
   const selected = providerInfo(state.config.analysisProvider);
   $('privacy-copy').textContent = `Speech is transcribed in your browser. Analyze sends your transcript and preparation text, including rubric text, to ${selected.label}. Completed recordings save only in this browser; audio and rubric files never leave this device. API keys, scripts, and transcripts stay in this tab’s memory. Clearing site data or using private browsing can remove saved recordings.`;
   renderProviderSettings();
+  if (state.report) renderCoachingState(state.report);
   if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
 }
 function resetTranscriptForModelChange() {
@@ -1138,7 +1141,7 @@ async function runAnalysis({ corrected = false } = {}) {
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration || signal.aborted) throw supersededAudioError();
     if (state.rubricLoading) throw new Error('The rubric is still loading. When it is ready, choose Analyze again to include its text.');
     state.duration = state.audioDuration || state.duration;
-    const input = analysisInput(text, state.config.analysisConfigured);
+    const input = analysisInput(text, true);
     setStatus('Your transcript is ready. Reviewing word habits, speaking points, and the bigger picture…', 'busy');
     const report = await api('/api/analyze-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal });
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration) return;
@@ -1175,6 +1178,21 @@ function observation(title, label, type, detail, evidence) {
   if (quotes) box.append(addText('p', `“${quotes}”`, 'evidence'));
   return box;
 }
+function renderCoachingState(report) {
+  const complete = report.analysis?.method === 'ai';
+  const ready = state.config.analysisConfigured;
+  const failed = ['failed', 'invalid_response'].includes(report.meta?.coachingStatus);
+  $('coaching-notice').hidden = complete;
+  $('speech-analysis-content').hidden = !complete;
+  $('analysis-disclaimer').hidden = !complete;
+  $('coaching-title').textContent = failed ? 'AI coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Connect an AI coach.';
+  $('coaching-description').textContent = failed
+    ? 'Your transcript and word stats are ready. Check the connection message above, then retry for a speech rating and color annotations.'
+    : ready ? 'Your key is in this tab. Analyze this transcript for a speech rating and color annotations.'
+      : 'Transcription and word stats work without a key. A speech rating and color annotations require your OpenAI, Claude, or Gemini API key. Keys clear when you refresh or close this tab.';
+  $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Connect AI coach';
+  $('coaching-settings').hidden = !ready;
+}
 function renderReport() {
   const report = state.report;
   const words = report.wordStats || {};
@@ -1188,7 +1206,7 @@ function renderReport() {
   $('report-rubric-badge').hidden = !report.input?.instructorRubric?.trim();
   $('report-transitions-badge').hidden = !report.input?.plannedTransitions?.trim();
   const warnings = [...(Array.isArray(report.warnings) ? report.warnings.map(textItem) : [])];
-  if (analysis.method !== 'ai') warnings.unshift('Word counts and text checks are available. The AI speech rating is unavailable for this run.');
+  if (analysis.method !== 'ai') warnings.unshift('Your transcript and word stats are ready. AI coaching is still needed for a speech rating and color annotations.');
   $('report-warnings').replaceChildren(...warnings.map((warning) => addText('p', warning)));
   $('report-warnings').hidden = !warnings.length;
   const pace = Number.isFinite(words.wordsPerMinute) ? Math.round(words.wordsPerMinute) : '—';
@@ -1254,6 +1272,7 @@ function renderReport() {
     return row;
   }));
   $('analysis-disclaimer').textContent = `${analysis.disclaimer || 'Ratings are coaching feedback, not an academic grade.'} Audio-only review does not assess slides, eye contact, posture, or audience response.`;
+  renderCoachingState(report);
   if (!state.transcriptText) cacheTranscript(report.transcript || '');
   renderAnnotatedTranscript(report);
   markPromptStale();
@@ -1305,11 +1324,16 @@ function renderAnnotatedTranscript(report) {
     notes.append(note);
   }
   const count = segments.filter(segment => segment.annotation).length;
+  $('annotation-title').textContent = count ? 'Your transcript, annotated.' : 'Your transcript.';
+  $('annotation-legend').hidden = !count;
+  container.setAttribute('aria-label', count ? 'Original transcript with AI annotations' : 'Original transcript');
   $('annotation-status').textContent = state.transcriptText && state.transcriptText !== text
     ? 'Showing the analyzed version. Your edits appear in playback; update feedback to annotate your corrected transcript.'
     : count ? `${count} API-generated annotations on your original transcript. Review these coaching suggestions in context.`
       : report.analysis?.method === 'ai' ? 'No grounded annotations were returned for this analysis. Your complete transcript appears below.'
-        : 'Connect an AI coach and analyze this rehearsal for color annotations. Your complete transcript appears below.';
+        : ['failed', 'invalid_response'].includes(report.meta?.coachingStatus)
+          ? 'AI coaching did not finish, so no color annotations are available. Your complete transcript appears below.'
+          : 'Your complete transcript appears below. Connect an AI coach above, then analyze it for color annotations.';
   $('download-transcript').disabled = !text.trim();
 }
 function escapeHtml(value) {
@@ -1347,6 +1371,8 @@ function downloadReport() {
 }
 
 $('settings-open').addEventListener('click', openSettings);
+$('coaching-action').addEventListener('click', () => state.config.analysisConfigured ? runAnalysis({ corrected: true }) : openSettings());
+$('coaching-settings').addEventListener('click', openSettings);
 $('settings-close').addEventListener('click', closeSettings);
 $('settings-dialog').addEventListener('close', () => { clearKeyFields(); document.body.classList.remove('no-scroll'); });
 $('settings-dialog').addEventListener('click', (event) => { if (event.target === $('settings-dialog')) { const rect = event.target.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeSettings(); } });

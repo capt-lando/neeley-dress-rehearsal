@@ -177,7 +177,7 @@ globalThis.audioTest = {
   state, updateConfig, saveSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession,
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript,
-  runAnalysis, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
+  runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
   analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, setBusy,
   autosaveRecording, refreshSavedRecordings, openSavedRecording, deleteSavedRecording,
   downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving
@@ -1489,4 +1489,61 @@ test('report context badges describe the analyzed snapshot rather than subsequen
   assert.equal(h.get('report-rubric-badge').hidden, false);
   assert.equal(h.get('report-transitions-badge').hidden, false);
   assert.equal(h.analysisInput('Next rehearsal.').instructorRubric, '');
+});
+
+test('missing coaching key shows setup and adding it analyzes existing corrected text without retranscription', async () => {
+  const requests = [];
+  let connected = false;
+  const h = harness(async (path, options) => {
+    if (path === '/api/config') return { analysisConfigured: false };
+    requests.push(path);
+    if (path === '/api/transcribe') return { text: 'Practice improves clarity.', durationSeconds: 4 };
+    if (path === '/api/settings') { connected = true; return { analysisConfigured: true }; }
+    assert.equal(path, '/api/analyze-text');
+    const input = JSON.parse(options.body);
+    assert.equal(input.useAI, true, 'analysis requests coaching even when the service must report a missing key');
+    return { transcript: input.text, meta: { coachingStatus: connected ? 'complete' : 'not_connected' },
+      analysis: connected ? { method: 'ai', overallRating: 82, annotations: [annotation(input.text, input.text)] } : { method: 'rules', overallLabel: 'Provisional observations' } };
+  }, { startup: true });
+  await nextTurn();
+  h.setAudio(new Blob(['audio']), 4, 'Existing take');
+  await h.runAnalysis();
+  assert.equal(h.get('coaching-notice').hidden, false);
+  assert.equal(h.get('speech-analysis-content').hidden, true, 'do not present an empty rating or heuristic thesis as AI coaching');
+  assert.equal(h.get('coaching-action').textContent, 'Connect AI coach');
+  assert.equal(h.get('annotation-title').textContent, 'Your transcript.');
+  assert.equal(h.get('annotation-legend').hidden, true);
+  const beforeSettings = requests.length;
+  await h.get('coaching-action').click();
+  assert.equal(h.get('settings-dialog').open, true);
+  assert.equal(requests.length, beforeSettings, 'opening setup must not send transcript data');
+  h.get('analysis-api-key').value = 'fake-test-key';
+  await h.saveSettings({ preventDefault() {} });
+  assert.equal(h.get('coaching-action').textContent, 'Analyze with AI');
+  assert.equal(requests.filter(path => path === '/api/analyze-text').length, 1, 'saving a key does not start a paid request');
+  h.get('transcript').value = 'Corrected words about rehearsal.';
+  await h.get('coaching-action').click();
+  assert.equal(requests.filter(path => path === '/api/transcribe').length, 1);
+  assert.equal(h.state.report.transcript, 'Corrected words about rehearsal.');
+  assert.equal(h.get('coaching-notice').hidden, true);
+  assert.equal(h.get('speech-analysis-content').hidden, false);
+  assert.equal(elementText(h.get('overall-rating')), '82 / 100');
+  assert.equal(h.get('annotation-legend').hidden, false);
+  assert.equal(h.get('annotation-title').textContent, 'Your transcript, annotated.');
+});
+
+test('failed coaching keeps the provider reason visible and offers retry instead of pretending the key is absent', () => {
+  const h = harness();
+  h.state.config.analysisConfigured = true;
+  for (const coachingStatus of ['failed', 'invalid_response']) {
+    h.state.report = { transcript: 'Practice improves clarity.', analysis: { method: 'rules' },
+      warnings: ['Provider quota exhausted.'], meta: { coachingStatus } };
+    h.renderReport();
+    assert.equal(h.get('coaching-title').textContent, 'AI coaching could not finish.');
+    assert.equal(h.get('coaching-action').textContent, 'Retry AI coaching');
+    assert.equal(h.get('coaching-settings').hidden, false);
+    assert.match(elementText(h.get('report-warnings')), /Provider quota exhausted/);
+    assert.equal(h.get('speech-analysis-content').hidden, true);
+    assert.match(h.get('annotation-status').textContent, /did not finish/);
+  }
 });

@@ -166,6 +166,104 @@ test('billing, limits, missing models and service failures keep secrets out of e
   })), /workspace ID/);
 });
 
+test('OpenAI 429 codes distinguish temporary rate limits from credits and account limits without retrying', async () => {
+  const messages = new Set();
+  for (const [code, expected] of [
+    ['credit_balance_exhausted', /credit balance is exhausted.*Add credits/],
+    ['organization_spend_limit_exceeded', /organization reached its API spending limit/],
+    ['project_spend_limit_exceeded', /project reached its API spending limit/],
+    ['organization_usage_limit_exceeded', /organization reached its API usage limit/],
+    ['insufficient_quota', /insufficient API quota.*Check API credits/],
+    ['rate_limit_exceeded', /temporarily rate-limited.*Wait briefly/],
+    ['slow_down', /asked this request to slow down.*Wait briefly/],
+  ]) {
+    let calls = 0;
+    await assert.rejects(requestCoaching(options('openai', {
+      fetchImpl: async () => {
+        calls++;
+        return mockResponse({ error: { code, message: `${key} ${prompt}` } }, 429);
+      },
+    })), error => {
+      assert.equal(error.status, 429);
+      assert.match(error.message, expected);
+      assert.ok(!error.message.includes(key) && !error.message.includes(prompt));
+      messages.add(error.message);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+  assert.equal(messages.size, 7);
+});
+
+test('specific OpenAI limit codes take precedence over broader error types', async () => {
+  for (const [code, type, expected] of [
+    ['credit_balance_exhausted', 'rate_limit_error', /credit balance is exhausted/],
+    ['project_spend_limit_exceeded', 'insufficient_quota', /project reached its API spending limit/],
+    ['rate_limit_exceeded', 'insufficient_quota', /temporarily rate-limited/],
+    [null, 'rate_limit_error', /temporarily rate-limited/],
+    ['unknown_code', 'insufficient_quota', /insufficient API quota/],
+  ]) {
+    await assert.rejects(requestCoaching(options('openai', {
+      fetchImpl: async () => mockResponse({ error: { code, type } }, 429),
+    })), expected);
+  }
+});
+
+test('unknown, malformed, and malicious limit fields never leak or claim exhausted credit', async () => {
+  for (const body of [
+    { error: { code: key, type: prompt, message: `Credit exhausted: ${key}` } },
+    { error: { code: '__proto__', type: 'toString' } },
+    { error: { code: { toString: 'credit_balance_exhausted' }, type: ['insufficient_quota'] } },
+    { error: null }, null, [],
+  ]) {
+    await assert.rejects(requestCoaching(options('openai', {
+      fetchImpl: async () => mockResponse(body, 429),
+    })), error => {
+      assert.equal(error.status, 429);
+      assert.match(error.message, /may be a temporary rate limit or an account quota or billing limit/);
+      assert.doesNotMatch(error.message, /exhausted|insufficient/);
+      assert.ok(!error.message.includes(key) && !error.message.includes(prompt));
+      return true;
+    });
+  }
+  await assert.rejects(requestCoaching(options('openai', {
+    fetchImpl: async () => new Response(`<html>${key}</html>`, { status: 429 }),
+  })), error => error.status === 429 && /may be a temporary rate limit/.test(error.message) && !error.message.includes(key));
+  for (const provider of ['anthropic', 'google', 'huggingface']) {
+    await assert.rejects(requestCoaching(options(provider, {
+      fetchImpl: async () => mockResponse({ error: { code: 'credit_balance_exhausted' } }, 429),
+    })), /may be a temporary rate limit/);
+  }
+});
+
+test('aborting while reading OpenAI limit details remains cancellation, not a fallback limit', async () => {
+  const controller = new AbortController();
+  let bodyStarted;
+  const reading = new Promise(resolve => { bodyStarted = resolve; });
+  const pending = requestCoaching(options('openai', {
+    signal: controller.signal,
+    fetchImpl: async (_url, init) => ({ ok: false, status: 429,
+      json: () => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(new DOMException(key, 'AbortError')), { once: true });
+        bodyStarted();
+      }),
+    }),
+  }));
+  await reading;
+  controller.abort();
+  await assert.rejects(pending, error => error.name === 'AbortError' && !error.message.includes(key));
+});
+
+test('timeouts while reading OpenAI limit details remain sanitized timeout failures', async () => {
+  for (const name of ['TimeoutError', 'AbortError']) {
+    await assert.rejects(requestCoaching(options('openai', {
+      fetchImpl: async () => ({ ok: false, status: 429,
+        json: async () => { throw Object.assign(new Error(key), { name }); },
+      }),
+    })), error => error.status === 504 && /took too long/.test(error.message) && !error.message.includes(key));
+  }
+});
+
 test('network and timeouts are sanitized even if the underlying exception contains credentials', async () => {
   for (const [name, expected] of [['TypeError', 502], ['TimeoutError', 504], ['AbortError', 504]]) {
     await assert.rejects(requestCoaching(options('google', {

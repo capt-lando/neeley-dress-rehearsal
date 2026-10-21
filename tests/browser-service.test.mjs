@@ -96,6 +96,7 @@ test('prompt preview and local analysis preserve both complete inputs and never 
   assert.equal(data.targetMode, 'both');
   const report = await service.request('/api/analyze-text', post(input));
   assert.equal(report.analysis.method, 'heuristic');
+  assert.equal(report.meta.coachingStatus, 'disabled');
   assert.equal(report.warnings.length, 0);
   assert.equal(report.blunders.targetCoverage.length, 2);
   assert.equal(report.meta.targetTalkingPoints, input.targetTalkingPoints);
@@ -125,22 +126,52 @@ test('each selected coaching service receives its own key and returns grounded f
     assert.equal(seen.options.headers[provider === 'google' ? 'x-goog-api-key' : 'Authorization'], provider === 'google' ? `${provider}-privateKey` : `Bearer ${provider}-privateKey`);
     if (provider === 'anthropic') assert.equal(seen.options.headers['anthropic-dangerous-direct-browser-access'], 'true');
     assert.equal(report.analysis.method, 'ai');
+    assert.equal(report.meta.coachingStatus, 'complete');
     assert.equal(report.meta.analysisProvider, provider);
     assert.ok(!JSON.stringify(report).includes('privateKey'));
   }
 });
 
 test('provider failures and unusable feedback clearly fall back without fabricated AI ratings', async () => {
-  for (const fetchImpl of [async () => new Response('private-response-body', { status: 401 }), async () => response(providerResponse('openai', { invented: true }))]) {
+  for (const [coachingStatus, fetchImpl, warning] of [
+    ['failed', async () => new Response('private-response-body', { status: 401 }), /could not authorize/],
+    ['failed', async () => new Response('private-response-body', { status: 429 }), /API usage limit/],
+    ['failed', async () => { throw new Error('Network diagnostics with sk-private'); }, /could not be reached/],
+    ['failed', async () => response(providerResponse('openai', 'invalid-report')), /invalid coaching report/],
+    ['invalid_response', async () => response(providerResponse('openai', { invented: true })), /without usable transcript evidence/],
+  ]) {
     const service = create({ fetchImpl });
     await service.request('/api/settings', post({ analysisApiKey: 'sk-private' }));
     const report = await service.request('/api/analyze-text', post({ text: 'We should practice.' }));
     assert.equal(report.analysis.method, 'heuristic');
     assert.equal(report.analysis.overallRating, null);
+    assert.equal(report.meta.coachingStatus, coachingStatus);
+    assert.match(report.warnings[0], warning);
     assert.match(report.warnings[0], /local transcript checks/);
     assert.ok(!JSON.stringify(report).includes('sk-private'));
     assert.ok(!JSON.stringify(report).includes('private-response-body'));
   }
+});
+
+test('a missing selected-provider key and an intentionally local report have distinct coaching states', async () => {
+  let calls = 0;
+  const service = create({ fetchImpl: async () => { calls++; throw new Error('Unexpected network request'); } });
+  await service.request('/api/settings', post({ analysisProvider: 'openai', analysisApiKey: 'sk-private' }));
+  await service.request('/api/settings', post({ analysisProvider: 'google' }));
+  const notConnected = await service.request('/api/analyze-text', post({ text: 'We should expand tutoring.' }));
+  assert.equal(notConnected.meta.coachingStatus, 'not_connected');
+  assert.equal(notConnected.analysis.method, 'heuristic');
+  assert.equal(notConnected.analysis.overallRating, null);
+  assert.equal(notConnected.meta.analysisProvider, 'google');
+  assert.match(notConnected.warnings[0], /Google \(Gemini\) API key/);
+
+  await service.request('/api/settings', post({ analysisProvider: 'openai' }));
+  const local = await service.request('/api/analyze-text', post({ text: 'We should expand tutoring.', useAI: false }));
+  assert.equal(local.meta.coachingStatus, 'disabled');
+  assert.equal(local.analysis.method, 'heuristic');
+  assert.equal(local.analysis.overallRating, null);
+  assert.deepEqual(local.warnings, []);
+  assert.equal(calls, 0);
 });
 
 test('aborting coaching propagates cancellation instead of returning a fallback report', async () => {

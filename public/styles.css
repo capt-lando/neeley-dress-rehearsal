@@ -173,3 +173,8 @@
 .saved-recording-actions>.text-button{font-size:9px;font-weight:500}
 .saved-recording-actions>.saved-recording-delete{color:#985b6f}
 @media(max-width:800px){.saved-recording-row{align-items:flex-start;flex-direction:column;gap:6px}.saved-recording-actions{gap:17px}.preview-actions{gap:12px}}
+.coaching-notice{background:#f0eaf5;border:1px solid #e5daed;border-radius:9px;padding:22px}
+.coaching-notice h4{font-family:var(--serif);font-size:25px;font-weight:400;color:var(--purple);margin:0 0 10px}
+.coaching-notice p{color:#796487;font-size:12px;line-height:1.8;margin:0 0 18px;max-width:650px}
+.coaching-actions{display:flex;align-items:center;flex-wrap:wrap;gap:18px}
+@media print{.coaching-actions{display:none}}
