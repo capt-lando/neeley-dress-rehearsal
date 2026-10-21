@@ -1511,7 +1511,7 @@ test('missing coaching key shows setup and adding it analyzes existing corrected
   assert.equal(h.get('coaching-notice').hidden, false);
   assert.equal(h.get('speech-analysis-content').hidden, true, 'do not present an empty rating or heuristic thesis as AI coaching');
   assert.equal(h.get('coaching-action').textContent, 'Connect AI coach');
-  assert.equal(h.get('annotation-title').textContent, 'Your transcript.');
+  assert.equal(h.get('annotation-title').textContent, 'Full transcript');
   assert.equal(h.get('annotation-legend').hidden, true);
   const beforeSettings = requests.length;
   await h.get('coaching-action').click();
@@ -1529,7 +1529,7 @@ test('missing coaching key shows setup and adding it analyzes existing corrected
   assert.equal(h.get('speech-analysis-content').hidden, false);
   assert.equal(elementText(h.get('overall-rating')), '82 / 100');
   assert.equal(h.get('annotation-legend').hidden, false);
-  assert.equal(h.get('annotation-title').textContent, 'Your transcript, annotated.');
+  assert.equal(h.get('annotation-title').textContent, 'Full annotated transcript');
 });
 
 test('failed coaching keeps the provider reason visible and offers retry instead of pretending the key is absent', () => {
