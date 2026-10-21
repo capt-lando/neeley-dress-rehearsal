@@ -2,7 +2,32 @@
 
 A minimal presentation practice app for Neeley students. Record an English rehearsal, compare it with a script or speaking points, and review word statistics, moments to improve, and thesis/rhetoric coaching.
 
-**Speech recognition needs no Hugging Face account or token.** The public speech model downloads and runs in the browser. Audio stays on the device. A student's own OpenAI, Claude, or Gemini API key is needed only for AI coaching.
+**Speech recognition needs no Hugging Face account or token.** The public speech model downloads and runs on the device. The standalone website uses the student's OpenAI, Claude, or Gemini API key for coaching. The Codex plugin uses the current conversation for coaching instead, with no separate API key.
+
+## Codex plugin and custom panel
+
+The plugin adds a conversation panel with the same rehearsal interface. **Analyze** stages the complete transcript and preparation inputs, sends a request to the current Codex chat, and waits for Codex to submit the coaching result. The existing validator checks quoted evidence and computes the rating; the panel then renders the report and color annotations. Coaching uses the chat's available model and usage limits, not an API subscription supplied by the student.
+
+To share the plugin, send the single ZIP attached to a [GitHub plugin release](https://github.com/capt-lando/neeley-dress-rehearsal/releases). Recipients extract it and follow `INSTALL.txt`. They need Codex and Node, but do not need pnpm or the source repository. The ZIP is an installable desktop plugin, not a browser link that runs the panel immediately.
+
+Build the installable local package with Node 22.13 or newer and pnpm:
+
+```text
+pnpm install --frozen-lockfile
+pnpm build:plugin
+codex plugin marketplace add ./build/codex-plugin
+codex plugin add neeley-dress-rehearsal@neeley-local
+```
+
+Reload Codex after installing if the new plugin does not appear, then ask **“Open Neeley Dress Rehearsal.”** Node must be available to the Codex process. The self-contained package is under `build/codex-plugin`; it includes its local marketplace, bundled server, panel, skill, and coaching policy. No dependency installation is needed inside the installed copy. Build output is excluded from source control; GitHub Actions builds it as a downloadable artifact alongside the website.
+
+The local tool connection uses standard input/output, opens no HTTP listener, and makes no paid model requests. Pending inputs and reports are held in bounded process memory and expire. When you choose Analyze, text is shared with the Codex conversation and follows that account's chat retention settings. It is **not** accurate to claim that no data is stored by the host. Original audio stays on the device; browser recording storage is separate from the website and may be unavailable in an embedded panel. Download important recordings.
+
+Microphone access, browser storage, Web Workers and WebAssembly depend on the host's sandbox. The plugin requests microphone permission and handles denial, but a manifest cannot force the host to grant it. The panel keeps a transcript editor available when recording or local recognition is blocked. Speech models download from Hugging Face and the plugin's pinned speech/PDF runtimes download from jsDelivr. The regular website remains available for recording in a full browser.
+
+The native Codex panel was tested with a synthetic transcript: Codex returned a grounded rating, talking-point coverage, and five color annotations, which appeared in the panel. Microphone access was denied by the host/device in that session, so native recording and Whisper transcription remain unverified. Panel exports use the host's download feature and report an error if the host does not support it. All 296 automated tests and the bundled plugin protocol check pass.
+
+Plugin source lives in `plugin/`. Its build reuses `public/` and `lib/`; changes to the coaching wrapper or report logic apply to both editions. Plugin interfaces follow the official [MCP UI guide](https://developers.openai.com/plugins/build/chatgpt-ui), [conversation panel extensions](https://developers.openai.com/plugins/build/extensions), and [desktop plugin packaging](https://developers.openai.com/plugins/deploy/desktop-only). This is a local plugin package, not a public plugin-directory listing.
 
 ## Start locally
 

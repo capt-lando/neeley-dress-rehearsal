@@ -28,6 +28,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm build:plugin
+      - run: pnpm check:plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neeley-dress-rehearsal-codex-plugin
+          path: build/codex-plugin
+          include-hidden-files: true
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -139,16 +139,19 @@ async function importRubric(file) {
 function updateConfig(config) {
   const previousSpeechModel = state.config.transcriptionModel;
   state.config = { ...state.config, ...config };
-  if (state.config.transcriptionModel !== previousSpeechModel) resetTranscriptForModelChange();
+  const manualPanelTranscript = state.config.coachingViaHost && !state.audioBlob && !state.recording && !state.startingRecording;
+  if (state.config.transcriptionModel !== previousSpeechModel && !manualPanelTranscript) resetTranscriptForModelChange();
   state.settingsProvider = state.config.analysisProvider || 'openai';
   const ready = state.config.analysisConfigured;
-  $('connection-label').textContent = ready ? 'AI key in this tab' : 'Connect API';
-  $('settings-open').setAttribute('aria-label', `Connection settings: ${ready ? 'AI key in this tab' : 'connect an AI provider'}`);
+  $('connection-label').textContent = state.config.coachingViaHost ? 'Codex coaching' : ready ? 'AI key in this tab' : 'Connect API';
+  $('settings-open').setAttribute('aria-label', state.config.coachingViaHost ? 'Rehearsal settings: coaching in this Codex conversation' : `Connection settings: ${ready ? 'AI key in this tab' : 'connect an AI provider'}`);
   $('connection-dot').classList.toggle('connected', ready);
   $('transcription-model').value = state.config.transcriptionModel || '';
   document.querySelector('.timer-limit').textContent = `/ ${formatTime(state.config.maxDurationSeconds)}`;
   const selected = providerInfo(state.config.analysisProvider);
-  $('privacy-copy').textContent = `Speech is transcribed in your browser. Analyze sends your transcript and preparation text, including rubric text, to ${selected.label}. Completed recordings save only in this browser; audio and rubric files never leave this device. API keys, scripts, and transcripts stay in this tab’s memory. Clearing site data or using private browsing can remove saved recordings.`;
+  $('privacy-copy').textContent = state.config.coachingViaHost
+    ? 'Speech is transcribed on this device. Analyze sends your transcript, preparation text, and extracted rubric text through this plugin to the current Codex conversation. Raw audio and full rubric files are never sent for coaching. Your conversation’s history and data settings apply. Recordings save in this browser when storage is available. Download sends the chosen file to the host’s download handler; clearing site data or private browsing can remove browser copies.'
+    : `Speech is transcribed in your browser. Analyze sends your transcript and preparation text, including rubric text, to ${selected.label}. Completed recordings save only in this browser; audio and rubric files never leave this device. API keys, scripts, and transcripts stay in this tab’s memory. Clearing site data or using private browsing can remove saved recordings.`;
   renderProviderSettings();
   if (state.report) renderCoachingState(state.report);
   if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
@@ -175,6 +178,7 @@ function resetTranscriptForModelChange() {
   else syncCancelControls();
 }
 function providerInfo(id = state.settingsProvider) {
+  if (id === 'codex' || state.config.coachingViaHost) return { id: 'codex', label: 'Codex', configured: true, model: 'Codex' };
   const provider = (Array.isArray(state.config.providers) ? state.config.providers : []).find((item) => item.id === id) || {};
   return { ...(PROVIDER_GUIDES[id] || PROVIDER_GUIDES.openai), ...provider };
 }
@@ -185,6 +189,7 @@ function resetKeyVisibility(inputId, toggleId) {
   $(toggleId).setAttribute('aria-label', 'Show analysis API key');
 }
 function renderProviderSettings() {
+  if (state.config.coachingViaHost) return;
   const provider = providerInfo();
   document.querySelectorAll('input[name="analysis-provider"]').forEach((input) => { input.checked = input.value === state.settingsProvider; });
   $('provider-instructions').textContent = provider.instructions || PROVIDER_GUIDES[state.settingsProvider]?.instructions || 'Sign in, create an API key, then copy it.';
@@ -216,18 +221,18 @@ async function saveSettings(event) {
   event.preventDefault();
   const analysisApiKey = $('analysis-api-key').value.trim();
   const analysisModel = $('analysis-model').value.trim();
-  const body = {
-    analysisProvider: state.settingsProvider,
-    transcriptionModel: $('transcription-model').value.trim(),
-  };
-  if (analysisApiKey) body.analysisApiKey = analysisApiKey;
-  if (analysisModel) body.analysisModel = analysisModel;
+  const body = { transcriptionModel: $('transcription-model').value.trim() };
+  if (!state.config.coachingViaHost) {
+    body.analysisProvider = state.settingsProvider;
+    if (analysisApiKey) body.analysisApiKey = analysisApiKey;
+    if (analysisModel) body.analysisModel = analysisModel;
+  }
   $('save-settings').disabled = true;
   $('settings-status').textContent = 'Applying your settings to this tab…';
   try {
     updateConfig(await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
     closeSettings();
-    setStatus(state.config.analysisConfigured ? 'Settings applied to this tab. Replay transcribes on your device; Analyze adds AI coaching.' : 'Speech recognition is ready on your device. Connect an AI provider when you want coaching and a speech rating.');
+    setStatus(state.config.coachingViaHost ? 'Speech settings applied. Analyze requests coaching in this Codex conversation.' : state.config.analysisConfigured ? 'Settings applied to this tab. Replay transcribes on your device; Analyze adds AI coaching.' : 'Speech recognition is ready on your device. Connect an AI provider when you want coaching and a speech rating.');
   } catch (error) { $('settings-status').textContent = errorMessage(error); }
   finally { $('save-settings').disabled = false; }
 }
@@ -323,7 +328,12 @@ function cleanupMic() {
 async function enableMic(deviceId = $('audio-input').value) {
   if (state.requestingMic) return false;
   if (!navigator.mediaDevices?.getUserMedia) {
-    setStatus('Microphone recording needs HTTPS or localhost. Open the published page in a current Chrome, Edge, or Firefox browser.', 'error');
+    setStatus(state.config.coachingViaHost ? 'This host does not provide microphone access. Upload a recording or paste a transcript for coaching.' : 'Microphone recording needs HTTPS or localhost. Open the published page in a current Chrome, Edge, or Firefox browser.', 'error');
+    return false;
+  }
+  const permissionPolicy = document.permissionsPolicy || document.featurePolicy;
+  if (state.config.coachingViaHost && permissionPolicy?.allowsFeature?.('microphone') === false) {
+    setStatus('This host has blocked microphone access. Upload a recording or paste a transcript for coaching.', 'error');
     return false;
   }
   state.requestingMic = true;
@@ -390,7 +400,8 @@ async function enableMic(deviceId = $('audio-input').value) {
       OverconstrainedError: 'That microphone is no longer available. Choose System default or another input, then enable it.',
       SecurityError: 'Your browser blocked microphone access. Open the HTTPS page and allow microphone permission.',
     };
-    setStatus(messages[error.name] || errorMessage(error), 'error');
+    const hostPermissionError = state.config.coachingViaHost && ['NotAllowedError', 'SecurityError'].includes(error.name);
+    setStatus(hostPermissionError ? 'Microphone access was not granted by the host or your device. You can upload a recording or paste a transcript for coaching.' : messages[error.name] || errorMessage(error), 'error');
     $('mic-status').textContent = state.stream ? microphoneReadyText() : 'Microphone unavailable';
     return false;
   } finally {
@@ -815,23 +826,28 @@ async function openSavedRecording(id) {
   } catch (error) { $('saved-recordings-status').textContent = errorMessage(error); }
   finally { state.libraryBusy = false; syncRecordingLibraryControls(); }
 }
-function downloadAudioBlob(blob, caption) {
+async function downloadBlob(blob, name) {
+  if (window.rehearsalDownloads?.download) return window.rehearsalDownloads.download(blob, name);
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  const name = String(caption || 'dress-rehearsal').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').slice(0, 180);
-  link.download = `${name || 'dress-rehearsal'}.wav`;
+  link.download = name;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
-function downloadCurrentAudio() {
-  if (state.audioBlob) downloadAudioBlob(state.audioBlob, state.audioSave?.caption);
+function downloadAudioBlob(blob, caption) {
+  const name = String(caption || 'dress-rehearsal').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').slice(0, 180);
+  return downloadBlob(blob, `${name || 'dress-rehearsal'}.wav`);
+}
+async function downloadCurrentAudio() {
+  try { if (state.audioBlob) await downloadAudioBlob(state.audioBlob, state.audioSave?.caption); }
+  catch (error) { setStatus(errorMessage(error), 'error'); }
 }
 async function downloadSavedRecording(id) {
   try {
     const record = state.unsavedRecordings.get(id) || await recordingStore().get(id);
     if (!record) throw new Error('This recording is no longer saved.');
-    downloadAudioBlob(record.blob, record.caption);
+    await downloadAudioBlob(record.blob, record.caption);
   } catch (error) { $('saved-recordings-status').textContent = errorMessage(error); }
 }
 async function deleteSavedRecording(id) {
@@ -1100,7 +1116,7 @@ async function loadPromptPreview() {
     if (generation !== state.promptGeneration) return '';
     if (typeof result.prompt !== 'string') throw new Error('The prompt preview was unavailable. Please try again.');
     $('coaching-prompt').value = result.prompt;
-    $('prompt-status').textContent = 'Ready. This preview contains your transcript and targets; it contains no API keys.';
+    $('prompt-status').textContent = state.config.coachingViaHost ? 'Ready. This preview contains the coaching policy, your transcript, and your preparation text.' : 'Ready. This preview contains your transcript and targets; it contains no API keys.';
     return result.prompt;
   } catch (error) { $('prompt-status').textContent = errorMessage(error); return ''; }
   finally { $('refresh-prompt').disabled = false; }
@@ -1142,7 +1158,7 @@ async function runAnalysis({ corrected = false } = {}) {
     if (state.rubricLoading) throw new Error('The rubric is still loading. When it is ready, choose Analyze again to include its text.');
     state.duration = state.audioDuration || state.duration;
     const input = analysisInput(text, true);
-    setStatus('Your transcript is ready. Reviewing word habits, speaking points, and the bigger picture…', 'busy');
+    setStatus(state.config.coachingViaHost ? 'Coaching requested in this Codex conversation. Waiting for your annotated report…' : 'Your transcript is ready. Reviewing word habits, speaking points, and the bigger picture…', 'busy');
     const report = await api('/api/analyze-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal });
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration) return;
     state.report = { ...report, transcript: report.transcript || text, input: { targetScript: input.targetScript, targetTalkingPoints: input.targetTalkingPoints, targetMode: input.targetMode, plannedIntroduction: input.plannedIntroduction, plannedTransitions: input.plannedTransitions, instructorRubric: input.instructorRubric, rubricFileName: input.rubricFileName } };
@@ -1186,12 +1202,14 @@ function renderCoachingState(report) {
   $('speech-analysis-content').hidden = !complete;
   $('analysis-disclaimer').hidden = !complete;
   $('coaching-title').textContent = failed ? 'AI coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Connect an AI coach.';
-  $('coaching-description').textContent = failed
+  $('coaching-description').textContent = state.config.coachingViaHost
+    ? 'Your transcript and word stats are ready. Analyze sends your current text to this Codex conversation for a speech rating and color annotations.'
+    : failed
     ? 'Your transcript and word stats are ready. Check the connection message above, then retry for a speech rating and color annotations.'
     : ready ? 'Your key is in this tab. Analyze this transcript for a speech rating and color annotations.'
       : 'Transcription and word stats work without a key. A speech rating and color annotations require your OpenAI, Claude, or Gemini API key. Keys clear when you refresh or close this tab.';
   $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Connect AI coach';
-  $('coaching-settings').hidden = !ready;
+  $('coaching-settings').hidden = !ready || Boolean(state.config.coachingViaHost);
 }
 function renderReport() {
   const report = state.report;
@@ -1329,7 +1347,7 @@ function renderAnnotatedTranscript(report) {
   container.setAttribute('aria-label', count ? 'Original transcript with AI annotations' : 'Original transcript');
   $('annotation-status').textContent = state.transcriptText && state.transcriptText !== text
     ? 'Showing the analyzed version. Your edits appear in playback; update feedback to annotate your corrected transcript.'
-    : count ? `${count} API-generated annotations on your original transcript. Review these coaching suggestions in context.`
+    : count ? `${count} AI coaching annotations on your original transcript. Review these coaching suggestions in context.`
       : report.analysis?.method === 'ai' ? 'No grounded annotations were returned for this analysis. Your complete transcript appears below.'
         : ['failed', 'invalid_response'].includes(report.meta?.coachingStatus)
           ? 'AI coaching did not finish, so no color annotations are available. Your complete transcript appears below.'
@@ -1348,26 +1366,20 @@ function buildAnnotatedDocument(report) {
     : escapeHtml(segment.text)).join('');
   const notes = annotations.map(item => `<li id="note-${item.number}"><strong>${escapeHtml(ANNOTATION_LABELS[item.category])}:</strong> ${escapeHtml(item.comment)}</li>`).join('');
   const legend = Object.entries(ANNOTATION_LABELS).map(([category, label]) => `<span class="annotation-${category}">${escapeHtml(label)}</span>`).join(' ');
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Dress Rehearsal — annotated transcript</title><style>body{font:16px/1.65 system-ui,sans-serif;color:#29262d;max-width:850px;margin:48px auto;padding:0 24px}h1{font-size:28px;line-height:1.2}p{color:#655f6b}.legend{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.legend span,mark{padding:2px 5px;border-radius:4px;color:inherit}.transcript{white-space:pre-wrap;font-size:19px;line-height:1.9;overflow-wrap:anywhere}.annotation-thesis{background:#e7daf4}.annotation-evidence{background:#d9ecdf}.annotation-structure{background:#dce9f5}.annotation-delivery{background:#fbe5c9}.annotation-clarity{background:#f7dfe7}.annotation-ref{font-size:11px;vertical-align:super;color:#5d347c;text-decoration:none;margin:0 3px}li{padding:8px 0}footer{font-size:13px;color:#655f6b;margin-top:32px}@media print{body{margin:0;max-width:none}mark,.legend span{print-color-adjust:exact;-webkit-print-color-adjust:exact}}</style></head><body><h1>Your rehearsal, annotated</h1><p>${annotations.length ? 'API-generated coaching notes on your original transcript.' : 'Original transcript. No grounded API annotations were available.'} The text below preserves the analyzed transcript; suggestions are separate.</p><div class="legend" aria-label="Annotation categories">${legend}</div><div class="transcript">${transcript}</div>${notes ? `<h2>Coaching notes</h2><ol>${notes}</ol>` : ''}<footer>Dress Rehearsal · Neeley presentation practice. Annotations are coaching suggestions, not an academic grade. Speech recognition can make mistakes.</footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Dress Rehearsal — annotated transcript</title><style>body{font:16px/1.65 system-ui,sans-serif;color:#29262d;max-width:850px;margin:48px auto;padding:0 24px}h1{font-size:28px;line-height:1.2}p{color:#655f6b}.legend{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.legend span,mark{padding:2px 5px;border-radius:4px;color:inherit}.transcript{white-space:pre-wrap;font-size:19px;line-height:1.9;overflow-wrap:anywhere}.annotation-thesis{background:#e7daf4}.annotation-evidence{background:#d9ecdf}.annotation-structure{background:#dce9f5}.annotation-delivery{background:#fbe5c9}.annotation-clarity{background:#f7dfe7}.annotation-ref{font-size:11px;vertical-align:super;color:#5d347c;text-decoration:none;margin:0 3px}li{padding:8px 0}footer{font-size:13px;color:#655f6b;margin-top:32px}@media print{body{margin:0;max-width:none}mark,.legend span{print-color-adjust:exact;-webkit-print-color-adjust:exact}}</style></head><body><h1>Your rehearsal, annotated</h1><p>${annotations.length ? 'AI coaching notes on your original transcript.' : 'Original transcript. No grounded AI coaching annotations were available.'} The text below preserves the analyzed transcript; suggestions are separate.</p><div class="legend" aria-label="Annotation categories">${legend}</div><div class="transcript">${transcript}</div>${notes ? `<h2>Coaching notes</h2><ol>${notes}</ol>` : ''}<footer>Dress Rehearsal · Neeley presentation practice. Annotations are coaching suggestions, not an academic grade. Speech recognition can make mistakes.</footer></body></html>`;
 }
-function downloadAnnotatedTranscript() {
+async function downloadAnnotatedTranscript() {
   if (!state.report?.transcript?.trim()) return;
   const blob = new Blob([buildAnnotatedDocument(state.report)], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url; link.download = `dress-rehearsal-transcript-${new Date().toISOString().slice(0, 10)}.html`;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  try { await downloadBlob(blob, `dress-rehearsal-transcript-${new Date().toISOString().slice(0, 10)}.html`); }
+  catch (error) { setStatus(errorMessage(error), 'error'); }
 }
-function downloadReport() {
+async function downloadReport() {
   if (!state.report) return;
   const payload = { ...state.report, exportedAt: new Date().toISOString() };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `dress-rehearsal-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  try { await downloadBlob(blob, `dress-rehearsal-${new Date().toISOString().slice(0, 10)}.json`); }
+  catch (error) { setStatus(errorMessage(error), 'error'); }
 }
 
 $('settings-open').addEventListener('click', openSettings);

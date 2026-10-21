@@ -34,7 +34,7 @@ async function requestLocal(prepare, { model, signal, onProgress = () => {} } = 
       Promise.resolve(prepare()).then(({ payload, durationSeconds }) => {
         if (done) return;
         const id = ++nextId;
-        try { worker ||= new Worker(new URL('./speech-worker.js', import.meta.url), { type: 'module' }); jobWorker = worker; }
+        try { worker ||= globalThis.rehearsalCreateSpeechWorker?.() || new Worker(new URL('./speech-worker.js', import.meta.url), { type: 'module' }); jobWorker = worker; }
         catch { finish(new Error('Local speech recognition could not start. Try the latest Chrome or Edge.')); return; }
         jobWorker.onmessage = ({ data }) => {
           if (done || data.id !== id) return;

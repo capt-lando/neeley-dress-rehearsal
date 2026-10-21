@@ -1,0 +1,28 @@
+Neeley Dress Rehearsal - Codex plugin
+
+1. Install the Codex desktop app and sign in.
+2. Install Node.js 22.13 or newer from https://nodejs.org/ if needed.
+3. Extract the entire ZIP into a permanent folder. Keep its folders together,
+   including the .agents folder. No npm or pnpm installation is needed.
+4. Open a terminal in the extracted folder and run:
+
+   codex plugin marketplace add .
+   codex plugin add neeley-dress-rehearsal@neeley-local
+
+   If "codex" is not found, install the official Codex CLI from
+   https://developers.openai.com/codex/cli/ or add it to your PATH.
+5. In Codex, ask: Open Neeley Dress Rehearsal.
+   Restart Codex if the newly installed plugin is not visible.
+
+Coaching uses your Codex conversation and its usage limits. No separate AI
+API key is needed. Analyze shares transcript and preparation text with that
+conversation; your account's chat history and data settings apply.
+
+Recording and local transcription depend on the host's permissions and
+sandbox. Microphone access was denied during our native-panel test; the
+transcript editor and Codex coaching were verified. You can also record at
+https://capt-lando.github.io/neeley-dress-rehearsal/ and paste the transcript
+into the plugin. The standalone website requires an API key for its own
+AI coaching. Speech-model downloads require internet on first use.
+
+Created by Landon Moustirats

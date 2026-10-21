@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "neeley-dress-rehearsal",
+  "version": "0.1.1",
+  "description": "Rehearse a presentation in a custom panel and receive grounded coaching from your Codex conversation.",
+  "author": { "name": "Landon Moustirats" },
+  "repository": "https://github.com/capt-lando/neeley-dress-rehearsal",
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "interface": {
+        "displayName": "Neeley Dress Rehearsal",
+        "shortDescription": "Practice, transcribe, and coach presentations",
+        "longDescription": "Record or upload a rehearsal, add a script, talking points, transitions or rubric, and ask Codex for a speech rating and annotated transcript. No separate coaching API key. Microphone and local speech processing depend on host support.",
+        "developerName": "Landon Moustirats",
+        "category": "Productivity",
+        "brandColor": "#4d286a",
+        "logo": "./assets/icon.svg",
+        "composerIcon": "./assets/icon.svg",
+        "defaultPrompt": ["Open Neeley Dress Rehearsal so I can practice my presentation."]
+      }
+    }
+  }
+}

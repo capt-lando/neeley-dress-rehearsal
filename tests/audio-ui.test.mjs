@@ -1547,3 +1547,61 @@ test('failed coaching keeps the provider reason visible and offers retry instead
     assert.match(h.get('annotation-status').textContent, /did not finish/);
   }
 });
+
+test('Codex settings apply only the speech model and never show a provider-key message', async () => {
+  let saved;
+  const config = { coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', analysisProviderLabel: 'Codex', transcriptionModel: 'onnx-community/whisper-base.en' };
+  const h = harness(async (path, options) => {
+    assert.equal(path, '/api/settings'); saved = JSON.parse(options.body); return { ...config, ...saved };
+  });
+  h.updateConfig(config);
+  assert.equal(h.get('connection-label').textContent, 'Codex coaching');
+  assert.match(h.get('privacy-copy').textContent, /current Codex conversation/);
+  assert.doesNotMatch(h.get('privacy-copy').textContent, /API key|OpenAI|Claude|Gemini/);
+  h.get('analysis-api-key').value = 'must-not-be-used';
+  h.get('analysis-model').value = 'must-not-be-used';
+  h.get('transcription-model').value = 'onnx-community/whisper-small.en';
+  await h.saveSettings({ preventDefault() {} });
+  assert.deepEqual(saved, { transcriptionModel: 'onnx-community/whisper-small.en' });
+  assert.match(h.get('app-status').textContent, /this Codex conversation/);
+  assert.equal(h.state.config.analysisProvider, 'codex');
+});
+
+test('a denied panel export retains audio and reports the host limitation', async () => {
+  const h = harness();
+  const blob = new Blob(['audio']);
+  h.setAudio(blob, 4, 'Retain this rehearsal');
+  h.window.rehearsalDownloads = { async download(value, name) {
+    assert.equal(value, blob);
+    assert.equal(name, 'Retain this rehearsal.wav');
+    throw new Error('This host does not support file downloads from the panel.');
+  } };
+  await h.downloadCurrentAudio();
+  assert.match(h.get('app-status').textContent, /does not support file downloads/);
+  assert.equal(h.state.audioBlob, blob);
+  assert.equal(clickedDownloads(h).length, 0);
+});
+
+test('panel microphone permission policy failure keeps upload and manual transcript usable', async () => {
+  let microphoneRequests = 0;
+  const h = harness(undefined, { mediaDevices: { async getUserMedia() { microphoneRequests++; throw new Error('Should not request'); } } });
+  h.state.config.coachingViaHost = true;
+  h.document.permissionsPolicy = { allowsFeature: () => false };
+  assert.equal(await h.enableMic(), false);
+  assert.equal(microphoneRequests, 0);
+  assert.equal(h.get('upload-button').disabled, false);
+  assert.match(h.get('app-status').textContent, /Upload a recording or paste a transcript/);
+});
+
+test('changing a panel speech model preserves a manually pasted transcript and its report', () => {
+  const h = harness();
+  h.get('transcript').value = 'Manually pasted rehearsal.';
+  h.state.transcriptText = 'Manually pasted rehearsal.';
+  const report = { transcript: h.state.transcriptText, analysis: { method: 'ai' } };
+  h.state.report = report;
+  h.updateConfig({ coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', transcriptionModel: 'onnx-community/whisper-small.en' });
+  assert.equal(h.get('transcript').value, 'Manually pasted rehearsal.');
+  assert.equal(h.state.transcriptText, 'Manually pasted rehearsal.');
+  assert.equal(h.state.report, report);
+  assert.equal(h.state.config.transcriptionModel, 'onnx-community/whisper-small.en');
+});
