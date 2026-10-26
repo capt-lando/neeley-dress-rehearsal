@@ -10,7 +10,9 @@ Supabase Edge Functions have 256 MB RAM and two seconds of CPU time per request,
 
 ElevenLabs provides voice generation, transcription and voice agents. Its relevant product here is Scribe batch/realtime speech recognition, with capabilities such as word timestamps and speaker labels. Building our own hosted Bark transcription pipeline covers this app's current need; it does not mean training or reproducing all of ElevenLabs. Their listed batch speech-to-text rate is $0.22 per audio hour, approximately 1.83 cents for five minutes, subject to plan conditions. This is a comparison only; the app does not integrate ElevenLabs. [Transcription documentation](https://elevenlabs.io/docs/overview/capabilities/speech-to-text), [API pricing](https://elevenlabs.io/pricing/api?price.section=speech_to_text)
 
-## Coaching candidates
+## Selected demo provider and illustrative alternatives
+
+The current Neeley cloud demo is configured for **OpenAI `gpt-6-luna`**, with a successful real synthetic coaching request. The prices below compare alternatives; they are not prices for the selected demo model. Measure its actual billed tokens and current provider rates before estimating demo coaching costs.
 
 One rehearsal example uses **10,000 input tokens and 3,000 output tokens**, including the coaching instructions, script, rubric and report. These are assumptions; duration alone does not determine token cost. Thinking tokens, retries and unusually long rubrics can increase it.
 
@@ -25,10 +27,12 @@ These are API usage charges; a key itself is a credential, not purchased usage. 
 
 ## Bark hosting calculation
 
-Modal lists L4 at $0.000222/GPU-second, CPU at $0.0000131/physical-core-second, and RAM at $0.00000222/GiB-second. Model startup and warm idle retention are billable; default idle retention is 60 seconds. Our optional adapter requests two CPU cores, 8 GiB RAM and ten seconds of idle retention, with at most one worker. [Modal pricing](https://modal.com/pricing)
+Use **Modal Starter only** for the demo, with its current $30/month included compute allowance. Set the Workspace usage budget to **$30 before credits** and the separate spend limit to **$0 after credits**. Verify both in Usage & Billing before running workloads; no paid-plan upgrade is needed. Credits cover our compute worker, not external OpenAI coaching. [Modal budgets](https://modal.com/docs/guide/budgets), [Starter pricing](https://modal.com/pricing)
+
+Modal lists L4 at $0.000222/GPU-second, CPU at $0.0000131/physical-core-second, and RAM at $0.00000222/GiB-second. Model startup and warm idle retention are billable; default idle retention is 60 seconds. Our optional adapter requests two CPU cores, 8 GiB RAM and sixty seconds of idle retention, with at most one worker and zero minimum containers. [Modal pricing](https://modal.com/pricing)
 
 `speech cost = billable seconds × (0.000222 + CPU cores × 0.0000131 + RAM GiB × 0.00000222)`
 
-At the adapter's resource allocation, **30–90 total billable seconds** cost approximately **$0.0080–$0.0239**. Adding the example Gemini 3.1 Flash-Lite coaching call gives roughly **1.5–3.1 cents per rehearsal**. This is a scenario, not measured GPU throughput: actual billable seconds include model loading, inference, idle retention and retries. It excludes Supabase base charges, storage, bandwidth, taxes and failed-job overhead. A server benchmark is required before quoting a pilot price.
+At the adapter's resource allocation, **30–90 total billable seconds** cost approximately **$0.0080–$0.0239**. Adding the illustrative Gemini 3.1 Flash-Lite coaching call gives roughly **1.5–3.1 cents per rehearsal**, not an estimate for the selected OpenAI demo. This is a scenario, not measured GPU throughput: actual billable seconds include model loading, inference, idle retention and retries. It excludes Supabase base charges, storage, bandwidth, taxes and failed-job overhead. A server benchmark is required before quoting a pilot price.
 
 Start with completed takes and a small PDC cohort. Record billable inference duration, provider token usage, error rates and coaching completion per job without logging speech content. Use a hard daily spending ceiling and per-user quotas. Owned infrastructure still needs concurrency limits and abuse protection. Expand to professors and speech/debate only after costs, transcription and coaching quality are measured.

@@ -1,6 +1,6 @@
 # Bark cloud speech worker
 
-This separate service runs **Bark 3.0 Plus** on a CUDA GPU. Students do not download weights or supply a speech key. It does not use ElevenLabs. The existing browser speech implementation remains available until cloud deployment has passed real inference tests.
+This separate service runs **Bark 3.0 Plus** on a CUDA GPU. Students do not download weights or supply a speech key. It does not use ElevenLabs. The Modal worker is deployed behind proxy authentication, and the authenticated browser transcription/coaching flow passed with a synthetic fixture.
 
 ## Contract
 
@@ -10,16 +10,22 @@ Success: `{ "text": "...", "durationSeconds": 123.4, "chunks": [], "model": "bar
 
 Thirty-second disjoint windows bound inference memory. Text is joined without filler removal or repetition deduplication. Plus can still miss audible fillers; it is not a perfect verbatim detector. The model is reused across requests, and the processor/config are loaded only from pinned local files. No remote code selection or runtime downloads are accepted. The reviewed publisher loader is SHA-256 checked; only its weight-decoding function is used.
 
-## Deploy when a compute account is ready
+## Deployment
 
-The provided Modal adapter is optional; it is configured for one L4 worker, two CPU cores, 8 GiB RAM, and ten seconds of idle retention. Do not deploy before setting a provider budget. Model build/loading and idle retention are billable as well as inference. The 120-second process deadline includes first model load; cold-start behavior must be measured before launch.
+The provided Modal adapter is optional; it is configured for one L4 worker, two CPU cores, 8 GiB RAM, and sixty seconds of idle retention, with zero minimum containers. The idle window lets quick retries reuse the loaded model; it does not shorten the first cold request or keep a worker warm through a five-minute recording. Do not deploy before setting a provider budget. Model build/loading and idle retention are billable as well as inference. The 120-second process deadline includes first model load; cold-start behavior must be measured before launch.
+
+For the Neeley demo, stay on **Modal Starter** with its current $30/month included compute. The Workspace usage budget of **$30 gross** (before credits) and separate spend limit of **$0 net** (after credits) have both been verified in Usage & Billing. Preserve these caps; do not upgrade to Team or Enterprise. They do not fund the separate coaching API. The Supabase gateway separately admits up to $1/day in reserved demo requests ($0.075 speech and $0.060 coaching per request), not measured vendor charges. [Budget and spend-limit definitions](https://modal.com/docs/guide/budgets), [Starter pricing](https://modal.com/pricing)
 
 1. Use Python 3.11 and install `modal==1.6.2` in a dedicated environment; sign in to the chosen Modal account.
 2. Create a Modal secret named `neeley-bark-worker`, containing `BARK_WORKER_TOKEN`. Generate a random URL-safe value with at least 32 random bytes (43 characters). Store that same value only in backend secrets.
 3. From this directory run `modal deploy modal_app.py`. This builds dependencies and downloads fixed public model assets; it creates billable cloud infrastructure.
 4. Create a Modal proxy-auth token. Proxy authentication is required and rejects unauthorized requests before a GPU container boots. Store its key/secret in the backend as `BARK_WORKER_MODAL_KEY` and `BARK_WORKER_MODAL_SECRET`.
 5. Set backend `BARK_WORKER_URL` to the deployed HTTPS URL ending in `/transcribe`, plus `BARK_WORKER_TOKEN`. The gateway sends `Modal-Key` and `Modal-Secret` headers as well as Bearer authorization. None of these secrets belongs in frontend configuration or GitHub source.
-6. Test real recordings, fillers, cancellation, ten-minute inputs, cold start, peak concurrency, and actual billed time. The worker code and non-GPU tests are a foundation, **not evidence that a GPU deployment has passed validation**.
+6. Test real recordings, fillers, cancellation, ten-minute inputs, cold start, peak concurrency, and actual billed time. Non-GPU tests alone do not establish deployment readiness; the limited cloud smoke check below does not replace these launch checks.
+
+## Cloud smoke check — October 26, 2026
+
+The proxy-protected Modal deployment passed a 27.721875-second synthetic English fixture: **61.220 seconds cold** and **1.276 seconds warm**, measured from the client. Both outputs exactly matched its reference text, preserving two `um`, two `uh`, repeated `I, I`, and the complete ending. Missing proxy credentials returned 401, an incorrect worker bearer returned 401, and malformed WAV returned 422. The same fixture subsequently passed the authenticated browser flow through transcription, coaching, and saved-report reopening. These checks do not establish performance or accuracy across human recordings, longer takes, or concurrent students. Cold startup remains a significant part of isolated-request latency.
 
 For another GPU host: install `requirements.txt`, run `python models.py` during image build, set `BARK_WORKER_TOKEN`, then run `uvicorn server:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log`. Put it behind a TLS reverse proxy that rejects unauthorized/oversized traffic, limits request rates, and has a finite request timeout. Do not expose the bare development server publicly. Use one Uvicorn worker per GPU; multiple processes duplicate model memory and bypass the local concurrency gate.
 
