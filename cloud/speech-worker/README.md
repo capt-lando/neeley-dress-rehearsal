@@ -1,6 +1,6 @@
 # Bark cloud speech worker
 
-This separate service runs **Bark 3.0 Plus** on a CUDA GPU. Students do not download weights or supply a speech key. It does not use ElevenLabs. The Modal worker is deployed behind proxy authentication, and the authenticated browser transcription/coaching flow passed with a synthetic fixture.
+This separate service runs **Bark 3.0 Plus** on a CUDA GPU. Students do not download weights or supply a speech key. It does not use ElevenLabs. The Modal worker is deployed behind proxy authentication. GitHub Pages release `5ae65d2` uses the cloud service; Google sign-in and private history/report reopening passed on the public domain without student API-key entry. Microsoft configuration remains pending.
 
 ## Contract
 
@@ -25,7 +25,11 @@ For the Neeley demo, stay on **Modal Starter** with its current $30/month includ
 
 ## Cloud smoke check — October 26, 2026
 
-The proxy-protected Modal deployment passed a 27.721875-second synthetic English fixture: **61.220 seconds cold** and **1.276 seconds warm**, measured from the client. Both outputs exactly matched its reference text, preserving two `um`, two `uh`, repeated `I, I`, and the complete ending. Missing proxy credentials returned 401, an incorrect worker bearer returned 401, and malformed WAV returned 422. The same fixture subsequently passed the authenticated browser flow through transcription, coaching, and saved-report reopening. These checks do not establish performance or accuracy across human recordings, longer takes, or concurrent students. Cold startup remains a significant part of isolated-request latency.
+The proxy-protected Modal deployment passed a 27.721875-second synthetic English fixture: **61.220 seconds cold** and **1.276 seconds warm**, measured from the client. Both outputs exactly matched its reference text, preserving two `um`, two `uh`, repeated `I, I`, and the complete ending. Missing proxy credentials returned 401, an incorrect worker bearer returned 401, and malformed WAV returned 422. The same fixture subsequently passed the authenticated browser flow through transcription, coaching, and saved-report reopening.
+
+A **300-second** fixture, containing ten copies of that synthetic speech and 22.8 seconds of total gaps, completed through the public app. Modal reported **36.059 seconds of pre-start wait** and **54.461 seconds of execution, including lazy model loading**: 90.520 seconds from enqueue to completion. The button-to-enqueue interval was 6.577 seconds, giving a derived server completion at 97.10 seconds after the click. The UI was observed complete by 111.782 seconds. These metrics do not isolate container boot or pure inference time.
+
+The five-minute output contained 728 words against 730 in the reference, with 19 of 20 expected `um` and a net count of 19 of 20 expected `uh`. Exact alignment found **four word edits**: one missing `um`, two missing `uh`, and one inserted `uh`; there were no other word edits. All ten `I, I` repetitions, all ten endings, and the final ending were intact. No warm five-minute run was measured. Repeated synthetic speech does not establish accuracy on human presentations or performance under concurrent students.
 
 For another GPU host: install `requirements.txt`, run `python models.py` during image build, set `BARK_WORKER_TOKEN`, then run `uvicorn server:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log`. Put it behind a TLS reverse proxy that rejects unauthorized/oversized traffic, limits request rates, and has a finite request timeout. Do not expose the bare development server publicly. Use one Uvicorn worker per GPU; multiple processes duplicate model memory and bypass the local concurrency gate.
 

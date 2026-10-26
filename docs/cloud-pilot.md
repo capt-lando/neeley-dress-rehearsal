@@ -1,6 +1,6 @@
 # Cloud pilot
 
-Neeley Dress Rehearsal is moving toward funded speech transcription and coaching with one free experience for all users. The repository contains a configurable cloud client, Supabase backend, and Bark worker. The current GitHub Pages site continues in local mode until production configuration is supplied and launch checks pass. The plugin is unchanged. The admin dashboard and all paid-plan work are deferred.
+Neeley Dress Rehearsal provides funded cloud speech transcription and coaching with one free experience for all users. The GitHub Pages student app connects to the Supabase backend and Bark worker without student API-key entry. The plugin is unchanged. The admin dashboard and all paid-plan work are deferred.
 
 ## Deployment status — October 26, 2026
 
@@ -14,7 +14,9 @@ Before migration deployment, **35 database assertions passed** on this project i
 
 The full browser transcription/coaching flow passed in the owner's Google session using a privately saved 27.7-second fixture. Bark matched the reference transcript, including fillers. OpenAI returned a 48/100 rating, five annotations, and three of four target points, correctly identifying the missing invitation. Word statistics showed two `um`, two `uh`, one filler `like`, and two non-filler uses of `like`. Reopening the completed report from private history returned the same transcript and feedback. This fixture does not establish accuracy across student recordings.
 
-GitHub's two public build variables are configured for the hosted experience. Production-origin CORS and backend availability checks passed. Every Pages release still needs a successful deployment and a production sign-in smoke check. Microsoft setup and broader pilot tests remain outstanding. All users share one free experience; operational quotas are capacity controls, not paid plans.
+GitHub Pages release `5ae65d2` is deployed in cloud mode. Actual Google sign-in and private history/report reopening passed on the public domain, with no API-key entry. Microsoft configuration and broader pilot tests remain outstanding. All users share one free experience; operational quotas are capacity controls, not paid plans.
+
+A 300-second fixture (ten copies of the short synthetic speech, with 22.8 seconds of total gaps) completed through the public app. Server completion was derived at 97.10 seconds after the button click; the UI was observed complete by 111.782 seconds. The transcript contained 728 words against 730 in the reference. Alignment found four edits: one missing `um`, two missing `uh`, and one inserted `uh`; all ten `I, I` repetitions and all ten endings were preserved. No warm five-minute run was measured, and this repeated synthetic fixture does not establish human-speech accuracy. See the worker README for timing details.
 
 ## Product layers
 
