@@ -116,14 +116,25 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     if (!cost) throw fail('The pilot service is not configured yet.',503);
     const job=await store.reserve(user.id,recordingId,requestId,kind,await hash(input),cost);
     if (job.state==='completed') return job.response;
-    if (job.state!=='new') throw fail(job.state==='reserved'?'This request is still processing.':'This request already failed. Start a new request to retry.',409);
+    if (job.state!=='new') {
+      const error=fail(job.state==='reserved'?'This request is still processing.':'This request already failed. Start a new request to retry.',409);
+      if (job.state==='failed') error.jobState='failed';
+      throw error;
+    }
+    let completionStarted=false;
     try {
       const result=await run();
+      completionStarted=true;
       await store.finish(user.id,requestId,true,result);
       return result;
     } catch (error) {
-      try { await store.finish(user.id,requestId,false,null); } catch { /* Remains charged and reserved if the database is unavailable. */ }
-      throw error;
+      const failure=error?.safe?error:fail('The service could not complete this request.',503);
+      try {
+        await store.finish(user.id,requestId,false,null);
+        // A lost completion acknowledgement might already have committed success.
+        if (!completionStarted) failure.jobState='failed';
+      } catch { /* Preserve the request ID while persisted job state is uncertain. */ }
+      throw failure;
     }
   }
   return async function handle(request) {
@@ -205,6 +216,6 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         }));
       }
       throw fail('This app action does not exist.',404);
-    } catch (error) { return json({error:error?.safe?error.message:'The service could not complete this request.'},error?.safe?error.status:503); }
+    } catch (error) { return json({error:error?.safe?error.message:'The service could not complete this request.',...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})},error?.safe?error.status:503); }
   };
 }

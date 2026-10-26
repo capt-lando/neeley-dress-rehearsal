@@ -1,10 +1,33 @@
 import { createUsageAnalytics } from '../lib/usage-analytics.mjs';
+import { readHostedConfig } from '../lib/hosted-service.mjs';
+
+export async function beginHostedSignIn(service, provider, redirectTo, config = readHostedConfig(import.meta.env), fetchImpl = fetch) {
+  if (!['google', 'azure'].includes(provider)) throw new Error('Choose Google or Microsoft.');
+  let settings;
+  try {
+    const response = await fetchImpl(`${config.url}/auth/v1/settings`, {
+      headers: { apikey: config.publishableKey }, credentials: 'omit', redirect: 'error',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error();
+    settings = await response.json();
+    if (typeof settings?.external?.[provider] !== 'boolean') throw new Error();
+  } catch {
+    throw new Error('Sign-in availability could not be checked. Check your connection and try again.');
+  }
+  if (!settings.external[provider]) {
+    const label = provider === 'google' ? 'Google' : 'Microsoft';
+    const alternative = provider === 'google' ? 'azure' : 'google';
+    throw new Error(`${label} sign-in is not available yet. ${settings.external[alternative] === true ? `Continue with ${alternative === 'google' ? 'Google' : 'Microsoft'}.` : 'Please try again later.'}`);
+  }
+  await service.signIn(provider, redirectTo);
+}
 
 /** Student account controls only. Staff analytics is a separate application. */
 export function installHostedAccount(service, actions) {
   const $ = id => document.getElementById(id);
   const dialog = $('account-dialog');
-  let user = null, generation = 0, busy = false, disposed = false;
+  let user = null, generation = 0, busy = false, disposed = false, signingIn = false;
   const analytics = createUsageAnalytics({ send: (events, { signal }) => service.request('/api/events', { method: 'POST', body: { events }, signal }) });
   const consentKey = () => user ? `neeley-usage-consent:${user.id}` : '';
   const readConsent = () => { try { return localStorage.getItem(consentKey()) === 'yes'; } catch { return false; } };
@@ -81,11 +104,15 @@ export function installHostedAccount(service, actions) {
     } catch (error) { if (own === generation) $('cloud-recordings-status').textContent = error.message; }
   }
   for (const provider of ['google', 'azure']) $(provider === 'google' ? 'sign-in-google' : 'sign-in-microsoft').addEventListener('click', async () => {
+    if (signingIn) return;
+    signingIn = true;
+    $('sign-in-google').disabled = $('sign-in-microsoft').disabled = true;
     try {
-      status('Opening sign-in…');
+      status('Checking sign-in…');
       const redirect = new URL(location.href); redirect.search = ''; redirect.hash = '';
-      await service.signIn(provider, redirect.href);
+      await beginHostedSignIn(service, provider, redirect.href);
     } catch (error) { status(error.message); }
+    finally { signingIn = false; $('sign-in-google').disabled = $('sign-in-microsoft').disabled = false; }
   });
   $('account-signout').addEventListener('click', async () => {
     try { await service.signOut(); status('Signed out.'); } catch (error) { status(error.message); }

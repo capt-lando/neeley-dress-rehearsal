@@ -101,7 +101,7 @@ test('one explicit transcription saves a private WAV, sends a job ID, and reuses
 
 test('definite failed jobs require a new request ID on the next explicit retry; changed coaching gets a new ID', async () => {
   let fail = true;
-  const { service, calls } = fixture({ handle: call => { if (call.path === '/transcribe' && fail) { fail = false; return response({ error: 'Speech worker failed.' }, 502); } } });
+  const { service, calls } = fixture({ handle: call => { if (call.path === '/transcribe' && fail) { fail = false; return response({ error: 'Speech worker failed.', jobState: 'failed' }, 502); } } });
   const audio = wav();
   await assert.rejects(service.request('/api/transcribe', { body: audio }), { status: 502 });
   const result = await service.request('/api/transcribe', { body: audio });
@@ -113,6 +113,24 @@ test('definite failed jobs require a new request ID on the next explicit retry; 
   const coaching = calls.filter(call => call.path === '/analyze-text');
   assert.equal(coaching[0].body.requestId, coaching[1].body.requestId);
   assert.notEqual(coaching[1].body.requestId, coaching[2].body.requestId);
+});
+
+test('explicit retries rotate IDs only for confirmed terminal failures, including a busy speech worker', async () => {
+  for (const path of ['/transcribe', '/analyze-text']) {
+    for (const [status, jobState] of [[429, 'failed'], [409, 'failed'], [429, undefined], [409, undefined], [502, undefined], [504, undefined]]) {
+      let reject = true;
+      const { service, calls, uploads } = fixture({ handle: call => {
+        if (call.path === path && reject) { reject = false; return response({ error: 'Try again.', ...(jobState ? { jobState } : {}) }, status); }
+      } });
+      const options = path === '/transcribe' ? { body: wav() } : { body: { recordingId: randomUUID(), text: 'Practice helps.' } };
+      await assert.rejects(service.request(`/api${path}`, options), { status });
+      await service.request(`/api${path}`, options);
+      const jobs = calls.filter(call => call.path === path);
+      assert.equal(jobs.length, 2);
+      assert.equal(jobs[0].body.requestId === jobs[1].body.requestId, jobState !== 'failed', `${path} ${status} ${jobState}`);
+      assert.equal(uploads.length, path === '/transcribe' ? 1 : 0);
+    }
+  }
 });
 
 test('invalid audio and malicious storage destinations fail before uploading', async () => {

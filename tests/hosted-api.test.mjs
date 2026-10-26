@@ -106,6 +106,27 @@ test('failed or uncertain upstream requests remain debited and are not silently 
   const response=await f.call('/transcribe',transcribe);assert.equal(response.status,502);assert.doesNotMatch(await response.text(),/secret upstream/);
   assert.equal((await f.call('/transcribe',transcribe)).status,409);assert.equal(f.debits,1);assert.equal(sent,1);assert.equal(f.jobs.get(requestId).state,'failed');
 });
+
+test('a busy worker reports a persisted terminal failure and the same ID cannot start new compute',async()=>{
+  let sent=0;
+  const f=fixture({fetchImpl:async()=>{sent++;return Response.json({error:'busy'}, {status:429});}});
+  const first=await f.call('/transcribe',transcribe);
+  assert.equal(first.status,429);assert.equal((await first.json()).jobState,'failed');
+  const repeated=await f.call('/transcribe',transcribe);
+  assert.equal(repeated.status,409);assert.equal((await repeated.json()).jobState,'failed');
+  assert.equal(f.jobs.get(requestId).state,'failed');assert.equal(f.debits,1);assert.equal(sent,1);
+});
+
+test('admission failures and uncertain persistence never advertise a terminal job state',async()=>{
+  for (const change of [
+    {store:{reserve:async()=>{throw fail('Daily allowance reached.',429);}}},
+    {store:{finish:async()=>{throw new Error('Database unreachable');}},fetchImpl:async()=>Response.json({}, {status:429})},
+    {store:{finish:async(_user,_request,ok)=>{if(ok)throw new Error('Completion acknowledgement lost');}}},
+  ]) {
+    const f=fixture(change),result=await f.call('/transcribe',transcribe);
+    assert.notEqual(result.status,200);assert.equal((await result.json()).jobState,undefined);
+  }
+});
 test('concurrent duplicate requests cannot trigger a second upstream operation',async()=>{
   let release;const wait=new Promise(r=>{release=r;});let started;
   const begin=new Promise(r=>{started=r;});const f=fixture({fetchImpl:async()=>{started();await wait;return Response.json({text:'Hello there.',durationSeconds:1,model:'bark-3.0-plus'});}});
