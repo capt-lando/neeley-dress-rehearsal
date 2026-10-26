@@ -183,3 +183,10 @@
 .model-attribution a:hover{color:var(--purple)}
 .site-footer .model-attribution{max-width:650px;font-size:9px;text-align:right}
 @media(max-width:600px){.site-footer .model-attribution{width:100%;text-align:left}}
+
+.brand-home{text-decoration:none}
+.brand-powered{display:block;margin-top:7px;font-family:var(--serif);font-style:italic;font-size:14px;font-weight:400;line-height:1.3;letter-spacing:.2px;color:#716d75}
+.brand-powered a{color:inherit;text-decoration:none}
+.brand-powered a:hover{text-decoration:underline;text-underline-offset:3px}
+.brand-powered a:focus-visible{outline:2px solid var(--purple);outline-offset:3px}
+@media(max-width:650px){.brand-powered{font-size:12px}}

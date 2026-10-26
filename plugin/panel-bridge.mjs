@@ -108,7 +108,7 @@ export function createPanelBridge({ windowImpl = globalThis.window, requestTimeo
   }
   function initialize() {
     if (!initialization) initialization = request('ui/initialize', {
-      appInfo: { name: 'neeley-dress-rehearsal', version: '0.2.0' },
+      appInfo: { name: 'neeley-dress-rehearsal', version: '0.2.1' },
       appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
       protocolVersion: MCP_APPS_VERSION,
     }).then(result => {

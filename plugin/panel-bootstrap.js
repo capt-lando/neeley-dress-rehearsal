@@ -39,7 +39,7 @@ document.querySelector('#transcript-details summary span').textContent = 'Paste 
 document.querySelector('#transcript-details > .support-text').textContent = 'Paste a transcript to get coaching without recording, or correct speech-recognition mistakes before updating your feedback.';
 $('transcript').placeholder = 'Paste your rehearsal transcript here…';
 $('report').before(editor);
-document.querySelector('.brand').addEventListener('click', event => { event.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
+document.querySelector('.brand-home').addEventListener('click', event => { event.preventDefault(); window.scrollTo({ top: 0, behavior: 'smooth' }); });
 
 await import('../public/app.js');
 
