@@ -14,18 +14,19 @@ const create = overrides => createBrowserService({ policyText, transcribe: basic
 function providerResponse(provider, feedback) {
   const text = JSON.stringify(feedback);
   if (provider === 'openai') return { status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }] };
-  if (provider === 'anthropic') return { stop_reason: 'end_turn', content: [{ type: 'text', text }] };
+  if (provider === 'anthropic' || provider === 'meta') return { stop_reason: 'end_turn', content: [{ type: 'text', text }] };
+  if (provider === 'deepseek') return { choices: [{ finish_reason: 'stop', message: { content: text } }] };
   return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }] };
 }
 
-test('browser config exposes local speech and only three coaching providers without credentials', async () => {
+test('browser config exposes local speech and five coaching providers without credentials', async () => {
   const service = create();
   const config = await service.request('/api/config');
   assert.equal(config.localSpeech, true);
   assert.equal(config.speechConfigured, true);
   assert.equal(config.analysisConfigured, false);
   assert.equal(config.transcriptionModel, BARK_MODEL_ID);
-  assert.deepEqual(config.providers.map(item => item.id), ['openai', 'anthropic', 'google']);
+  assert.deepEqual(config.providers.map(item => item.id), ['openai', 'anthropic', 'google', 'deepseek', 'meta']);
   assert.equal(Object.hasOwn(config, 'analysisApiKey'), false);
 });
 
@@ -56,6 +57,40 @@ test('unsafe settings never send requests or change the selected provider', asyn
     { transcriptionModel: 'bark-pro-unavailable' },
   ]) await assert.rejects(service.request('/api/settings', post(body)), { status: 400 });
   assert.equal((await service.request('/api/config')).analysisProvider, 'openai');
+});
+
+test('switching among all five providers routes only its saved key and model, and clearing is isolated', async () => {
+  const ids = ['openai', 'anthropic', 'google', 'deepseek', 'meta'];
+  const calls = [];
+  const service = create({ fetchImpl: async (url, options) => {
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return new Response('Unauthorized', { status: 401 });
+  } });
+  for (const id of ids) {
+    await service.request('/api/settings', post({ analysisProvider: id, analysisApiKey: `${id}-private`, analysisModel: `${id}-custom` }));
+  }
+  for (const id of [...ids].reverse()) {
+    const config = await service.request('/api/settings', post({ analysisProvider: id }));
+    assert.equal(config.analysisModel, `${id}-custom`);
+    assert.equal(config.analysisConfigured, true);
+    assert.ok(!JSON.stringify(config).includes('-private'));
+    const report = await service.request('/api/analyze-text', post({ text: 'We should expand tutoring.' }));
+    const call = calls.at(-1);
+    const keyHeader = { google: 'x-goog-api-key', meta: 'x-api-key' }[id] || 'Authorization';
+    assert.equal(call.headers[keyHeader], keyHeader === 'Authorization' ? `Bearer ${id}-private` : `${id}-private`);
+    if (id === 'google') assert.match(call.url, /google-custom:generateContent$/);
+    else assert.equal(call.body.model, `${id}-custom`);
+    assert.ok(!JSON.stringify(report).includes('-private'));
+  }
+  const cleared = await service.request('/api/settings', post({ analysisProvider: 'meta', clearAnalysisKey: true }));
+  assert.equal(cleared.analysisConfigured, false);
+  assert.ok(cleared.providers.filter(item => item.id !== 'meta').every(item => item.configured));
+  const before = calls.length;
+  const report = await service.request('/api/analyze-text', post({ text: 'We should expand tutoring.' }));
+  assert.equal(report.meta.coachingStatus, 'not_connected');
+  assert.equal(calls.length, before);
+  service.dispose();
+  assert.equal((await create().request('/api/config')).providers.some(item => item.configured), false);
 });
 
 test('each supported Bark variant reaches local transcription using its actual model ID', async () => {
@@ -130,14 +165,15 @@ test('oversize and empty presentation inputs are rejected before contacting a co
 });
 
 test('each selected coaching service receives its own key and returns grounded feedback', async () => {
-  for (const provider of ['openai', 'anthropic', 'google']) {
+  for (const provider of ['openai', 'anthropic', 'google', 'deepseek', 'meta']) {
     let seen;
     const feedback = { thesis: { summary: 'Expand tutoring.', clarity: 'Explicit recommendation.', evidence: ['We should expand tutoring.'] } };
     const service = create({ fetchImpl: async (url, options) => { seen = { url, options }; return response(providerResponse(provider, feedback)); } });
     await service.request('/api/settings', post({ analysisProvider: provider, analysisApiKey: `${provider}-privateKey` }));
     const report = await service.request('/api/analyze-text', post({ text: 'We should expand tutoring.' }));
-    assert.equal(new URL(seen.url).hostname, { openai: 'api.openai.com', anthropic: 'api.anthropic.com', google: 'generativelanguage.googleapis.com' }[provider]);
-    assert.equal(seen.options.headers[provider === 'google' ? 'x-goog-api-key' : 'Authorization'], provider === 'google' ? `${provider}-privateKey` : `Bearer ${provider}-privateKey`);
+    assert.equal(new URL(seen.url).hostname, { openai: 'api.openai.com', anthropic: 'api.anthropic.com', google: 'generativelanguage.googleapis.com', deepseek: 'api.deepseek.com', meta: 'api.meta.ai' }[provider]);
+    const keyHeader = { google: 'x-goog-api-key', meta: 'x-api-key' }[provider] || 'Authorization';
+    assert.equal(seen.options.headers[keyHeader], keyHeader === 'Authorization' ? `Bearer ${provider}-privateKey` : `${provider}-privateKey`);
     if (provider === 'anthropic') assert.equal(seen.options.headers['anthropic-dangerous-direct-browser-access'], 'true');
     assert.equal(report.analysis.method, 'ai');
     assert.equal(report.meta.coachingStatus, 'complete');

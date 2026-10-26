@@ -21,6 +21,8 @@ const PROVIDER_GUIDES = {
   openai: { id: 'openai', label: 'ChatGPT (OpenAI)', keyUrl: 'https://platform.openai.com/api-keys', instructions: 'Sign in to the OpenAI API platform. Create an API key, then copy it here.' },
   anthropic: { id: 'anthropic', label: 'Claude (Anthropic)', keyUrl: 'https://platform.claude.com/settings/keys', instructions: 'Sign in to the Claude developer platform. Choose “Create key,” name it, link your account, and select a single workspace. Then copy the key.' },
   google: { id: 'google', label: 'Gemini (Google)', keyUrl: 'https://aistudio.google.com/apikey', instructions: 'Sign in to Google AI Studio. Choose “Create API key.” Select or import a Google Cloud project if prompted, then copy the key.' },
+  deepseek: { id: 'deepseek', label: 'DeepSeek', keyUrl: 'https://platform.deepseek.com/api_keys', defaultModel: 'deepseek-flash', instructions: 'Sign in to the DeepSeek API platform. Create an API key, then copy it here.' },
+  meta: { id: 'meta', label: 'Meta Muse', keyUrl: 'https://dev.meta.ai/api-keys', defaultModel: 'muse-spark-1.3', instructions: 'Sign in to Meta’s developer platform. Create an API key, then copy it here.' },
 };
 
 function setStatus(message, type = '') {
@@ -1220,7 +1222,7 @@ function renderCoachingState(report) {
     : failed
     ? 'Your transcript and word stats are ready. Check the connection message above, then retry for a speech rating and color annotations.'
     : ready ? 'Your key is in this tab. Analyze this transcript for a speech rating and color annotations.'
-      : 'Transcription and word stats work without a key. A speech rating and color annotations require your OpenAI, Claude, or Gemini API key. Keys clear when you refresh or close this tab.';
+      : 'Transcription and word stats work without a key. A speech rating and color annotations require an API key from your chosen AI provider. Keys clear when you refresh or close this tab.';
   $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Connect AI coach';
   $('coaching-settings').hidden = !ready || Boolean(state.config.coachingViaHost);
 }

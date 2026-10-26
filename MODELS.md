@@ -35,10 +35,14 @@ The production website also transcribed the filler sample with Clean (removing f
 
 Students can correct the transcript before coaching. Counts are detected transcript occurrences, not every audible sound. Repetitions are not stutter diagnoses, and omitted talking points do not prove someone forgot a script.
 
+An October 26 endurance run lasted 26 minutes 53 seconds and captured 25 minutes 11 seconds across three takes (10 minutes, 10 minutes, and 5 minutes 11 seconds). All 189 live batches completed, the queue drained, each take saved, and replay worked. Both ten-minute takes stopped and flushed automatically; a 25-second pause was excluded from the third recording. Tests used a prerecorded microphone source and actual model weights in the Windows browser, not a physical-microphone permission test.
+
+The longer filler test exposed a real accuracy limit: across 21 complete repeated passages, Plus omitted seven audible fillers and inserted one extra “um,” while preserving each “I, I” repetition. A separate raw-output check confirmed omissions could already be present in the model output before overlap merging. Warm eight-second requests in that diagnostic took 0.237–0.372 seconds. These device-specific results do not promise every filler will be detected. Invalid, silent, too-short, and over-limit uploads were also checked; a 599-second take survived cancellation, retry, and restoration.
+
 ## Attribution
 
-Bark is post-trained and compressed by Conway Research, based on NVIDIA Corporation's parakeet-tdt-0.6b-v3 and Moondream's parakeet-ultra, under CC BY 4.0. Browser exports are by ai-ecoverse and velddev. Attribution appears in settings and the footer. See `MODEL-NOTICE.txt` for source links, modifications, revisions, and license information. The adapted inference code includes the Apache 2.0 license in `LICENSES/Apache-2.0.txt`; both notices ship with the website and plugin.
+Bark is post-trained and compressed by Conway Research, based on NVIDIA Corporation's parakeet-tdt-0.6b-v3 and Moondream's parakeet-ultra, under CC BY 4.0. Browser exports are by ai-ecoverse and velddev. Attribution appears beneath the title, in settings, and in the footer. See `MODEL-NOTICE.txt` for source links, modifications, revisions, and license information. The adapted inference code includes the Apache 2.0 license in `LICENSES/Apache-2.0.txt`; both notices ship with the website and plugin.
 
 ## Coaching
 
-The website still sends text directly to the user's selected OpenAI, Anthropic, or Google API using a key held in tab memory. Speech recognition requires no second key. The Codex plugin uses the current conversation for coaching. Speech-model selection does not change coaching providers, prompt inputs, evidence validation, or account billing.
+The website sends text directly to the user's selected OpenAI, Anthropic, Google, DeepSeek, or Meta API using a key held in tab memory. Speech recognition requires no second key. The paused Codex plugin edition uses its conversation for coaching. Speech-model selection does not change coaching providers, prompt inputs, evidence validation, or account billing.

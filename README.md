@@ -2,9 +2,13 @@
 
 A minimal presentation practice app for Neeley students. Record an English rehearsal, compare it with a script or speaking points, and review word statistics, moments to improve, and thesis/rhetoric coaching.
 
-**Speech recognition needs no Hugging Face account or token.** The public speech model downloads and runs on the device. The standalone website uses the student's OpenAI, Claude, or Gemini API key for coaching. The Codex plugin uses the current conversation for coaching instead, with no separate API key.
+**Speech recognition needs no Hugging Face account or token.** The public speech model downloads and runs on the device. The website uses the student's OpenAI, Claude, Gemini, DeepSeek, or Meta Muse Spark API key for coaching.
 
-## Codex plugin and custom panel
+Ongoing development focuses on the web app. The proposed TCU sign-in and school-funded coaching backend are recorded in [project direction](PROJECT-DIRECTION.md); they are not implemented or institutionally approved.
+
+## Codex plugin and custom panel (paused)
+
+Plugin development and distribution updates are paused at version 0.2.1. Website updates do not rebuild, publish, or change the installed plugin. The existing source and released ZIP remain available; the instructions below describe that edition.
 
 The plugin adds a conversation panel with the same rehearsal interface. **Analyze** stages the complete transcript and preparation inputs, sends a request to the current Codex chat, and waits for Codex to submit the coaching result. The existing validator checks quoted evidence and computes the rating; the panel then renders the report and color annotations. Coaching uses the chat's available model and usage limits, not an API subscription supplied by the student.
 
@@ -19,7 +23,7 @@ codex plugin marketplace add ./build/codex-plugin
 codex plugin add neeley-dress-rehearsal@neeley-local
 ```
 
-Reload Codex after installing if the new plugin does not appear, then ask **“Open Neeley Dress Rehearsal.”** Node must be available to the Codex process. The self-contained package is under `build/codex-plugin`; it includes its local marketplace, bundled server, panel, skill, and coaching policy. No dependency installation is needed inside the installed copy. Build output is excluded from source control; GitHub Actions builds it as a downloadable artifact alongside the website.
+Reload Codex after installing if the new plugin does not appear, then ask **“Open Neeley Dress Rehearsal.”** Node must be available to the Codex process. The self-contained package is under `build/codex-plugin`; it includes its local marketplace, bundled server, panel, skill, and coaching policy. No dependency installation is needed inside the installed copy. Build output is excluded from source control. The website publishing workflow no longer builds plugin artifacts.
 
 The local tool connection uses standard input/output, opens no HTTP listener, and makes no paid model requests. Pending inputs and reports are held in bounded process memory and expire. When you choose Analyze, text is shared with the Codex conversation and follows that account's chat retention settings. It is **not** accurate to claim that no data is stored by the host. Original audio stays on the device; browser recording storage is separate from the website and may be unavailable in an embedded panel. Download important recordings.
 
@@ -47,9 +51,11 @@ For development, `pnpm dev` starts Vite. Run `pnpm build` again after editing so
 
 ## Connect your AI
 
-1. Click **Connect API** and choose **ChatGPT (OpenAI)**, **Claude**, or **Gemini**.
+1. Click **Connect API** and choose **ChatGPT (OpenAI)**, **Claude**, **Gemini**, **DeepSeek**, or **Meta Muse**.
 2. Follow **Sign in & get a key** to that provider's official API-key page. Sign in, create a key, and copy it.
-3. Return to the app, paste the key, and save. Model settings are optional under Advanced.
+3. Return to the app, paste the key, and click **Apply**. Model settings are optional under Advanced.
+
+DeepSeek defaults to `deepseek-flash`; Meta defaults to the standard `muse-spark-1.3` model. Both use the provider's own API directly, with no extra intermediary account. You need a key and model access from the provider you select. See [DeepSeek API documentation](https://api-docs.deepseek.com/) and [Meta developer documentation](https://dev.meta.ai/).
 
 API use may require billing separate from a chat subscription. The student pays their selected provider for coaching; local speech recognition makes no paid inference request. No site-owner key is embedded. Keys entered here are held only in this tab's memory and clear on refresh or closing the page. A saved key is not verified until an API request succeeds. Leaving a key field blank preserves it; removing the selected coaching key leaves other providers' keys in the tab in place.
 
@@ -122,7 +128,7 @@ Run the automated checks with:
 pnpm test
 ```
 
-Run `pnpm test`, `pnpm build`, `pnpm build:plugin`, and `pnpm check:plugin` before release. Real Bark browser checks and their limits are documented in [MODELS.md](MODELS.md). Earlier audio/UI checks covered recording, pause/resume, autosave and reload. Simulated provider/storage faults cover fallback and recovery but do not establish account access or universal speech accuracy.
+Run `pnpm test` and `pnpm build` before a website release. Real Bark browser checks and their limits are documented in [MODELS.md](MODELS.md). Audio/UI checks cover recording, pause/resume, autosave and reload. DeepSeek and Meta browser transport was verified with invalid test keys; mocked successful responses cover coaching parsing and key isolation. These checks do not establish paid account access or universal speech accuracy.
 
 If recording is unavailable, open the app at `http://127.0.0.1:4173` in a current Chrome or Edge browser and allow microphone access. If coaching fails, check the named provider's key permissions, credits, and model availability.
 

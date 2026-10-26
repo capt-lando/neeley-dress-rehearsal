@@ -24,6 +24,11 @@ const fixtures = {
       content: { parts: [{ thought: true, text: '{"private":"reasoning"}' }, { text: json }] },
     }],
   },
+  deepseek: { choices: [{ finish_reason: 'stop', message: { content: json, reasoning_content: '{"private":"reasoning"}' } }] },
+  meta: {
+    stop_reason: 'end_turn',
+    content: [{ type: 'thinking', thinking: '{"private":"reasoning"}' }, { type: 'redacted_thinking', data: 'private' }, { type: 'text', text: json }],
+  },
   huggingface: { choices: [{ finish_reason: 'stop', message: { content: json } }] },
 };
 
@@ -40,7 +45,7 @@ function options(provider, extra = {}) {
 }
 
 test('official provider metadata supplies current defaults and API key setup links', () => {
-  assert.deepEqual(Object.keys(PROVIDERS), ['openai', 'anthropic', 'google', 'huggingface']);
+  assert.deepEqual(Object.keys(PROVIDERS), ['openai', 'anthropic', 'google', 'deepseek', 'meta', 'huggingface']);
   for (const provider of Object.values(PROVIDERS)) {
     assert.ok(provider.label && provider.defaultModel);
     assert.equal(new URL(provider.keyUrl).protocol, 'https:');
@@ -48,6 +53,10 @@ test('official provider metadata supplies current defaults and API key setup lin
   assert.equal(PROVIDERS.openai.defaultModel, 'gpt-6-luna');
   assert.equal(PROVIDERS.anthropic.defaultModel, 'claude-haiku-5-5');
   assert.equal(PROVIDERS.google.defaultModel, 'gemini-3.8-flash');
+  assert.equal(PROVIDERS.deepseek.defaultModel, 'deepseek-flash');
+  assert.equal(PROVIDERS.deepseek.keyUrl, 'https://platform.deepseek.com/api_keys');
+  assert.equal(PROVIDERS.meta.defaultModel, 'muse-spark-1.3');
+  assert.equal(PROVIDERS.meta.keyUrl, 'https://dev.meta.ai/api-keys');
 });
 
 test('OpenAI Responses sends private headers, disables storage, and reads text beyond reasoning items', async () => {
@@ -106,6 +115,65 @@ test('Gemini generateContent authenticates in a header, requests JSON and exclud
   assert.equal(request.body.generationConfig.thinkingConfig.thinkingLevel, 'LOW');
 });
 
+test('Meta Messages authenticates only to Meta and omits Claude-specific or unsupported parameters', async () => {
+  let request;
+  const result = await requestCoaching(options('meta', {
+    browser: true, workspaceId: 'claude_workspace',
+    fetchImpl: async (url, init) => {
+      request = { url, init, body: JSON.parse(init.body) };
+      return mockResponse(fixtures.meta);
+    },
+  }));
+  assert.deepEqual(result, report);
+  assert.equal(request.url, 'https://api.meta.ai/v1/messages');
+  assert.deepEqual(request.init.headers, { 'Content-Type': 'application/json', 'x-api-key': key });
+  assert.equal(request.body.model, 'muse-spark-1.3');
+  assert.equal(request.body.max_tokens, 8192);
+  assert.match(request.body.system, /JSON object/);
+  assert.deepEqual(request.body.messages, [{ role: 'user', content: prompt }]);
+  assert.deepEqual(Object.keys(request.body).sort(), ['max_tokens', 'messages', 'model', 'system']);
+  assert.equal(request.init.redirect, 'error');
+  assert.equal(request.init.credentials, 'omit');
+  assert.ok(request.init.signal instanceof AbortSignal);
+  assert.ok(!request.url.includes(key) && !request.init.body.includes(key));
+});
+
+test('Meta rejects truncated, tool, refusal and reasoning-only output instead of returning a report', async () => {
+  const invalid = [
+    ...['max_tokens', 'tool_use', 'refusal'].map(stop_reason => ({ ...fixtures.meta, stop_reason })),
+    { stop_reason: 'end_turn', content: [{ type: 'refusal' }, { type: 'text', text: json }] },
+    { stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: json }, { type: 'redacted_thinking', data: json }] },
+    ...['not JSON', 'null', '{}', '[]'].map(text => ({ stop_reason: 'end_turn', content: [{ type: 'text', text }] })),
+  ];
+  for (const body of invalid) {
+    await assert.rejects(requestCoaching(options('meta', {
+      fetchImpl: async () => mockResponse(body),
+    })), error => error.status === 502);
+  }
+});
+
+test('Meta errors are actionable, sanitized and do not retry or suggest Claude workspace settings', async () => {
+  for (const [status, expectedStatus, expectedMessage] of [
+    [400, 400, /rejected the request/], [403, 403, /API key and its model access/],
+    [404, 502, /selected model/], [429, 429, /temporarily rate-limited/], [503, 502, /unavailable right now/],
+  ]) {
+    let calls = 0;
+    await assert.rejects(requestCoaching(options('meta', {
+      fetchImpl: async () => {
+        calls++;
+        return mockResponse({ error: { message: `${key} ${prompt}` } }, status);
+      },
+    })), error => {
+      assert.equal(error.status, expectedStatus);
+      assert.match(error.message, expectedMessage);
+      assert.doesNotMatch(error.message, /Claude|workspace/);
+      assert.ok(!error.message.includes(key) && !error.message.includes(prompt));
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
 test('HF chat preserves custom models and accepts fenced JSON after a complete thinking preface', async () => {
   let body;
   const result = await requestCoaching(options('huggingface', {
@@ -120,6 +188,92 @@ test('HF chat preserves custom models and accepts fenced JSON after a complete t
   assert.deepEqual(result, report);
   assert.equal(body.model, 'Qwen/custom-model:fastest');
   assert.equal(body.messages[1].content, prompt);
+});
+
+test('DeepSeek chat requests bounded JSON with private bearer authentication and ignores reasoning', async () => {
+  for (const model of [undefined, 'deepseek-v4-pro']) {
+    let request;
+    const result = await requestCoaching(options('deepseek', {
+      model, browser: true,
+      fetchImpl: async (url, init) => {
+        request = { url, init, body: JSON.parse(init.body) };
+        // DeepSeek may send whitespace keep-alives before its non-stream JSON.
+        return new Response(`\n\n${JSON.stringify(fixtures.deepseek)}\n`);
+      },
+    }));
+    assert.deepEqual(result, report);
+    assert.equal(request.url, 'https://api.deepseek.com/chat/completions');
+    assert.deepEqual(request.init.headers, { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` });
+    assert.equal(request.body.model, model || 'deepseek-flash');
+    assert.equal(request.body.max_tokens, 8192);
+    assert.equal(request.body.stream, false);
+    assert.deepEqual(request.body.thinking, { type: 'disabled' });
+    assert.deepEqual(request.body.response_format, { type: 'json_object' });
+    assert.match(request.body.messages[0].content, /JSON object/);
+    assert.deepEqual(request.body.messages[1], { role: 'user', content: prompt });
+    assert.equal(request.body.input, undefined);
+    assert.equal(request.body.store, undefined);
+    assert.equal(request.init.redirect, 'error');
+    assert.equal(request.init.credentials, 'omit');
+    assert.ok(request.init.signal instanceof AbortSignal);
+    assert.ok(!request.url.includes(key) && !request.init.body.includes(key));
+  }
+});
+
+test('DeepSeek distinguishes balance, rate limits and invalid parameters without leaking provider errors or retrying', async () => {
+  for (const [status, expectedStatus, expectedMessage] of [
+    [402, 402, /balance is insufficient.*Add funds/],
+    [429, 429, /temporarily rate-limited.*Wait briefly/],
+    [422, 422, /rejected the request.*model/],
+    [503, 502, /unavailable right now/],
+  ]) {
+    let calls = 0;
+    await assert.rejects(requestCoaching(options('deepseek', {
+      fetchImpl: async () => {
+        calls++;
+        return { ok: false, status, json: async () => { throw new Error(`Do not read ${key} ${prompt}`); } };
+      },
+    })), error => {
+      assert.equal(error.status, expectedStatus);
+      assert.match(error.message, expectedMessage);
+      assert.ok(!error.message.includes(key) && !error.message.includes(prompt));
+      if (status === 429) assert.doesNotMatch(error.message, /balance|billing|credit|quota/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('DeepSeek rejects incomplete, refused, reasoning-only and invalid JSON reports', async () => {
+  const invalid = [
+    ...['length', 'tool_calls', 'insufficient_system_resource', 'aborted', 'content_filter'].map(finish_reason =>
+      ({ choices: [{ finish_reason, message: { content: json } }] })),
+    { choices: [{ finish_reason: 'stop', message: { refusal: 'Refused', content: json } }] },
+    ...[null, '', 'null', '[]', '{}', 'not JSON', '<think>' + json].map(content =>
+      ({ choices: [{ finish_reason: 'stop', message: { content, reasoning_content: json } }] })),
+    null, [], { choices: [] },
+  ];
+  for (const body of invalid) {
+    await assert.rejects(requestCoaching(options('deepseek', {
+      fetchImpl: async () => mockResponse(body),
+    })), error => error.status === 502);
+  }
+  await assert.rejects(requestCoaching(options('deepseek', {
+    fetchImpl: async () => new Response(`<html>${key}</html>`),
+  })), error => /unreadable response/.test(error.message) && !error.message.includes(key));
+});
+
+test('DeepSeek rejects unsafe credentials, model paths and oversized prompts before sending', async () => {
+  let calls = 0;
+  for (const extra of [
+    { apiKey: '' }, { apiKey: 'invalid\r\nheader' }, { model: 'https://other.example/model' },
+    { model: '../model' }, { model: 'organization/model' }, { prompt: 'é'.repeat(256 * 1024 + 1) },
+  ]) {
+    await assert.rejects(requestCoaching(options('deepseek', {
+      ...extra, fetchImpl: async () => { calls++; throw new Error('Must not send'); },
+    })));
+  }
+  assert.equal(calls, 0);
 });
 
 test('custom models do not receive parameters specific to the default model', async () => {
