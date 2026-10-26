@@ -802,50 +802,86 @@ test('recording caps saved audio at the maximum when the final input block cross
   assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 2);
 });
 
-test('live batches leave capture uninterrupted, save immediately on stop, and reuse only the completed transcript for coaching', async () => {
-  const first = deferred(), last = deferred(), requests = [];
+test('30-second live windows exclude pauses, flush the final remainder, and reuse the completed transcript for replay and coaching', async () => {
+  const first = deferred(), second = deferred(), last = deferred(), requests = [];
   const h = harness(async (url, options) => {
     requests.push({ url, input: JSON.parse(options.body) });
     assert.equal(url, '/api/analyze-text', 'the completed live transcript must avoid whole-take inference');
     return { transcript: requests.at(-1).input.text, wordStats: {}, blunders: {}, analysis: {} };
   });
-  const sessions = liveSpeech(h, (_samples, metadata) => metadata.index ? last.promise : first.promise);
+  const sessions = liveSpeech(h, (_samples, metadata) => [first, second, last][metadata.index].promise);
   await h.startRecording();
   sessions[0].options.onProgress('Downloading English speech model: 42%');
   assert.match(h.get('follow-transcript-status').textContent, /Downloading.*42%/);
-  h.captureRecordingSamples(new Float32Array(16000 * 8).fill(0.25), 16000);
+  h.captureRecordingSamples(new Float32Array(16000 * 29).fill(0.25), 16000);
+  await nextTurn();
+  assert.equal(sessions[0].calls.length, 0, 'the first request waits for a complete 30-second window');
+  h.toggleRecordingPause();
+  h.captureRecordingSamples(new Float32Array(16000 * 6).fill(0.9), 16000);
+  await nextTurn();
+  assert.equal(sessions[0].calls.length, 0, 'paused microphone frames cannot complete a live window');
+  assert.equal(h.state.sampleCount, 16000 * 29);
+  assert.match(h.get('follow-transcript-status').textContent, /^Paused/);
+  h.toggleRecordingPause();
+  h.captureRecordingSamples(new Float32Array(16000).fill(0.25), 16000);
   await nextTurn();
   assert.equal(sessions[0].calls.length, 1);
-  assert.equal(h.state.sampleCount, 128000);
+  assert.equal(h.state.sampleCount, 16000 * 30);
   assert.equal(requests.length, 0, 'capture cannot make an AI request');
-  first.resolve({ text: 'Practice helps.' }); await nextTurn();
-  assert.equal(h.get('follow-transcript').textContent, 'Practice helps.');
+  first.resolve({ text: 'Practice helps. We practice.' }); await nextTurn();
+  assert.equal(h.get('follow-transcript').textContent, 'Practice helps. We practice.');
   h.get('follow-transcript').scrollTop = 17;
-  h.captureRecordingSamples(new Float32Array(16000 * 2).fill(-0.25), 16000);
+  h.captureRecordingSamples(new Float32Array(16000 * 27).fill(-0.25), 16000);
+  await nextTurn();
+  assert.equal(sessions[0].calls.length, 1, 'the next window waits for 28 new seconds after the shared context');
   assert.equal(h.get('follow-transcript').scrollTop, 17, 'unchanged text must not reset the reader while new audio arrives');
+  h.captureRecordingSamples(new Float32Array(16000).fill(-0.25), 16000);
+  await nextTurn();
+  assert.equal(sessions[0].calls.length, 2);
+  assert.equal(h.state.recording, true, 'pending inference cannot interrupt capture');
+  h.captureRecordingSamples(new Float32Array(16000 * 3.5).fill(0.5), 16000);
   h.toggleRecordingPause();
-  h.captureRecordingSamples(new Float32Array(16000 * 3), 16000);
-  assert.equal(h.state.sampleCount, 160000, 'paused samples enter neither the saved audio nor live queue');
+  h.captureRecordingSamples(new Float32Array(16000 * 3).fill(0.9), 16000);
+  assert.equal(h.state.sampleCount, 16000 * 61.5, 'paused samples enter neither the saved audio nor live queue');
   assert.match(h.get('follow-transcript-status').textContent, /^Paused/);
   h.stopRecording();
   assert.equal(h.state.recording, false);
   assert.equal(h.storageCalls.save.length, 1, 'saving starts without waiting for recognition');
-  assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 10);
+  assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 61.5);
   assert.equal(h.state.transcriptText, '', 'the visible draft is not a complete cached transcript');
   assert.equal(h.get('analyze-button').disabled, true);
   assert.match(h.get('follow-transcript-status').textContent, /^Finishing/);
   await h.runAnalysis(); assert.equal(requests.length, 0);
   const replayTranscript = h.ensureTranscript();
   h.get('target-talking-points').value = 'Latest preparation after recording';
-  last.resolve({ text: 'Practice helps. Everyone benefits.' });
-  assert.equal(await replayTranscript, 'Practice helps. Everyone benefits.');
+  second.resolve({ text: 'We practice. Everyone benefits.' }); await nextTurn();
+  assert.equal(sessions[0].calls.length, 3, 'stopping queues the remaining audio without waiting for another full window');
+  assert.deepEqual(sessions[0].calls.map(({ samples, metadata }) => ({
+    length: samples.length / 16000, start: metadata.startSeconds, end: metadata.endSeconds,
+    overlap: metadata.overlapSeconds, final: metadata.isFinal,
+  })), [
+    { length: 30, start: 0, end: 30, overlap: 0, final: false },
+    { length: 30, start: 28, end: 58, overlap: 2, final: false },
+    { length: 5.5, start: 56, end: 61.5, overlap: 2, final: true },
+  ]);
+  assert.ok(sessions[0].calls[0].samples.every(value => value === 0.25));
+  assert.ok(sessions[0].calls[1].samples.subarray(0, 16000 * 2).every(value => value === 0.25));
+  assert.ok(sessions[0].calls[1].samples.subarray(16000 * 2).every(value => value === -0.25));
+  assert.ok(sessions[0].calls[2].samples.subarray(0, 16000 * 2).every(value => value === -0.25));
+  assert.ok(sessions[0].calls[2].samples.subarray(16000 * 2).every(value => value === 0.5));
+  last.resolve({ text: 'Everyone benefits. Ready.' });
+  const completeText = 'Practice helps. We practice. Everyone benefits. Ready.';
+  assert.equal(await replayTranscript, completeText);
+  assert.equal(await h.ensureTranscript(), completeText, 'replay reuses the completed live transcript');
+  assert.equal(sessions[0].session.getState().pendingChunks, 0);
+  assert.equal(sessions[0].session.getState().completedSeconds, 61.5);
   assert.equal(h.state.transcriptModel, h.state.config.transcriptionModel);
   assert.equal(h.get('analyze-button').disabled, false);
   await h.runAnalysis();
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].input.text, 'Practice helps. Everyone benefits.');
+  assert.equal(requests[0].input.text, completeText);
   assert.equal(requests[0].input.targetTalkingPoints, 'Latest preparation after recording');
-  assert.equal(sessions[0].calls[1].samples.length, 16000 * 4, 'the final remainder carries two seconds of overlap, not paused audio');
+  assert.equal(sessions[0].calls.length, 3, 'replay and coaching cannot rerun local recognition');
 });
 
 test('canceling live transcription keeps recording and requires a complete retry instead of analyzing a partial draft', async () => {
@@ -853,21 +889,21 @@ test('canceling live transcription keeps recording and requires a complete retry
   const h = harness(async (url, options) => {
     if (url === '/api/config') return {};
     requests.push(url);
-    if (url === '/api/transcribe') return { text: 'Complete recording transcript.', durationSeconds: 9 };
+    if (url === '/api/transcribe') return { text: 'Complete recording transcript.', durationSeconds: 31 };
     const input = JSON.parse(options.body);
     assert.equal(input.text, 'Complete recording transcript.');
     return { transcript: input.text, wordStats: {}, blunders: {}, analysis: {} };
   }, { startup: true });
   const sessions = liveSpeech(h, async () => ({ text: 'Partial draft.' }));
   await h.startRecording();
-  h.captureRecordingSamples(new Float32Array(16000 * 8), 16000); await nextTurn();
+  h.captureRecordingSamples(new Float32Array(16000 * 30), 16000); await nextTurn();
   assert.equal(h.get('follow-transcript').textContent, 'Partial draft.');
   await h.get('live-transcription-cancel').click();
   assert.equal(h.state.recording, true);
   assert.equal(sessions[0].session.getState().cancelled, true);
   h.captureRecordingSamples(new Float32Array(16000), 16000);
   h.stopRecording();
-  assert.equal(h.state.audioDuration, 9);
+  assert.equal(h.state.audioDuration, 31);
   assert.equal(h.state.transcriptText, '');
   assert.equal(h.get('follow-transcript-connect').hidden, false);
   await h.runAnalysis();
@@ -879,7 +915,8 @@ test('a failed live batch preserves audio and late results cannot replace a new 
   const h = harness();
   const sessions = liveSpeech(h, () => recognition.promise);
   await h.startRecording();
-  h.captureRecordingSamples(new Float32Array(16000 * 8), 16000); await nextTurn();
+  h.captureRecordingSamples(new Float32Array(16000 * 30), 16000); await nextTurn();
+  assert.equal(sessions[0].calls.length, 1, 'the stale result must come from a dispatched production-size window');
   h.stopRecording(); const finishing = h.state.livePromise.catch(() => 'cancelled');
   await h.startRecording();
   assert.equal(sessions[0].session.getState().cancelled, true);
@@ -929,7 +966,9 @@ test('uploading a replacement cancels pending live work before decoding and pres
   const recognition = deferred(), decode = deferred();
   const h = harness(undefined, { decodeAudioData: () => decode.promise });
   const sessions = liveSpeech(h, () => recognition.promise);
-  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000 * 8), 16000); await nextTurn(); h.stopRecording();
+  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000 * 30), 16000); await nextTurn();
+  assert.equal(sessions[0].calls.length, 1);
+  h.stopRecording();
   const oldAudio = h.state.audioBlob;
   const finishing = h.state.livePromise.catch(() => 'cancelled');
   const upload = h.uploadAudio({ name: 'Broken.wav', size: 10, arrayBuffer: async () => new ArrayBuffer(10) });

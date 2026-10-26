@@ -525,7 +525,7 @@ function renderLiveProgress(take) {
   const text = String(snapshot.text || '');
   const completed = Number(snapshot.completedSeconds) || 0;
   const captured = Number(snapshot.audioSeconds) || 0;
-  const prefix = take.finishing ? 'Finishing transcript' : state.recordingPaused ? 'Paused · transcription continues' : snapshot.preparing ? 'Preparing speech model' : snapshot.catchingUp ? 'Catching up' : '8-second batches';
+  const prefix = take.finishing ? 'Finishing transcript' : state.recordingPaused ? 'Paused · transcription continues' : snapshot.preparing ? 'Preparing speech model' : snapshot.catchingUp ? 'Catching up' : '30-second windows';
   const progress = !completed && take.progress ? ` · ${take.progress}` : '';
   const message = `${prefix} · ${formatTime(completed)} of ${formatTime(captured)} transcribed${progress}`;
   if (take.text === text && take.status === message) return;
@@ -541,7 +541,7 @@ function renderLiveProgress(take) {
   $('follow-transcript-connect').hidden = true;
   $('live-transcription-cancel').hidden = take.finishing;
   $('follow-transcript-note').hidden = false;
-  $('follow-transcript-note').textContent = 'Draft transcript · audio is processed in 8-second batches. Text may appear later and can contain recognition errors.';
+  $('follow-transcript-note').textContent = 'Draft transcript · 30-second audio windows with a brief overlap. Stopping processes the remaining audio. Text may appear later and can contain recognition errors.';
 }
 function cancelLiveSession() {
   const take = state.liveTake;
