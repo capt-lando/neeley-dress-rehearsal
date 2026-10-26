@@ -206,6 +206,7 @@ function resetKeyVisibility(inputId, toggleId) {
 function renderProviderSettings() {
   if (state.config.coachingViaHost) return;
   const provider = providerInfo();
+  $('analysis-key-provider').textContent = provider.label;
   document.querySelectorAll('input[name="analysis-provider"]').forEach((input) => { input.checked = input.value === state.settingsProvider; });
   $('provider-instructions').textContent = provider.instructions || PROVIDER_GUIDES[state.settingsProvider]?.instructions || 'Sign in, create an API key, then copy it.';
   $('provider-key-link').href = provider.keyUrl || PROVIDER_GUIDES[state.settingsProvider]?.keyUrl;
