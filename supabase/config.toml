@@ -1,0 +1,32 @@
+project_id = "neeley-dress-rehearsal"
+
+[api]
+enabled = true
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+major_version = 17
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:4173"
+additional_redirect_urls = ["http://127.0.0.1:4173"]
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = false
+enable_confirmations = true
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[functions.rehearsal-api]
+enabled = true
+# /config is public. Every private route independently verifies auth.getUser()
+# before using JWT claims or data. New publishable keys are not JWTs.
+verify_jwt = false
+entrypoint = "./functions/rehearsal-api/index.ts"

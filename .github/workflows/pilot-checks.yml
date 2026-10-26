@@ -1,0 +1,48 @@
+name: Check cloud pilot
+on:
+  pull_request:
+  push:
+    branches: [main, cloud-pilot-foundation]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  database:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - name: Build hosted client without production credentials
+        run: pnpm build
+        env:
+          VITE_SUPABASE_URL: https://build-check.supabase.co
+          VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_build_check
+      - run: pnpm exec supabase start
+      - run: pnpm exec supabase db reset
+      - run: pnpm test:db
+      - name: Stop test database
+        if: always()
+        run: pnpm exec supabase stop --no-backup
+  speech-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -r cloud/speech-worker/requirements-test.txt
+      - name: Test worker without downloading model weights
+        run: python -m unittest discover -s cloud/speech-worker/tests -v

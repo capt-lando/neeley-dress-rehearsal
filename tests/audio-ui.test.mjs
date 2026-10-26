@@ -200,6 +200,7 @@ function microphone(label) {
 }
 const inputDevice = (deviceId, label = '') => ({ kind: 'audioinput', deviceId, label });
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+const hostedConfig = { hosted: true, localSpeech: false, liveTranscription: false, transcriptionModel: 'bark-3.0-plus', analysisProvider: 'hosted', providers: [], auth: { signedIn: true }, analysisConfigured: true };
 const elementText = element => String(element.textContent || '') + element.children.map(elementText).join('');
 const settleAudioSaves = async h => { await Promise.all([...h.state.pendingAudioSaves]); await nextTurn(); };
 const savedTake = (id, caption = id) => ({ id, blob: new Blob([`audio-${id}`], { type: 'audio/wav' }), duration: 4, caption, createdAt: 1_760_000_000_000 });
@@ -217,6 +218,110 @@ function liveSpeech(h, recognize) {
   } };
   return sessions;
 }
+
+test('hosted recording and replay never run local inference, upload audio, or save anonymous browser copies', async () => {
+  const requests = [];
+  const h = harness(async path => { requests.push(path); if (path === '/api/config') return hostedConfig; throw new Error('Unexpected cloud upload'); }, { startup: true });
+  await nextTurn();
+  let liveStarts = 0;
+  h.window.rehearsalLiveSpeech = { startSession() { liveStarts++; throw new Error('Local inference must not run'); } };
+  await h.enableMic(); await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000); h.stopRecording();
+  assert.equal(liveStarts, 0); assert.equal(h.storageCalls.save.length, 0);
+  for (const callback of h.get('playback').listeners.get('play')) callback();
+  await nextTurn();
+  assert.deepEqual(requests, ['/api/config']);
+  assert.match(h.get('audio-save-status').textContent, /This take is in this tab/);
+  assert.match(h.get('privacy-copy').textContent, /saves your recording, transcript, and feedback privately/);
+  assert.equal(h.get('saved-recordings-details').hidden, true);
+  assert.equal(h.get('cloud-recordings-details').hidden, false);
+});
+
+test('opening a private cloud take enables downloading its exact audio without another upload', async () => {
+  const h = harness();
+  h.updateConfig(hostedConfig); h.discardAudio();
+  assert.equal(h.get('download-audio').disabled, true);
+  const blob = new Blob(['saved cloud WAV']);
+  h.window.rehearsalHostedActions.restoreRecording({ id: 'cloud-take', title: 'Private rehearsal', durationSeconds: 2, blob, transcript: 'Um, practice helps.' });
+  assert.equal(h.get('download-audio').disabled, false);
+  assert.equal(h.get('transcript').value, 'Um, practice helps.');
+  assert.equal(h.state.cloudRecordingId, 'cloud-take');
+  assert.equal(h.storageCalls.save.length, 0);
+  await h.downloadCurrentAudio();
+  const [download] = clickedDownloads(h);
+  assert.equal(h.objectUrls.get(download.href), blob);
+});
+
+test('hosted explicit transcription remembers the cloud recording ID for coaching', async () => {
+  const requests = [];
+  const id = '12345678-1234-4123-8123-123456789012';
+  const h = harness(async (path, options) => { requests.push({ path, options }); return { text: 'Um, practice helps.', durationSeconds: 1, recordingId: id }; });
+  h.updateConfig(hostedConfig); h.setAudio(new Blob(['prepared WAV']), 1, 'Private take');
+  await h.ensureTranscript();
+  assert.equal(requests.length, 1); assert.equal(requests[0].path, '/api/transcribe');
+  assert.equal(h.state.cloudRecordingId, id); assert.equal(h.analysisInput('Um, practice helps.').recordingId, id);
+  assert.match(h.get('audio-save-status').textContent, /Saved privately/);
+});
+
+test('hosted signed-out users can keep audio locally but cannot send it for transcription', async () => {
+  const h = harness(); let opened = 0;
+  h.window.rehearsalAccount = { open() { opened++; } };
+  h.updateConfig({ ...hostedConfig, auth: { signedIn: false }, analysisConfigured: false });
+  h.setAudio(new Blob(['prepared WAV']), 1, 'Private take');
+  await assert.rejects(h.ensureTranscript(), /Sign in/);
+  assert.equal(opened, 1); assert.ok(h.state.audioBlob);
+});
+
+test('switching hosted accounts clears current private preparation, transcript, report, and playback', () => {
+  const h = harness(); h.updateConfig(hostedConfig);
+  h.window.rehearsalHostedActions.accountChanged('first-user');
+  h.setAudio(new Blob(['private WAV']), 1, 'Private take');
+  h.state.cloudRecordingId = 'saved-id'; h.state.transcriptText = 'Private speech';
+  h.get('target-script').value = 'Private script'; h.get('instructor-rubric').value = 'Private rubric';
+  h.state.report = { private: true };
+  h.window.rehearsalHostedActions.accountChanged('second-user');
+  assert.equal(h.state.audioBlob, null); assert.equal(h.state.transcriptText, ''); assert.equal(h.state.report, null);
+  assert.equal(h.get('target-script').value, ''); assert.equal(h.get('instructor-rubric').value, '');
+  assert.equal(h.state.cloudRecordingId, '');
+});
+
+test('switching hosted accounts during analysis releases busy controls and rejects late feedback', async () => {
+  const pending = deferred();
+  const h = harness(async path => path === '/api/transcribe' ? { text: 'Private speech.', durationSeconds: 1, recordingId: '12345678-1234-4123-8123-123456789012' } : pending.promise);
+  h.updateConfig(hostedConfig); h.window.rehearsalHostedActions.accountChanged('first-user');
+  h.setAudio(new Blob(['audio']), 1, 'Private take');
+  const analysis = h.runAnalysis(); await nextTurn();
+  assert.equal(h.state.busy, true);
+  h.window.rehearsalHostedActions.accountChanged('second-user');
+  assert.equal(h.state.busy, false); assert.equal(h.get('record-button').disabled, false);
+  pending.resolve({ analysis: { method: 'ai' } }); await analysis;
+  assert.equal(h.state.report, null); assert.equal(h.state.busy, false);
+});
+
+test('late audio decoding cannot cross accounts or unlock a newer account decode', async () => {
+  const old = deferred(), current = deferred(); let decode = 0;
+  const h = harness(undefined, { decodeAudioData: () => (++decode === 1 ? old.promise : current.promise) });
+  h.updateConfig(hostedConfig); h.window.rehearsalHostedActions.accountChanged('first-user');
+  const first = h.uploadAudio(Object.assign(new Blob(['file']), { name: 'private-old.wav' })); await nextTurn();
+  h.window.rehearsalHostedActions.accountChanged('second-user');
+  const second = h.uploadAudio(Object.assign(new Blob(['file']), { name: 'new-account.wav' })); await nextTurn();
+  const decoded = { duration: 1, length: 16000, sampleRate: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) };
+  old.resolve(decoded); await first;
+  assert.equal(h.state.audioBlob, null); assert.equal(h.state.busy, true); assert.equal(h.state.preparingAudio, true);
+  current.resolve(decoded); await second;
+  assert.match(h.get('recording-caption').textContent, /new-account/);
+  assert.equal(h.state.busy, false);
+});
+
+test('switching hosted accounts invalidates pending rubric extraction', async () => {
+  const extraction = deferred();
+  const h = harness(undefined, { extractRubric: () => extraction.promise });
+  h.updateConfig(hostedConfig); h.window.rehearsalHostedActions.accountChanged('first-user');
+  const importing = h.importRubric({ name: 'private-rubric.docx', size: 10 });
+  assert.equal(h.state.rubricLoading, true);
+  h.window.rehearsalHostedActions.accountChanged('second-user');
+  extraction.resolve({ text: 'Private old rubric', name: 'private-rubric.docx' }); await importing;
+  assert.equal(h.get('instructor-rubric').value, ''); assert.equal(h.state.rubricFileName, ''); assert.equal(h.state.rubricLoading, false);
+});
 
 test('completed takes autosave only audio metadata once, and short takes are not saved', async () => {
   const h = harness();

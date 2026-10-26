@@ -4,7 +4,7 @@ import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  config: { configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: BARK_MODEL_ID, analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
+  config: { hosted: Boolean(window.rehearsalService?.hosted), configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: BARK_MODEL_ID, analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
   stream: null, context: null, source: null, processor: null, silent: null, analyser: null,
   recording: false, recordingPaused: false, startingRecording: false, recordingSampleRate: 0, requestingMic: false, preparingAudio: false, samples: [], sampleCount: 0, timer: null, meterFrame: null,
   audioBlob: null, audioURL: null, audioDuration: 0, duration: 0, report: null, busy: false, requestController: null,
@@ -15,6 +15,8 @@ const state = {
   waveformBars: [], waveformPhase: 0, pendingSeek: null,
   rubricLoading: false, rubricGeneration: 0, rubricFileName: '', rubricPendingName: '', targetView: 'points',
   audioSave: null, pendingAudioSaves: new Set(), unsavedRecordings: new Map(), savedRecordings: [], libraryGeneration: 0, libraryOpenGeneration: 0, libraryBusy: false, libraryFocus: null,
+  cloudRecordingId: '', accountId: '',
+  audioPreparationGeneration: 0,
 };
 
 const PROVIDER_GUIDES = {
@@ -147,6 +149,18 @@ function updateConfig(config) {
   if (state.config.transcriptionModel !== previousSpeechModel && !manualPanelTranscript) resetTranscriptForModelChange();
   state.settingsProvider = state.config.analysisProvider || 'openai';
   const ready = state.config.analysisConfigured;
+  $('cloud-recordings-details').hidden = !state.config.hosted;
+  $('saved-recordings-details').hidden = Boolean(state.config.hosted);
+  if (state.config.hosted) {
+    $('connection-label').textContent = state.config.auth?.signedIn ? 'My account' : 'Sign in';
+    $('settings-open').setAttribute('aria-label', 'Account and privacy settings');
+    $('connection-dot').classList.toggle('connected', Boolean(state.config.auth?.signedIn));
+    document.querySelector('.timer-limit').textContent = `/ ${formatTime(state.config.maxDurationSeconds)}`;
+    $('privacy-copy').textContent = 'Create transcript or Analyze saves your recording, transcript, and feedback privately to your account and processes them in the cloud. Recording and replay alone stay in this tab. Coaching sends your transcript and preparation text to our AI provider. Delete saved rehearsals from My saved rehearsals. Usage analytics is optional in My account.';
+    if (state.report) renderCoachingState(state.report);
+    if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
+    return;
+  }
   $('connection-label').textContent = state.config.coachingViaHost ? 'Codex coaching' : ready ? 'AI key in this tab' : 'Connect API';
   $('settings-open').setAttribute('aria-label', state.config.coachingViaHost ? 'Rehearsal settings: coaching in this Codex conversation' : `Connection settings: ${ready ? 'AI key in this tab' : 'connect an AI provider'}`);
   $('connection-dot').classList.toggle('connected', ready);
@@ -231,7 +245,7 @@ function clearKeyFields() {
   $('analysis-api-key').value = '';
   resetKeyVisibility('analysis-api-key', 'analysis-key-toggle');
 }
-function openSettings() { $('settings-status').textContent = ''; state.settingsProvider = state.config.analysisProvider || 'openai'; renderProviderSettings(); renderSpeechSettings(); $('settings-dialog').showModal(); document.body.classList.add('no-scroll'); }
+function openSettings() { if (state.config.hosted) { window.rehearsalAccount?.open(); return; } $('settings-status').textContent = ''; state.settingsProvider = state.config.analysisProvider || 'openai'; renderProviderSettings(); renderSpeechSettings(); $('settings-dialog').showModal(); document.body.classList.add('no-scroll'); }
 function closeSettings() { clearKeyFields(); $('settings-dialog').close(); document.body.classList.remove('no-scroll'); }
 async function saveSettings(event) {
   event.preventDefault();
@@ -490,6 +504,7 @@ function toggleRecordingPause() {
 }
 
 function startLiveTranscription() {
+  if (state.config.hosted) return;
   $('follow-transcript-panel').hidden = false;
   state.transcriptionAttempted = true;
   if (!window.rehearsalLiveSpeech?.startSession) {
@@ -641,6 +656,7 @@ function stopRecording(limitReached = false) {
   syncRecordingLibraryControls();
   if (state.duration < 0.5) { cancelLiveSession(); setStatus('That take was a little too short. Record at least a few seconds, then try again.', 'error'); return; }
   setAudio(makeWav(flattened, sampleRate), state.duration, 'Your rehearsal', { preserveCapture: true });
+  window.rehearsalAccount?.track('recording_completed');
   finishLiveTranscription();
   if (limitReached) setStatus('Your recording reached the 10-minute limit. You can listen back now; check the save status below before closing this tab.');
 }
@@ -656,6 +672,12 @@ function setAudio(blob, duration, caption, { savedRecording = null, preserveCapt
   $('timer').textContent = formatTime(duration);
   showTranscriptReadyState();
   updatePlaybackUI();
+  if (state.config.hosted) {
+    state.audioSave = null;
+    $('audio-save-status').textContent = 'This take is in this tab. Create transcript or Analyze to save it privately to your account.';
+    syncRecordingLibraryControls();
+    return;
+  }
   const id = savedRecording?.id || window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const record = { id, blob, duration, caption: String(caption || 'Your rehearsal').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 255), createdAt: savedRecording?.createdAt ?? Date.now(), status: savedRecording?.status === 'failed' ? 'failed' : savedRecording ? 'saved' : 'saving', error: savedRecording?.error || '' };
   state.audioSave = record;
@@ -668,6 +690,7 @@ function discardAudio(reset = true) {
   state.liveFailure = '';
   state.libraryOpenGeneration++;
   state.audioSave = null;
+  state.cloudRecordingId = '';
   state.audioGeneration++;
   state.analysisGeneration++;
   state.transcriptController?.abort();
@@ -813,6 +836,7 @@ function renderSavedRecordings() {
   syncRecordingLibraryControls();
 }
 async function refreshSavedRecordings() {
+  if (state.config.hosted) return;
   const generation = ++state.libraryGeneration;
   try {
     const records = await recordingStore().list();
@@ -880,7 +904,7 @@ async function deleteSavedRecording(id) {
   finally { state.libraryBusy = false; syncRecordingLibraryControls(); }
 }
 function warnBeforeLeaving(event) {
-  if (state.recording || state.pendingAudioSaves.size || state.unsavedRecordings.size) {
+  if (state.recording || state.pendingAudioSaves.size || state.unsavedRecordings.size || state.config.hosted && state.audioBlob && !state.cloudRecordingId) {
     event.preventDefault();
     event.returnValue = '';
   }
@@ -1006,7 +1030,7 @@ async function togglePlayback() {
 function showTranscriptReadyState() {
   if (!state.audioBlob || state.transcriptText || state.transcriptPromise || state.liveTake) return;
   if (state.liveFailure) { showLiveFallback(state.liveFailure); return; }
-  $('follow-transcript-status').textContent = 'Replay to transcribe English speech on your device. The first run downloads the speech model.';
+  $('follow-transcript-status').textContent = state.config.hosted ? 'Create transcript saves this recording privately and transcribes it in the cloud. Replay stays on this device.' : 'Replay to transcribe English speech on your device. The first run downloads the speech model.';
   $('follow-transcript-connect').textContent = 'Create transcript';
   $('follow-transcript-connect').hidden = false;
 }
@@ -1030,6 +1054,7 @@ function ensureTranscript() {
   const generation = state.audioGeneration;
   const model = state.config.transcriptionModel;
   if (!state.audioBlob) return Promise.reject(new Error('Record or upload a rehearsal first.'));
+  if (state.config.hosted && !state.config.auth?.signedIn) { openSettings(); return Promise.reject(new Error('Sign in to save and transcribe your rehearsal.')); }
   if (state.livePromise) return state.livePromise;
   if (state.transcriptGeneration === generation && state.transcriptModel === model && state.transcriptText.trim()) return Promise.resolve(state.transcriptText);
   if (state.transcriptPromise) return state.transcriptPromise;
@@ -1037,7 +1062,7 @@ function ensureTranscript() {
   const controller = new AbortController();
   state.transcriptController = controller;
   state.transcriptionAttempted = true;
-  $('follow-transcript-status').textContent = 'Preparing speech recognition on your device… You can keep listening.';
+  $('follow-transcript-status').textContent = state.config.hosted ? 'Saving and transcribing this recording in the cloud… You can keep listening.' : 'Preparing speech recognition on your device… You can keep listening.';
   $('follow-transcript-connect').hidden = true;
   syncCancelControls();
   let promise;
@@ -1051,6 +1076,11 @@ function ensureTranscript() {
       if (!text.trim()) throw new Error('No speech was found. Check your microphone level or try another take.');
       if (Number.isFinite(result.durationSeconds) && result.durationSeconds > 0) {
         state.audioDuration = result.durationSeconds; state.duration = result.durationSeconds;
+      }
+      if (state.config.hosted) {
+        state.cloudRecordingId = result.recordingId;
+        $('audio-save-status').textContent = 'Saved privately to your account. Find this take in My saved rehearsals.';
+        window.rehearsalAccount?.refreshHistory();
       }
       cacheTranscript(text, generation);
       updatePlaybackUI();
@@ -1078,6 +1108,7 @@ function ensureTranscript() {
   return promise;
 }
 function maybeTranscribeForPlayback() {
+  if (state.config.hosted) return;
   if (!state.transcriptionAttempted || state.transcriptPromise || state.transcriptText) {
     ensureTranscript().catch(() => {});
   }
@@ -1086,12 +1117,16 @@ async function uploadAudio(file) {
   if (!file || state.busy || state.recording || state.startingRecording || state.requestingMic) return;
   if (file.size > 60 * 1024 * 1024) { setStatus('Please choose an audio file smaller than 60 MB and no longer than 10 minutes.', 'error'); return; }
   if (state.liveTake) { cancelLiveSession(); showLiveFallback('Live transcription stopped while opening another recording. Retry the complete recording if needed.'); }
+  const generation = ++state.audioPreparationGeneration;
   state.preparingAudio = true;
   setBusy(true, 'Opening your recording and preparing its audio…');
   let decodeContext;
   try {
     decodeContext = new (window.AudioContext || window.webkitAudioContext)();
-    const audioBuffer = await decodeContext.decodeAudioData(await file.arrayBuffer());
+    const bytes = await file.arrayBuffer();
+    if (generation !== state.audioPreparationGeneration) return;
+    const audioBuffer = await decodeContext.decodeAudioData(bytes);
+    if (generation !== state.audioPreparationGeneration) return;
     if (audioBuffer.duration > state.config.maxDurationSeconds) throw new Error('This recording is longer than 10 minutes. Trim it to a shorter rehearsal and upload it again.');
     if (audioBuffer.duration < 0.5) throw new Error('This recording is too short to analyze. Please choose a longer recording.');
     const mono = new Float32Array(audioBuffer.length);
@@ -1104,14 +1139,17 @@ async function uploadAudio(file) {
     setAudio(wav, audioBuffer.duration, file.name);
     $('report').hidden = true;
     $('record-title').textContent = 'Live Transcript';
-    setStatus('Recording loaded. Replay to hear it and see your transcript; Analyze adds coaching.');
-  } catch (error) { setStatus(error.name === 'EncodingError' ? 'This browser could not read that audio format. Try a WAV, MP3, or M4A recording.' : errorMessage(error), 'error'); }
-  finally { if (decodeContext) await decodeContext.close().catch(() => {}); state.preparingAudio = false; setBusy(false); $('audio-upload').value = ''; }
+    setStatus(state.config.hosted ? 'Recording opened locally. Create transcript or Analyze saves it privately and processes it in the cloud.' : 'Recording loaded. Replay to hear it and see your transcript; Analyze adds coaching.');
+  } catch (error) { if (generation === state.audioPreparationGeneration) setStatus(error.name === 'EncodingError' ? 'This browser could not read that audio format. Try a WAV, MP3, or M4A recording.' : errorMessage(error), 'error'); }
+  finally {
+    if (decodeContext) await decodeContext.close().catch(() => {});
+    if (generation === state.audioPreparationGeneration) { state.preparingAudio = false; setBusy(false); $('audio-upload').value = ''; }
+  }
 }
 function analysisInput(text, useAI = true) {
   const mode = targetMode();
   const instructorRubric = $('instructor-rubric').value;
-  return { text, targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value, targetMode: mode, plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value, instructorRubric, rubricFileName: instructorRubric.trim() ? state.rubricFileName : '', durationSeconds: state.duration, useAI };
+  return { text, targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value, targetMode: mode, plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value, instructorRubric, rubricFileName: instructorRubric.trim() ? state.rubricFileName : '', durationSeconds: state.duration, useAI, ...(state.config.hosted ? { recordingId: state.cloudRecordingId } : {}) };
 }
 function markPromptStale() {
   state.promptGeneration++;
@@ -1159,6 +1197,8 @@ async function runAnalysis({ corrected = false } = {}) {
   if (state.busy || state.recording || state.startingRecording || state.requestingMic || state.liveTake) return;
   if (!corrected && !state.audioBlob) return;
   if (corrected && !$('transcript').value.trim()) { setStatus('Add your transcript before updating the feedback.', 'error'); return; }
+  if (state.config.hosted && !state.config.auth?.signedIn) { openSettings(); return; }
+  window.rehearsalAccount?.track('analysis_requested');
   state.requestController = new AbortController();
   const signal = state.requestController.signal;
   const generation = ++state.analysisGeneration;
@@ -1179,9 +1219,12 @@ async function runAnalysis({ corrected = false } = {}) {
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration) return;
     state.report = { ...report, transcript: report.transcript || text, input: { targetScript: input.targetScript, targetTalkingPoints: input.targetTalkingPoints, targetMode: input.targetMode, plannedIntroduction: input.plannedIntroduction, plannedTransitions: input.plannedTransitions, instructorRubric: input.instructorRubric, rubricFileName: input.rubricFileName } };
     renderReport();
+    window.rehearsalAccount?.track(report.analysis?.method === 'ai' ? 'analysis_completed' : 'analysis_failed');
+    window.rehearsalAccount?.refreshHistory();
     setStatus(state.transcriptText !== text ? 'The transcript changed while feedback was being prepared. Update feedback to analyze your latest corrections.' : '');
     $('report').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
+    if (error.name !== 'AbortError') window.rehearsalAccount?.track('analysis_failed');
     if (generation === state.analysisGeneration) {
       if (error.name === 'AbortError') setStatus('Analysis stopped. Your recording is still here when you’re ready.');
       else setStatus(errorMessage(error), 'error');
@@ -1217,6 +1260,13 @@ function renderCoachingState(report) {
   $('coaching-notice').hidden = complete;
   $('speech-analysis-content').hidden = !complete;
   $('analysis-disclaimer').hidden = !complete;
+  if (state.config.hosted) {
+    $('coaching-title').textContent = failed ? 'Coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Sign in for coaching.';
+    $('coaching-description').textContent = 'Cloud coaching reviews your transcript and preparation text. Your recordings, transcripts, and feedback are saved privately to your account.';
+    $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Sign in';
+    $('coaching-settings').hidden = true;
+    return;
+  }
   $('coaching-title').textContent = failed ? 'AI coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Connect an AI coach.';
   $('coaching-description').textContent = state.config.coachingViaHost
     ? 'Your transcript and word stats are ready. Analyze sends your current text to this Codex conversation for a speech rating and color annotations.'
@@ -1398,6 +1448,47 @@ async function downloadReport() {
   catch (error) { setStatus(errorMessage(error), 'error'); }
 }
 
+window.rehearsalHostedActions = {
+  updateConfig,
+  canReplaceAudio: () => !state.recording && !state.startingRecording && !state.busy && !state.requestingMic && !state.transcriptPromise,
+  accountChanged(id) {
+    if (state.accountId === id) return;
+    state.accountId = id;
+    state.audioPreparationGeneration++;
+    state.preparingAudio = false;
+    if (state.recording) stopRecording();
+    cleanupMic(); discardAudio();
+    for (const field of ['target-script', 'target-talking-points', 'planned-introduction', 'planned-transitions', 'instructor-rubric']) $(field).value = '';
+    removeRubric(); updateTargetHint();
+    setBusy(false); setStatus('');
+    state.config.auth = { signedIn: Boolean(id) };
+    state.config.analysisConfigured = false;
+    updateConfig(state.config);
+  },
+  restoreRecording(record) {
+    if (!window.rehearsalHostedActions.canReplaceAudio()) throw new Error('Finish your current take before opening another recording.');
+    setAudio(record.blob, record.durationSeconds, record.title || 'My rehearsal');
+    state.cloudRecordingId = record.id;
+    if (record.transcript) cacheTranscript(record.transcript);
+    const input = record.report?.input || record.report?.meta;
+    if (input) {
+      for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric']]) $(field).value = typeof input[key] === 'string' ? input[key] : '';
+      state.rubricFileName = input.rubricFileName || ''; updateTargetHint(); updateRubricControls();
+    }
+    if (record.report) { state.report = record.report; renderReport(); }
+    $('audio-save-status').textContent = 'Saved privately to your account.';
+    $('record-title').textContent = 'Live Transcript';
+    setStatus('Saved rehearsal opened. Replay does not upload or reprocess the recording.');
+  },
+  recordingDeleted(id) {
+    if (state.cloudRecordingId !== id) return;
+    state.cloudRecordingId = '';
+    resetTranscriptForModelChange();
+    showTranscriptReadyState();
+    $('audio-save-status').textContent = 'Cloud copy deleted. This open take remains in this tab; analyzing it again will create a new cloud copy.';
+  },
+};
+
 $('settings-open').addEventListener('click', openSettings);
 $('coaching-action').addEventListener('click', () => state.config.analysisConfigured ? runAnalysis({ corrected: true }) : openSettings());
 $('coaching-settings').addEventListener('click', openSettings);
@@ -1506,10 +1597,17 @@ updateRubricControls();
 $('remove-transitions').hidden = !$('planned-transitions').value;
 initializeWaveform();
 updatePlaybackUI();
+if (state.config.hosted) updateConfig(state.config);
 window.rehearsalService?.setProgressHandler?.((message) => {
   if (typeof message !== 'string' || !message) return;
   $('local-model-status').textContent = message;
   if (state.transcriptController) $('follow-transcript-status').textContent = message;
   if (state.busy) setStatus(message, 'busy');
+});
+window.rehearsalService?.setRecordingSavedHandler?.((blob, id) => {
+  if (state.audioBlob !== blob) return;
+  state.cloudRecordingId = id;
+  $('audio-save-status').textContent = 'Saved privately to your account. Transcription and coaching can be retried without uploading again.';
+  window.rehearsalAccount?.refreshHistory();
 });
 api('/api/config').then(updateConfig).catch(error => setStatus(errorMessage(error), 'error'));

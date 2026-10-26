@@ -19,6 +19,7 @@
 .school-logo img,.school-logo svg{display:block;width:100%;height:auto}
 .school-intro .hero-description{max-width:570px;margin:12px 0 0}
 .brand-mark{flex-shrink:0}
+.oauth-options{display:grid;gap:12px;margin:24px 0}.oauth-options .secondary-button{justify-content:center}.usage-consent{display:flex;align-items:flex-start;gap:10px;margin-top:24px}.usage-consent input{width:18px;height:18px;flex:none;accent-color:#4d286a}.usage-consent span{line-height:1.5}#account-details{margin:24px 0}#cloud-history-refresh{margin-bottom:12px}
 @media(max-width:650px){.site-header{flex-wrap:wrap;gap:18px}.brand strong{font-size:14px;letter-spacing:.7px}.hero.school-intro{padding:18px 0 20px}.school-logo{width:290px}.school-intro .hero-description{margin-top:10px}}
 @media(max-width:365px){.brand strong{font-size:13px;letter-spacing:.5px}}
 /* Guided provider setup keeps model details out of the first-time flow. */

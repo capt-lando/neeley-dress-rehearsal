@@ -9,6 +9,8 @@ test-documents/
 dist/
 build/
 work/
+supabase/.temp/
+supabase/.branches/
 outputs/*
 !outputs/rehearsal-flow.png
 !outputs/rehearsal-flow-prompt.txt

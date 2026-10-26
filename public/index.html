@@ -135,6 +135,12 @@
           <p class="saved-recordings-status" id="saved-recordings-status" role="status" aria-live="polite">Recordings save automatically in this browser after you stop.</p>
           <div class="saved-recordings-list" id="saved-recordings-list"></div>
         </details>
+        <details class="saved-recordings" id="cloud-recordings-details" hidden>
+          <summary>My saved rehearsals <span aria-hidden="true">+</span></summary>
+          <p class="saved-recordings-status" id="cloud-recordings-status" role="status">Sign in to see your private recordings.</p>
+          <button class="text-button" id="cloud-history-refresh" type="button">Refresh saved rehearsals</button>
+          <div class="saved-recordings-list" id="cloud-recordings-list"></div>
+        </details>
       </section>
     </div>
     <p class="privacy-note"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span id="privacy-copy">Speech is transcribed in your browser. Completed recordings save only in this browser; clearing site data or private browsing can remove them. Your key, scripts, and transcripts stay in this tab’s memory. Analyze sends your transcript and preparation text to your chosen AI provider. Audio and full rubric files stay on this device.</span></p>
@@ -179,6 +185,23 @@
     <p class="model-attribution">Speech recognition: <a href="https://huggingface.co/ConwayResearch/Underdog-Bark-3.0" target="_blank" rel="noopener noreferrer">Bark 3.0 by Conway Research</a>.<br>Based on <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3" target="_blank" rel="noopener noreferrer">NVIDIA Corporation’s parakeet-tdt-0.6b-v3</a> and <a href="https://huggingface.co/moondream/parakeet-ultra" target="_blank" rel="noopener noreferrer">Moondream’s parakeet-ultra</a>.<br>ONNX conversions: <a href="https://huggingface.co/ai-ecoverse/Underdog-Bark-3.0-ONNX" target="_blank" rel="noopener noreferrer">ai-ecoverse</a> &amp; <a href="https://huggingface.co/velddev/Underdog-Bark-3.0-Plus-sherpa-onnx" target="_blank" rel="noopener noreferrer">velddev</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a></p>
   </footer>
 
+  <dialog id="account-dialog" aria-labelledby="account-title">
+    <div class="dialog-heading"><div><p class="eyebrow">YOUR REHEARSALS</p><h2 id="account-title">Your Neeley account.</h2></div><button class="icon-button" id="account-close" type="button" aria-label="Close account">×</button></div>
+    <p class="support-text">Sign in to save private rehearsals and receive cloud transcription and coaching. No personal AI key or speech-model download is needed.</p>
+    <div id="oauth-options" class="oauth-options">
+      <button id="sign-in-google" class="secondary-button" type="button">Continue with Google</button>
+      <button id="sign-in-microsoft" class="secondary-button" type="button">Continue with Microsoft</button>
+      <p class="field-note">Free for everyone. This is not an official TCU single sign-on service.</p>
+    </div>
+    <section id="account-details" hidden>
+      <p id="account-summary"></p>
+      <label class="usage-consent"><input type="checkbox" id="usage-consent"><span>Help improve the pilot with optional usage analytics.</span></label>
+      <p class="field-note">Includes time actively spent in app sections, repeat visits, and completed or failed analyses. Never includes your recording, transcript, script, rubric, or keystrokes. Turn this off at any time; coaching still works.</p>
+      <button id="account-signout" class="text-button" type="button">Sign out of this account</button>
+    </section>
+    <aside class="key-privacy-note"><strong>Your recording history is private to your account.</strong><p>Create transcript or Analyze uploads and saves your recording, transcript, and resulting feedback privately. Coaching also sends your transcript and preparation text to our configured AI provider. Raw rubric files stay on your device. Recording and replay alone do not upload audio.</p><p>Delete a saved rehearsal to remove its cloud audio, transcript, and feedback. Sign out on shared computers. Operational processing and account records are separate from optional usage analytics.</p></aside>
+    <p id="account-status" class="settings-status" role="status" aria-live="polite"></p>
+  </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <form id="settings-form">
       <div class="dialog-heading"><div><p class="eyebrow">QUICK SETUP</p><h2 id="settings-title">Connect your AI coach.</h2></div><button class="icon-button" id="settings-close" type="button" aria-label="Close settings">×</button></div>

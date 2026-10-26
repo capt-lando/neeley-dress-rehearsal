@@ -2,9 +2,9 @@
 
 A minimal presentation practice app for Neeley students. Record an English rehearsal, compare it with a script or speaking points, and review word statistics, moments to improve, and thesis/rhetoric coaching.
 
-**Speech recognition needs no Hugging Face account or token.** The public speech model downloads and runs on the device. The website uses the student's OpenAI, Claude, Gemini, DeepSeek, or Meta Muse Spark API key for coaching.
+**The current local mode needs no Hugging Face account or token.** The public speech model downloads and runs on the device; coaching uses the student's provider key. A configurable cloud pilot adds Google/Microsoft login, private saved rehearsals in Supabase, opt-in usage metrics, and server-funded speech/coaching. It remains disabled until account/provider setup and real cloud checks pass.
 
-Ongoing development focuses on the web app. The proposed TCU sign-in and school-funded coaching backend are recorded in [project direction](PROJECT-DIRECTION.md); they are not implemented or institutionally approved.
+Ongoing development focuses on the web app. The pilot has one free experience for everyone, with no paid tiers or admin dashboard. See [project direction](PROJECT-DIRECTION.md), [cloud setup](docs/cloud-pilot.md), and [cost research](docs/cloud-costs.md). Microsoft login is not a claim of institutionally approved TCU SSO.
 
 ## Codex plugin and custom panel (paused)
 
@@ -45,7 +45,7 @@ pnpm start
 
 After building, Windows users can double-click **Start Dress Rehearsal.cmd** instead of running `pnpm start`. It opens [Dress Rehearsal](http://127.0.0.1:4173). Keep its command window open; press **Ctrl+C** there to stop the preview. The launcher finds Node on PATH or uses the Codex bundled runtime when available.
 
-Node is a build and local-preview tool, not a deployed backend. The launcher runs `preview.mjs`, which serves only `dist/`. The old `server.mjs` and `.env.example` remain as legacy reference/test material; they are not used by the static app. Do not open `public/index.html` directly or launch the old server for this version.
+Node is a build and local-preview tool. The launcher runs `preview.mjs`, which serves only `dist/`. The old `server.mjs` remains legacy reference/test material; do not expose it publicly. `.env.example` documents the optional public Supabase build settings and distinguishes legacy server secrets. Do not open `public/index.html` directly or launch the old server for this version.
 
 For development, `pnpm dev` starts Vite. Run `pnpm build` again after editing source files before using the preview launcher or publishing.
 

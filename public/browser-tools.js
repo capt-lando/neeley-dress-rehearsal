@@ -4,12 +4,12 @@ import { extractRubric } from './rubric-documents.js';
 import { createRecordingStore } from '../lib/recording-store.mjs';
 
 // Both the standalone page and Codex panel use the same local audio/document tools.
-export function installBrowserTools(service) {
+export function installBrowserTools(service, { liveSpeech = true } = {}) {
   window.rehearsalService = service;
   window.rehearsalDocuments = { extractRubric };
   window.rehearsalRecordings = createRecordingStore();
   let liveSession;
-  window.rehearsalLiveSpeech = {
+  window.rehearsalLiveSpeech = liveSpeech ? {
     startSession({ model, sampleRate, onUpdate, onProgress }) {
       liveSession?.cancel();
       liveSession = createLiveTranscription({
@@ -22,7 +22,7 @@ export function installBrowserTools(service) {
       });
       return liveSession;
     },
-  };
+  } : null;
   window.addEventListener('pagehide', event => {
     if (!event.persisted) { liveSession?.cancel(); service.dispose(); window.rehearsalRecordings.close(); }
   });

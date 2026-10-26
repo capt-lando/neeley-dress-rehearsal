@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 export default defineConfig({
   root: fileURLToPath(new URL('./public', import.meta.url)),
+  envDir: fileURLToPath(new URL('./', import.meta.url)),
   base: './',
   publicDir: false,
   plugins: [{
