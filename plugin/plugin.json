@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "neeley-dress-rehearsal",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Rehearse a presentation in a custom panel and receive grounded coaching from your Codex conversation.",
   "author": { "name": "Landon Moustirats" },
   "repository": "https://github.com/capt-lando/neeley-dress-rehearsal",

@@ -1,3 +1,4 @@
+import { BARK_MODEL_ID } from '../lib/speech-models.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -82,8 +83,8 @@ test('panel config and Apply use Codex without accepting provider keys or settin
     assert.equal(config.analysisProviderLabel, 'Codex');
     assert.deepEqual(config.providers.map(provider => provider.id), ['codex']);
     assert.equal(config.providers.some(provider => Object.hasOwn(provider, 'keyUrl')), false);
-    const updated = await h.service.request('/api/settings', post({ transcriptionModel: 'onnx-community/whisper-small.en' }));
-    assert.equal(updated.transcriptionModel, 'onnx-community/whisper-small.en');
+    const updated = await h.service.request('/api/settings', post({ transcriptionModel: BARK_MODEL_ID }));
+    assert.equal(updated.transcriptionModel, BARK_MODEL_ID);
     assert.equal(updated.analysisProvider, 'codex');
     for (const body of [{ analysisApiKey: 'example-key' }, { analysisProvider: 'openai' }, { analysisModel: 'example-model' }, { clearAnalysisKey: true }]) await assert.rejects(h.service.request('/api/settings', post(body)));
     assert.equal(h.messages.length, 0);

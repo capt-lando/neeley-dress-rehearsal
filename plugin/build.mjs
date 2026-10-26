@@ -7,7 +7,6 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const buildRoot = path.join(root, 'build/codex-plugin');
 const packageRoot = path.join(buildRoot, 'plugins/neeley-dress-rehearsal');
 const panelRoot = path.join(root, 'build/panel');
-const wasmCdn = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.0-dev.20260914-8d85527a0/dist/';
 
 // Only the plugin bundle changes asset loading. The standalone site's build is unchanged.
 function panelAssets() {
@@ -19,11 +18,6 @@ function panelAssets() {
     },
     load(id) {
       if (id === '\0rehearsal-pdf-worker') return 'export default "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.4.299/build/pdf.worker.min.mjs";';
-    },
-    transform(code, id) {
-      if (id.replaceAll('\\', '/').endsWith('/public/speech-worker.js')) {
-        return code.replace('env.allowLocalModels = false;', `env.allowLocalModels = false;\nenv.backends.onnx.wasm.wasmPaths = ${JSON.stringify(wasmCdn)};`);
-      }
     },
   };
 }
@@ -68,6 +62,7 @@ await build({
     rolldownOptions: { output: { entryFileNames: 'server.mjs', codeSplitting: false } } },
 });
 await writeFile(path.join(packageRoot, 'panel.html'), html);
+for (const name of ['LICENSES', 'MODEL-NOTICE.txt']) await cp(path.join(root, name), path.join(packageRoot, name), { recursive: true });
 for (const name of ['plugin.json', 'mcp.json', 'skills']) await cp(path.join(root, 'plugin', name), path.join(packageRoot, name), { recursive: true });
 await cp(path.join(root, 'lib/coaching-prompt.md'), path.join(packageRoot, 'coaching-prompt.md'));
 await mkdir(path.join(packageRoot, 'assets'), { recursive: true });

@@ -5,7 +5,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { INPUT_LIMITS, RehearsalStore } from './session-store.mjs';
 
-export const PANEL_URI = 'ui://neeley-dress-rehearsal/v3.html';
+export const PANEL_URI = 'ui://neeley-dress-rehearsal/v4.html';
 export const PANEL_META = {
   ui: {
     permissions: { microphone: {} },
@@ -54,7 +54,7 @@ export async function createRehearsalServer({ policyText, panelPath = new URL('.
   let icon;
   try { icon = await readFile(new URL('./assets/icon.svg', import.meta.url)); }
   catch (error) { if (error.code !== 'ENOENT') throw error; icon = await readFile(new URL('../public/favicon.svg', import.meta.url)); }
-  const server = new McpServer({ name: 'neeley-dress-rehearsal', version: '0.1.2',
+  const server = new McpServer({ name: 'neeley-dress-rehearsal', version: '0.2.0',
     icons: [{ src: `data:image/svg+xml;base64,${icon.toString('base64')}`, mimeType: 'image/svg+xml', sizes: ['any'] }],
   }, { maxToolInputElements: 100_000 });
   const annotations = (readOnlyHint, destructiveHint = false, idempotentHint = readOnlyHint) => ({ readOnlyHint, destructiveHint, idempotentHint, openWorldHint: false });

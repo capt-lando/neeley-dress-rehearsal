@@ -28,7 +28,7 @@ privacyTitle.textContent = 'Coaching uses your text. Audio is processed on your 
 const privacyCopy = document.createElement('p');
 privacyCopy.textContent = 'Analyze sends your transcript, preparation text, and extracted rubric text through this plugin to the current conversation. Raw audio and full rubric files are never sent for coaching. Your conversation’s history and data settings apply. Completed recordings save in this browser when storage is available. Clearing site data or private browsing can remove them. Download sends your chosen file to the host’s download handler to save a copy. Speech model files may remain cached.';
 privacy.append(privacyTitle, privacyCopy);
-document.querySelector('.local-speech-settings > .field-note').textContent = 'The public model downloads from Hugging Face and runs on your device. The first transcript takes longer while it downloads. If this host blocks local speech processing, paste your transcript below.';
+$('speech-download-note').textContent = 'Your chosen model downloads from Hugging Face and runs on your device. Model files can remain cached. The first transcript takes longer while they download. If this host blocks local speech processing, paste your transcript below.';
 $('coaching-settings').textContent = 'Speech settings';
 $('print-report').hidden = true;
 document.querySelector('#prompt-details > .support-text').textContent = 'See the full coaching instructions and transcript prepared for Codex. This preview uses your latest edits and stays on your device.';

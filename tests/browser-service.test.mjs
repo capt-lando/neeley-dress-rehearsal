@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createBrowserService } from '../lib/browser-service.mjs';
+import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';
 
 const policyText = await readFile(new URL('../lib/coaching-prompt.md', import.meta.url), 'utf8');
 const post = body => ({ method: 'POST', body: JSON.stringify(body) });
@@ -23,7 +24,7 @@ test('browser config exposes local speech and only three coaching providers with
   assert.equal(config.localSpeech, true);
   assert.equal(config.speechConfigured, true);
   assert.equal(config.analysisConfigured, false);
-  assert.equal(config.transcriptionModel, 'onnx-community/whisper-base.en');
+  assert.equal(config.transcriptionModel, BARK_MODEL_ID);
   assert.deepEqual(config.providers.map(item => item.id), ['openai', 'anthropic', 'google']);
   assert.equal(Object.hasOwn(config, 'analysisApiKey'), false);
 });
@@ -51,8 +52,21 @@ test('unsafe settings never send requests or change the selected provider', asyn
     { analysisProvider: '__proto__' }, { analysisProvider: 'huggingface' },
     { analysisApiKey: 'bad\nheader' }, { analysisModel: '../other' },
     { workspaceId: 'invalid workspace' }, { transcriptionModel: 'openai/whisper-large-v3' },
+    { transcriptionModel: 'onnx-community/whisper-base.en' }, { transcriptionModel: 'onnx-community/whisper-small.en' },
+    { transcriptionModel: 'bark-pro-unavailable' },
   ]) await assert.rejects(service.request('/api/settings', post(body)), { status: 400 });
   assert.equal((await service.request('/api/config')).analysisProvider, 'openai');
+});
+
+test('each supported Bark variant reaches local transcription using its actual model ID', async () => {
+  const seen = [];
+  const service = create({ transcribe: async (_blob, { model }) => { seen.push(model); return basicSpeech(); } });
+  for (const model of BARK_MODELS) {
+    const config = await service.request('/api/settings', post({ transcriptionModel: model.id }));
+    assert.equal(config.transcriptionModel, model.id);
+    await service.request('/api/transcribe', { method: 'POST', body: new Blob(['audio']) });
+  }
+  assert.deepEqual(seen, BARK_MODELS.map(model => model.id));
 });
 
 test('local transcription delegates blob/model/signal/progress and does not call an API route', async () => {
@@ -63,11 +77,11 @@ test('local transcription delegates blob/model/signal/progress and does not call
     return { text: '  Real spoken words.  ', durationSeconds: 4, chunks: [{ text: 'Real spoken words.' }] };
   } });
   service.setProgressHandler(value => progress.push(value));
-  await service.request('/api/settings', post({ transcriptionModel: 'onnx-community/whisper-small.en' }));
+  await service.request('/api/settings', post({ transcriptionModel: BARK_MODEL_ID }));
   const blob = new Blob(['audio'], { type: 'audio/wav' });
   const result = await service.request('/api/transcribe', { method: 'POST', body: blob });
   assert.equal(seen[0].blob, blob);
-  assert.equal(seen[0].options.model, 'onnx-community/whisper-small.en');
+  assert.equal(seen[0].options.model, BARK_MODEL_ID);
   assert.equal(seen[0].options.signal.aborted, false);
   assert.deepEqual(progress, [{ status: 'progress', progress: 50 }]);
   assert.equal(result.text, 'Real spoken words.');

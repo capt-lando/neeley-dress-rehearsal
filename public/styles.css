@@ -178,3 +178,8 @@
 .coaching-notice p{color:#796487;font-size:12px;line-height:1.8;margin:0 0 18px;max-width:650px}
 .coaching-actions{display:flex;align-items:center;flex-wrap:wrap;gap:18px}
 @media print{.coaching-actions{display:none}}
+.model-attribution{font-size:10px;line-height:1.7;color:var(--muted)}
+.model-attribution a{color:inherit;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:2px}
+.model-attribution a:hover{color:var(--purple)}
+.site-footer .model-attribution{max-width:650px;font-size:9px;text-align:right}
+@media(max-width:600px){.site-footer .model-attribution{width:100%;text-align:left}}

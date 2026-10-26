@@ -44,7 +44,7 @@ async function requestLocal(prepare, { model, signal, onProgress = () => {} } = 
           if (data.type === 'result') finish(null, { ...data.result, ...(durationSeconds === undefined ? {} : { durationSeconds }), model });
           if (data.type === 'error') fail(new Error(data.message));
         };
-        jobWorker.onerror = () => fail(new Error('Local speech recognition stopped. Try the smaller speech model or a shorter recording.'));
+        jobWorker.onerror = () => fail(new Error('Local speech recognition stopped. Try a shorter recording or reload the app.'));
         try {
           onProgress(payload.type === 'preload' ? 'Preparing the local speech model…' : 'Preparing English speech recognition on this device…');
           if (!done) jobWorker.postMessage({ id, model, ...payload }, payload.samples ? [payload.samples.buffer] : []);

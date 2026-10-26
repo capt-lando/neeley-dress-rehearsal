@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createLiveTranscription } from '../lib/live-transcription.mjs';
+import { BARK_MODEL_ID, BARK_MODEL_LABEL, BARK_MODELS, BARK_CLEAN_ID } from '../lib/speech-models.mjs';
 
 function inspectWav(wav) {
   assert.equal(wav.toString('ascii', 0, 4), 'RIFF');
@@ -16,13 +17,14 @@ function inspectWav(wav) {
 }
 
 const appSource = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+const executableAppSource = appSource.replace("import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';", '');
 const appHtml = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const htmlIds = [...appHtml.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
 const meterMarkup = appHtml.match(/id="input-level"[^>]*>([\s\S]*?)<\/span>\s*<\/div>/)?.[1] || '';
 const meterBarCount = [...meterMarkup.matchAll(/<span\b/g)].length;
-const listenerStart = appSource.indexOf("$('settings-open').addEventListener");
+const listenerStart = executableAppSource.indexOf("$('settings-open').addEventListener");
 assert.ok(listenerStart > 0, 'browser app must expose its declarations before wiring DOM events');
-const declarations = appSource.slice(0, listenerStart);
+const declarations = executableAppSource.slice(0, listenerStart);
 
 class Element {
   constructor() {
@@ -134,6 +136,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
+    BARK_MODEL_ID, BARK_MODELS,
     document: {
       getElementById: id => {
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
@@ -172,7 +175,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   ownerDocument.body.ownerDocument = ownerDocument;
   ownerDocument.activeElement = ownerDocument.body;
   vm.createContext(context);
-  vm.runInContext(`${startup ? appSource : declarations}
+  vm.runInContext(`${startup ? executableAppSource : declarations}
 globalThis.audioTest = {
   state, updateConfig, saveSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession,
@@ -900,10 +903,11 @@ test('a failed live batch preserves audio and late results cannot replace a new 
 
 test('changing models, clearing, and very short takes cancel live work without accepting partial text', async () => {
   const h = harness();
+  h.state.config.transcriptionModel = 'legacy-speech-model';
   const sessions = liveSpeech(h, async () => ({ text: 'Draft words.' }));
   await h.startRecording();
   h.captureRecordingSamples(new Float32Array(16000), 16000);
-  h.updateConfig({ transcriptionModel: 'onnx-community/whisper-small.en' });
+  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
   assert.equal(sessions[0].session.getState().cancelled, true);
   assert.equal(h.state.recording, true);
   h.stopRecording();
@@ -985,19 +989,20 @@ test('concurrent replay transcription requests share one local service operation
   assert.equal(calls.length, 1);
 });
 
-test('changing speech models rebuilds the transcript while preserving audio and its browser save', async () => {
+test('migrating to Bark rebuilds the transcript while preserving audio and its browser save', async () => {
   let recognitions = 0;
   const h = harness(async path => {
     assert.equal(path, '/api/transcribe');
-    return { text: ++recognitions === 1 ? 'Base recognized these words.' : 'Small recognized different words.', durationSeconds: 4 };
+    return { text: ++recognitions === 1 ? 'Previously recognized words.' : 'Bark recognized different words.', durationSeconds: 4 };
   });
+  h.state.config.transcriptionModel = 'legacy-speech-model';
   const audio = new Blob(['recording'], { type: 'audio/wav' });
   h.setAudio(audio, 4, 'Original'); await settleAudioSaves(h);
   const saved = h.state.audioSave, url = h.state.audioURL;
   await h.ensureTranscript();
   h.state.report = { transcript: h.state.transcriptText };
   h.seekPlayback(2);
-  h.updateConfig({ transcriptionModel: 'onnx-community/whisper-small.en' });
+  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
   assert.equal(h.state.audioBlob, audio);
   assert.equal(h.state.audioURL, url);
   assert.equal(h.state.audioSave, saved);
@@ -1006,10 +1011,10 @@ test('changing speech models rebuilds the transcript while preserving audio and 
   assert.equal(h.get('transcript').value, '');
   assert.equal(h.state.report, null);
   assert.equal(h.get('follow-transcript-connect').hidden, false);
-  assert.equal(await h.ensureTranscript(), 'Small recognized different words.');
+  assert.equal(await h.ensureTranscript(), 'Bark recognized different words.');
   assert.equal(recognitions, 2);
   h.updateConfig({ analysisProvider: 'google', analysisConfigured: true });
-  assert.equal(await h.ensureTranscript(), 'Small recognized different words.');
+  assert.equal(await h.ensureTranscript(), 'Bark recognized different words.');
   assert.equal(recognitions, 2, 'changing the coach must preserve the same speech-model transcript');
   assert.equal(h.storageCalls.save.length, 1, 'a model change must not create another saved recording');
   assert.ok(!h.revoked.includes(url));
@@ -1020,21 +1025,22 @@ test('changing a speech model aborts old recognition and ignores its late result
   const h = harness((url, init) => {
     const pending = deferred(); requests.push({ url, init, pending }); return pending.promise;
   });
+  h.state.config.transcriptionModel = 'legacy-speech-model';
   const audio = new Blob(['recording'], { type: 'audio/wav' });
   h.setAudio(audio, 4, 'Original');
   const old = h.ensureTranscript();
   const rejected = assert.rejects(old, { name: 'AbortError' });
-  h.updateConfig({ transcriptionModel: 'onnx-community/whisper-small.en' });
+  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
   assert.equal(requests[0].init.signal.aborted, true);
   const current = h.ensureTranscript();
-  requests[0].pending.resolve({ text: 'Stale Base result.', durationSeconds: 999 });
+  requests[0].pending.resolve({ text: 'Stale recognition result.', durationSeconds: 999 });
   await rejected;
   assert.equal(h.state.transcriptText, '');
   assert.equal(h.state.audioDuration, 4);
   assert.ok(h.state.transcriptPromise, 'the old result cannot clear the new model request');
-  requests[1].pending.resolve({ text: 'Current Small result.', durationSeconds: 4 });
-  assert.equal(await current, 'Current Small result.');
-  assert.equal(h.state.transcriptModel, 'onnx-community/whisper-small.en');
+  requests[1].pending.resolve({ text: 'Current Bark result.', durationSeconds: 4 });
+  assert.equal(await current, 'Current Bark result.');
+  assert.equal(h.state.transcriptModel, BARK_MODEL_ID);
 });
 
 test('changing a speech model aborts dependent coaching and restores controls without accepting its late report', async () => {
@@ -1043,11 +1049,12 @@ test('changing a speech model aborts dependent coaching and restores controls wi
     if (path === '/api/transcribe') return { text: 'My name is Jordan. Practice helps.', durationSeconds: 4 };
     assert.equal(path, '/api/analyze-text'); coachingSignal = options.signal; return coaching.promise;
   });
+  h.state.config.transcriptionModel = 'legacy-speech-model';
   h.setAudio(new Blob(['audio'], { type: 'audio/wav' }), 4, 'Original');
   await h.ensureTranscript();
   const analyzing = h.runAnalysis(); await nextTurn();
   assert.equal(h.state.busy, true);
-  h.updateConfig({ transcriptionModel: 'onnx-community/whisper-small.en' });
+  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
   assert.equal(coachingSignal.aborted, true);
   assert.equal(h.state.busy, false);
   assert.equal(h.get('analyze-button').disabled, false);
@@ -1061,6 +1068,7 @@ test('changing a speech model aborts dependent coaching and restores controls wi
 test('audio preparation hides unsupported cancellation and releases controls on decode failure', async () => {
   const decoded = deferred();
   const h = harness(undefined, { decodeAudioData: () => decoded.promise });
+  h.state.config.transcriptionModel = 'legacy-speech-model';
   const previous = new Blob(['previous'], { type: 'audio/wav' });
   h.setAudio(previous, 4, 'Previous');
   const upload = h.uploadAudio({ name: 'replacement.wav', size: 12, arrayBuffer: async () => new ArrayBuffer(12) });
@@ -1068,7 +1076,7 @@ test('audio preparation hides unsupported cancellation and releases controls on 
   assert.equal(h.state.preparingAudio, true);
   assert.equal(h.state.busy, true);
   assert.equal(h.get('cancel-analysis').hidden, true, 'the app must not offer a cancel action that cannot stop decoding');
-  h.updateConfig({ transcriptionModel: 'onnx-community/whisper-small.en' });
+  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
   assert.equal(h.state.busy, true, 'changing models must not unlock a separate audio preparation operation');
   decoded.reject(Object.assign(new Error('Invalid media'), { name: 'EncodingError' }));
   await upload;
@@ -1276,7 +1284,7 @@ test('full browser startup binds existing HTML controls and never references a r
   const h = harness(async url => {
     calls.push(url);
     assert.equal(url, '/api/config', 'startup must not process audio or request AI coaching');
-    return response({ configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, transcriptionModel: 'onnx-community/whisper-base.en' });
+    return response({ configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, transcriptionModel: BARK_MODEL_ID });
   }, { startup: true });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(h.missingIds, []);
@@ -1351,14 +1359,42 @@ test('switching preparation views preserves both complete inputs in prompt previ
   assert.doesNotMatch(appHtml, /<[^>]*id="talking-points-field"[^>]*\bhidden\b/);
 });
 
-test('static entrypoint is subdirectory-safe and speech setup offers English local models without credentials', () => {
+test('static entrypoint is subdirectory-safe and speech setup defaults to local English Bark Plus without credentials', () => {
   assert.match(appHtml, /<script type="module" src="\.\/bootstrap\.js"><\/script>/);
   assert.match(appHtml, /href="\.\/styles\.css"/);
   assert.match(appHtml, /href="\.\/" aria-label="Neeley Dress Rehearsal home"/);
-  assert.match(appHtml, /value="onnx-community\/whisper-base\.en"/);
-  assert.match(appHtml, /value="onnx-community\/whisper-small\.en"/);
+  const speechOptions = appHtml.match(/<select id="transcription-model"[^>]*>([\s\S]*?)<\/select>/)[1];
+  assert.equal(speechOptions, `<option value="${BARK_MODEL_ID}">${BARK_MODEL_LABEL}</option>`);
+  assert.doesNotMatch(appHtml, /whisper/i);
   assert.ok(!htmlIds.includes('api-token') && !htmlIds.includes('transcription-endpoint'));
   assert.doesNotMatch(appSource, /\b(?:localStorage|sessionStorage)\b/);
+});
+
+test('Bark choices default to Plus, explain Clean statistics, and only change the active model after Apply', async () => {
+  const settingsCalls = [];
+  const config = { transcriptionModel: BARK_MODEL_ID, speechConfigured: true };
+  const h = harness(async (path, options) => {
+    if (path === '/api/config') return config;
+    assert.equal(path, '/api/settings');
+    const body = JSON.parse(options.body); settingsCalls.push(body);
+    return { ...config, ...body };
+  }, { startup: true });
+  await nextTurn();
+  const select = h.get('transcription-model');
+  assert.equal(select.value, BARK_MODEL_ID);
+  assert.match(select.options[0].label, /Plus/);
+  assert.deepEqual(select.options.filter(option => !option.disabled).map(option => option.value), BARK_MODELS.map(model => model.id));
+  assert.match(select.options.at(-1).label, /Pro.*unavailable/);
+  assert.equal(select.options.at(-1).disabled, true);
+  assert.match(h.get('speech-model-note').textContent, /703 MB/);
+  select.value = BARK_CLEAN_ID;
+  for (const listener of select.listeners.get('change')) listener();
+  assert.match(h.get('speech-model-note').textContent, /Removes fillers.*undercount/);
+  assert.equal(h.state.config.transcriptionModel, BARK_MODEL_ID);
+  assert.equal(settingsCalls.length, 0);
+  await h.saveSettings({ preventDefault() {} });
+  assert.equal(settingsCalls[0].transcriptionModel, BARK_CLEAN_ID);
+  assert.equal(h.state.config.transcriptionModel, BARK_CLEAN_ID);
 });
 
 test('collapsed practice context is preserved exactly in analysis and prompt preview', async () => {
@@ -1550,7 +1586,7 @@ test('failed coaching keeps the provider reason visible and offers retry instead
 
 test('Codex settings apply only the speech model and never show a provider-key message', async () => {
   let saved;
-  const config = { coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', analysisProviderLabel: 'Codex', transcriptionModel: 'onnx-community/whisper-base.en' };
+  const config = { coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', analysisProviderLabel: 'Codex', transcriptionModel: BARK_MODEL_ID };
   const h = harness(async (path, options) => {
     assert.equal(path, '/api/settings'); saved = JSON.parse(options.body); return { ...config, ...saved };
   });
@@ -1560,9 +1596,9 @@ test('Codex settings apply only the speech model and never show a provider-key m
   assert.doesNotMatch(h.get('privacy-copy').textContent, /API key|OpenAI|Claude|Gemini/);
   h.get('analysis-api-key').value = 'must-not-be-used';
   h.get('analysis-model').value = 'must-not-be-used';
-  h.get('transcription-model').value = 'onnx-community/whisper-small.en';
+  h.get('transcription-model').value = BARK_MODEL_ID;
   await h.saveSettings({ preventDefault() {} });
-  assert.deepEqual(saved, { transcriptionModel: 'onnx-community/whisper-small.en' });
+  assert.deepEqual(saved, { transcriptionModel: BARK_MODEL_ID });
   assert.match(h.get('app-status').textContent, /this Codex conversation/);
   assert.equal(h.state.config.analysisProvider, 'codex');
 });
@@ -1595,13 +1631,14 @@ test('panel microphone permission policy failure keeps upload and manual transcr
 
 test('changing a panel speech model preserves a manually pasted transcript and its report', () => {
   const h = harness();
+  h.state.config.transcriptionModel = 'legacy-speech-model';
   h.get('transcript').value = 'Manually pasted rehearsal.';
   h.state.transcriptText = 'Manually pasted rehearsal.';
   const report = { transcript: h.state.transcriptText, analysis: { method: 'ai' } };
   h.state.report = report;
-  h.updateConfig({ coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', transcriptionModel: 'onnx-community/whisper-small.en' });
+  h.updateConfig({ coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', transcriptionModel: BARK_MODEL_ID });
   assert.equal(h.get('transcript').value, 'Manually pasted rehearsal.');
   assert.equal(h.state.transcriptText, 'Manually pasted rehearsal.');
   assert.equal(h.state.report, report);
-  assert.equal(h.state.config.transcriptionModel, 'onnx-community/whisper-small.en');
+  assert.equal(h.state.config.transcriptionModel, BARK_MODEL_ID);
 });

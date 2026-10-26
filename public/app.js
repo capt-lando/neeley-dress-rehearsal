@@ -1,8 +1,10 @@
 'use strict';
 
+import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';
+
 const $ = (id) => document.getElementById(id);
 const state = {
-  config: { configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: 'onnx-community/whisper-base.en', analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
+  config: { configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: BARK_MODEL_ID, analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
   stream: null, context: null, source: null, processor: null, silent: null, analyser: null,
   recording: false, recordingPaused: false, startingRecording: false, recordingSampleRate: 0, requestingMic: false, preparingAudio: false, samples: [], sampleCount: 0, timer: null, meterFrame: null,
   audioBlob: null, audioURL: null, audioDuration: 0, duration: 0, report: null, busy: false, requestController: null,
@@ -146,7 +148,7 @@ function updateConfig(config) {
   $('connection-label').textContent = state.config.coachingViaHost ? 'Codex coaching' : ready ? 'AI key in this tab' : 'Connect API';
   $('settings-open').setAttribute('aria-label', state.config.coachingViaHost ? 'Rehearsal settings: coaching in this Codex conversation' : `Connection settings: ${ready ? 'AI key in this tab' : 'connect an AI provider'}`);
   $('connection-dot').classList.toggle('connected', ready);
-  $('transcription-model').value = state.config.transcriptionModel || '';
+  renderSpeechSettings();
   document.querySelector('.timer-limit').textContent = `/ ${formatTime(state.config.maxDurationSeconds)}`;
   const selected = providerInfo(state.config.analysisProvider);
   $('privacy-copy').textContent = state.config.coachingViaHost
@@ -155,6 +157,17 @@ function updateConfig(config) {
   renderProviderSettings();
   if (state.report) renderCoachingState(state.report);
   if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
+}
+function renderSpeechSettings() {
+  const unavailable = new Option('Bark 3.0 Pro · browser version unavailable', 'bark-pro-unavailable');
+  unavailable.disabled = true;
+  $('transcription-model').replaceChildren(...BARK_MODELS.map(model => new Option(model.label, model.id)), unavailable);
+  $('transcription-model').value = state.config.transcriptionModel;
+  updateSpeechModelNote();
+}
+function updateSpeechModelNote() {
+  const model = BARK_MODELS.find(item => item.id === $('transcription-model').value);
+  $('speech-model-note').textContent = model?.downloadNote || '';
 }
 function resetTranscriptForModelChange() {
   const analyzing = Boolean(state.requestController);
@@ -215,7 +228,7 @@ function clearKeyFields() {
   $('analysis-api-key').value = '';
   resetKeyVisibility('analysis-api-key', 'analysis-key-toggle');
 }
-function openSettings() { $('settings-status').textContent = ''; state.settingsProvider = state.config.analysisProvider || 'openai'; renderProviderSettings(); $('settings-dialog').showModal(); document.body.classList.add('no-scroll'); }
+function openSettings() { $('settings-status').textContent = ''; state.settingsProvider = state.config.analysisProvider || 'openai'; renderProviderSettings(); renderSpeechSettings(); $('settings-dialog').showModal(); document.body.classList.add('no-scroll'); }
 function closeSettings() { clearKeyFields(); $('settings-dialog').close(); document.body.classList.remove('no-scroll'); }
 async function saveSettings(event) {
   event.preventDefault();
@@ -1396,6 +1409,7 @@ $('disconnect-button').addEventListener('click', async () => {
   finally { $('disconnect-button').disabled = false; }
 });
 document.querySelectorAll('input[name="analysis-provider"]').forEach((input) => input.addEventListener('change', () => selectProvider(input.value)));
+$('transcription-model').addEventListener('change', updateSpeechModelNote);
 for (const [inputId, toggleId, label] of [['analysis-api-key', 'analysis-key-toggle', 'analysis']]) {
   $(toggleId).addEventListener('click', () => {
     const show = $(inputId).type === 'password';

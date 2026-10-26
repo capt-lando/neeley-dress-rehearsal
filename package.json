@@ -18,6 +18,7 @@
   "dependencies": {
     "@huggingface/transformers": "4.3.1",
     "fflate": "0.8.3",
+    "onnxruntime-web": "1.31.0-dev.20260914-8d85527a0",
     "pdfjs-dist": "6.4.299"
   },
   "devDependencies": {
