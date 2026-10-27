@@ -97,6 +97,9 @@ function metadata(row) { return {id:row.id,title:row.title,createdAt:row.created
 /** All data access uses a verified server-derived user ID; store is injectable for tests. */
 export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, now=Date.now }) {
   const enterRequest=createRequestLimit({now});
+  // Whole recordings can occupy several buffers; keep those operations below
+  // the isolate memory ceiling while small UI requests can still proceed.
+  const enterAudio=createRequestLimit({now,concurrent:2});
   let globalPauseUntil=0;
   const policy=buildCoachingInstructions(policyText), worker=secureWorker(env);
   const provider=env.COACHING_PROVIDER||'google', model=env.COACHING_MODEL||PROVIDERS[provider]?.defaultModel;
@@ -235,7 +238,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     const headers={'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Vary':'Origin'};
     if (origins.has(origin)) headers['Access-Control-Allow-Origin']=origin;
     const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers});
-    let release;
+    let release,releaseAudio;
     try {
       release=enterRequest();
       if (!origins.has(origin)) throw fail('This origin is not allowed.',403);
@@ -259,6 +262,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
           transcriptionModel:'bark-3.0-plus',providers:[],maxDurationSeconds:600,maxAudioBytes:MAX_AUDIO});
       }
       const user=await identify(request);
+      if(request.method==='POST'&&(path==='/transcribe'||/^\/recordings\/[^/]+\/audio$/.test(path)||/^\/live-sessions\/[^/]+\/finish$/.test(path))) releaseAudio=enterAudio();
       if (path==='/live-sessions' || path.startsWith('/live-sessions/')) return json(await liveAction(request,path,user));
       if (request.method==='GET' && path==='/recordings') return json({recordings:(await store.list(user.id)).map(metadata)});
       if (request.method==='POST' && path==='/recordings') {
@@ -348,6 +352,6 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     } catch (error) {
       if(error?.safe&&error.retryAfter) headers['Retry-After']=String(Math.min(60,Math.max(1,Math.ceil(Number(error.retryAfter)||60))));
       return json({error:error?.safe?error.message:'The service could not complete this request.',...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})},error?.safe?error.status:503);
-    } finally { release?.(); }
+    } finally { releaseAudio?.();release?.(); }
   };
 }

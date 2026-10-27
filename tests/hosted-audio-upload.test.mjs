@@ -52,7 +52,9 @@ test('lost upload acknowledgement retries identical bytes without replacing a ta
 });
 test('concurrent identical uploads converge on one immutable stored recording',async()=>{
   const f=fixture(),responses=await Promise.all([f.upload(),f.upload(),f.upload()]);
-  assert.deepEqual(responses.map(r=>r.status),[201,201,201]);assert.equal(f.stored.size,1);
+  assert.deepEqual(responses.map(r=>r.status),[201,201,429]);assert.equal(f.stored.size,1);
+  assert.equal(responses[2].headers.get('retry-after'),'2');
+  assert.equal((await f.upload()).status,201);
 });
 test('upload endpoint rejects rate-limited submissions before reading or saving audio',async()=>{
   const f=fixture({deny:true}),response=await f.upload();
