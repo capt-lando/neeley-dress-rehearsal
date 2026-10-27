@@ -1,10 +1,11 @@
 import { extractRubric } from './rubric-documents.js';
+import { prepareRubricPreview } from './rubric-preview.js';
 import { createRecordingStore } from '../lib/recording-store.mjs';
 
 // Audio capture and rubric extraction stay in the browser; speech uses the service.
 export function installBrowserTools(service) {
   window.rehearsalService = service;
-  window.rehearsalDocuments = { extractRubric };
+  window.rehearsalDocuments = { extractRubric, prepareRubricPreview };
   window.rehearsalRecordings = createRecordingStore();
   let liveSession;
   window.rehearsalLiveSpeech = service.hosted ? {

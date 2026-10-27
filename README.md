@@ -32,7 +32,7 @@ The editable policy is `lib/coaching-prompt.md`. The validator rejects invented 
 
 Speech recognition can omit fillers, repetitions, or false starts. Counts are transcript-based estimates, not a count of every sound or a diagnosis. Review and correct the transcript before analyzing again.
 
-Rubrics accept PDF, DOCX, and TXT files up to 5 MB. Text extraction happens locally; scanned, blank-page, password-protected, or oversized documents need a text export or pasted text. Original rubric files are not uploaded. Download the annotated transcript or breakdown sheet to keep a separate copy.
+Rubrics accept PDF, DOCX, and TXT files up to 5 MB. A real page thumbnail opens into a larger, paginated preview. PDF pages (including scans), Word tables and embedded images, and plain text render locally without AI calls. Word previews approximate Word's layout; unsupported content is identified in the preview. Coaching still uses extracted text, available under **Paste or review rubric text**. Scans without readable text need pasted criteria. Original files stay in the current tab and are not uploaded or saved with rehearsals; choose the file again after reloading to restore its preview. Download the annotated transcript or breakdown sheet to keep a separate copy.
 
 ## Development
 

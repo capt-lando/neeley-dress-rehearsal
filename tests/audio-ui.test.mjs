@@ -106,7 +106,7 @@ function deferred() {
 
 function response(value) { return value; }
 
-function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
+function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, prepareRubricPreview, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
   const elements = new Map();
   const missingIds = [];
   let ownerDocument;
@@ -171,7 +171,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
     window: {
       AudioContext, matchMedia: () => ({ matches: false }), addEventListener: (...args) => windowEvents.addEventListener(...args),
       rehearsalService: { request: requestImpl, setProgressHandler(handler) { progressHandler = handler; } },
-      rehearsalDocuments: { extractRubric },
+      rehearsalDocuments: { extractRubric, prepareRubricPreview },
       rehearsalRecordings: recordingStore,
     },
     Option: class { constructor(label, value) { this.label = label; this.value = value; } },
@@ -196,7 +196,7 @@ globalThis.audioTest = {
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession, openCancelRestart, confirmCancelRestart, closeCancelRestart,
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript, renderSummaryDraft, attachTranscriptSelection, getChatContext,
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
-  analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, setBusy,
+  analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, openRubricPreview, showRubricPage, setBusy,
   autosaveRecording, refreshSavedRecordings, renderSavedRecordings, openSavedRecording, deleteSavedRecording,
   downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving
 };`, context);
@@ -1799,6 +1799,104 @@ test('pending rubric extraction prevents incomplete coaching and prompt requests
   assert.equal(h.get('analyze-button').disabled, true, 'clearing other work cannot bypass a pending rubric');
   h.removeRubric(); pending.resolve({ name: 'rubric.pdf', text: 'Removed before completion.' });
   await importing;
+});
+
+function previewFixture(pages = 2) {
+  return {
+    kind: 'pdf', name: 'rubric.pdf', pageCount: pages, warnings: [], renders: [], disposed: 0,
+    async render(index, container, width) { this.renders.push({ index, container, width }); container.textContent = `Actual page ${index + 1}`; },
+    dispose() { this.disposed++; },
+  };
+}
+
+test('rubric visual preview and page navigation work locally without a coaching request', async () => {
+  let requests = 0;
+  const preview = previewFixture(3);
+  const h = harness(async () => { requests++; }, {
+    extractRubric: async () => ({ text: 'Criterion\tExcellent\tNeeds work', name: 'rubric.pdf' }),
+    prepareRubricPreview: async () => preview,
+  });
+  await h.importRubric({ name: 'rubric.pdf', size: 120 });
+  assert.equal(h.get('rubric-preview-card').hidden, false);
+  assert.equal(h.get('rubric-thumbnail').textContent, 'Actual page 1');
+  assert.equal(h.get('rubric-text-details').open, false, 'extracted text is secondary to the page preview');
+  await h.openRubricPreview();
+  assert.equal(h.get('rubric-preview-dialog').open, true);
+  assert.equal(h.get('rubric-page-previous').disabled, true);
+  await h.showRubricPage(99);
+  assert.equal(h.get('rubric-page-label').textContent, 'Page 3 of 3');
+  assert.equal(h.get('rubric-page-next').disabled, true);
+  assert.equal(h.get('rubric-document-page').textContent, 'Actual page 3');
+  assert.equal(h.get('rubric-thumbnail').textContent, 'Actual page 1');
+  assert.equal(requests, 0);
+  h.removeRubric();
+  assert.equal(preview.disposed, 1);
+  assert.equal(h.get('rubric-preview-dialog').open, false);
+  assert.equal(h.get('rubric-preview-card').hidden, true);
+  assert.equal(h.get('rubric-thumbnail').textContent, '');
+});
+
+test('scanned rubric remains visible when text extraction cannot read it', async () => {
+  const preview = previewFixture(1);
+  const h = harness(undefined, {
+    extractRubric: async () => { throw new Error('This scanned page needs pasted rubric text.'); },
+    prepareRubricPreview: async () => preview,
+  });
+  await h.importRubric({ name: 'scan.pdf', size: 100 });
+  assert.equal(h.state.rubricFileName, 'scan.pdf');
+  assert.equal(h.get('rubric-preview-card').hidden, false);
+  assert.equal(h.get('rubric-text-details').open, true);
+  assert.match(h.get('rubric-status').textContent, /preview is ready.*pasted rubric text/);
+  assert.equal(h.get('instructor-rubric').value, '');
+  assert.equal(h.state.rubricLoading, false);
+});
+
+test('replaced and removed previews dispose late results without changing the current document', async () => {
+  const pending = deferred(), old = previewFixture(), current = previewFixture(1);
+  let signal;
+  const h = harness(undefined, {
+    extractRubric: async file => ({ name: file.name, text: file.name }),
+    prepareRubricPreview: (file, options) => { if (file.name === 'old.pdf') { signal = options.signal; return pending.promise; } return current; },
+  });
+  const importing = h.importRubric({ name: 'old.pdf', size: 100 });
+  await h.importRubric({ name: 'new.pdf', size: 100 });
+  assert.equal(signal.aborted, true);
+  pending.resolve(old); await importing;
+  assert.equal(old.disposed, 1);
+  assert.equal(old.renders.length, 0);
+  assert.equal(h.state.rubricPreview, current);
+  assert.equal(h.state.rubricFileName, 'new.pdf');
+  assert.equal(h.get('instructor-rubric').value, 'new.pdf');
+  h.removeRubric();
+  assert.equal(current.disposed, 1);
+});
+
+test('account changes and leaving the page dispose private document previews', async () => {
+  const preview = previewFixture();
+  const h = harness(undefined, { startup: true, extractRubric: async () => ({ text: 'Private criteria' }), prepareRubricPreview: async () => preview });
+  await h.importRubric({ name: 'private.pdf', size: 100 });
+  h.window.rehearsalHostedActions.accountChanged('another-account');
+  assert.equal(preview.disposed, 1);
+  assert.equal(h.state.rubricPreview, null);
+  assert.equal(h.get('rubric-thumbnail').textContent, '');
+  assert.equal(h.get('instructor-rubric').value, '');
+  const next = previewFixture(); h.window.rehearsalDocuments.prepareRubricPreview = async () => next;
+  await h.importRubric({ name: 'next.pdf', size: 100 });
+  await h.emitWindowEvent('pagehide', { persisted: true });
+  assert.equal(next.disposed, 0, 'back-forward cache keeps its document');
+  await h.emitWindowEvent('pagehide', { persisted: false });
+  assert.equal(next.disposed, 1);
+});
+
+test('restoring saved rubric text clears the preview of a different document', async () => {
+  const preview = previewFixture();
+  const h = harness(undefined, { extractRubric: async () => ({ text: 'Current criteria' }), prepareRubricPreview: async () => preview });
+  await h.importRubric({ name: 'current.pdf', size: 100 });
+  h.window.rehearsalHostedActions.restoreRecording({ id: 'saved', blob: new Blob(['audio']), durationSeconds: 20, report: { input: { instructorRubric: 'Saved criteria', rubricFileName: 'saved.pdf' } } });
+  assert.equal(preview.disposed, 1);
+  assert.equal(h.get('rubric-preview-card').hidden, true);
+  assert.equal(h.get('instructor-rubric').value, 'Saved criteria');
+  assert.match(h.get('rubric-status').textContent, /original file/);
 });
 
 test('report context badges describe the analyzed snapshot rather than subsequently edited fields', async () => {

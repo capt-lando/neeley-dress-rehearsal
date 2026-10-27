@@ -17,6 +17,7 @@ const state = {
   liveTake: null, livePromise: null, liveFailure: '',
   waveformBars: [], waveformPhase: 0, pendingSeek: null,
   rubricLoading: false, rubricGeneration: 0, rubricFileName: '', rubricPendingName: '', targetView: 'points',
+  rubricPreview: null, rubricPreviewController: null, rubricPage: 0, rubricPageGeneration: 0,
   audioSave: null, pendingAudioSaves: new Set(), unsavedRecordings: new Map(), savedRecordings: [], libraryGeneration: 0, libraryOpenGeneration: 0, libraryBusy: false, libraryFocus: null,
   cloudRecordingId: '', accountId: '', recoveryController: null, recoveryPending: Boolean(window.rehearsalService?.hosted), recoveryNeedsConfig: false,
   audioPreparationGeneration: 0, audioMetadataCancel: null, processing: null,
@@ -226,8 +227,47 @@ function updateRubricControls() {
   $('remove-rubric').hidden = !state.rubricLoading && !state.rubricFileName && !$('instructor-rubric').value;
   syncAnalysisControls();
 }
+function clearRubricPreview() {
+  state.rubricPreviewController?.abort(); state.rubricPreviewController = null;
+  state.rubricPreview?.dispose(); state.rubricPreview = null;
+  state.rubricPage = 0; state.rubricPageGeneration++;
+  $('rubric-preview-dialog').close();
+  $('rubric-thumbnail').replaceChildren(); $('rubric-document-page').replaceChildren();
+  $('rubric-preview-card').hidden = true;
+  $('rubric-preview-meta').textContent = ''; $('rubric-preview-warning').textContent = '';
+  $('rubric-page-status').textContent = '';
+}
+async function showRubricPage(index) {
+  const preview = state.rubricPreview;
+  if (!preview) return;
+  const generation = ++state.rubricPageGeneration;
+  state.rubricPage = Math.max(0, Math.min(preview.pageCount - 1, index));
+  $('rubric-page-label').textContent = `Page ${state.rubricPage + 1} of ${preview.pageCount}`;
+  $('rubric-page-previous').disabled = state.rubricPage === 0;
+  $('rubric-page-next').disabled = state.rubricPage === preview.pageCount - 1;
+  $('rubric-page-status').textContent = 'Loading page…';
+  $('rubric-page-status').classList.remove('error');
+  $('rubric-document-scroll').scrollTop = 0;
+  try {
+    const availableWidth = $('rubric-document-scroll').clientWidth;
+    await preview.render(state.rubricPage, $('rubric-document-page'), availableWidth > 0 ? Math.max(240, Math.min(760, availableWidth - 34)) : 760);
+    if (generation === state.rubricPageGeneration) $('rubric-page-status').textContent = '';
+  } catch (error) {
+    if (generation !== state.rubricPageGeneration) return;
+    $('rubric-page-status').textContent = `This page could not be shown. ${errorMessage(error)}`;
+    $('rubric-page-status').classList.add('error');
+  }
+}
+async function openRubricPreview() {
+  if (!state.rubricPreview) return;
+  $('rubric-preview-title').textContent = state.rubricFileName || state.rubricPreview.name || 'Document preview';
+  $('rubric-preview-warning').textContent = state.rubricPreview.warnings.join(' ');
+  $('rubric-preview-dialog').showModal();
+  await showRubricPage(state.rubricPage);
+}
 function removeRubric() {
   state.rubricGeneration++;
+  clearRubricPreview();
   state.rubricLoading = false; state.rubricFileName = ''; state.rubricPendingName = '';
   $('instructor-rubric').value = ''; $('rubric-upload').value = '';
   $('rubric-status').textContent = 'Rubric removed. Upload another file or paste its text below.';
@@ -238,7 +278,10 @@ async function importRubric(file) {
   if (!file) return;
   const generation = ++state.rubricGeneration;
   const replaced = Boolean(state.rubricFileName || $('instructor-rubric').value.trim());
+  clearRubricPreview();
+  const controller = new AbortController(); state.rubricPreviewController = controller;
   state.rubricLoading = true; state.rubricFileName = ''; state.rubricPendingName = file.name || 'Selected file';
+  $('rubric-text-details').open = false;
   $('instructor-rubric').value = '';
   $('rubric-status').textContent = `Reading ${state.rubricPendingName} on your device…${replaced ? ' The previous rubric has been removed.' : ''}`;
   $('rubric-status').classList.remove('error');
@@ -248,20 +291,40 @@ async function importRubric(file) {
     if (file.size > 5 * 1024 * 1024) throw new Error('Choose a rubric file of up to 5 MB, or paste the text below.');
     if ((file.name || '').length > 255) throw new Error('Shorten the filename to 255 characters or fewer, then choose it again.');
     if (!window.rehearsalDocuments?.extractRubric) throw new Error('The document reader has not loaded. Paste the rubric text below, or refresh the page.');
-    const result = await window.rehearsalDocuments.extractRubric(file);
+    const previewTask = (async () => {
+      if (!window.rehearsalDocuments.prepareRubricPreview) throw new Error('The document preview has not loaded. Refresh the page to try again.');
+      const preview = await window.rehearsalDocuments.prepareRubricPreview(file, { signal: controller.signal });
+      if (generation !== state.rubricGeneration) { preview.dispose(); return; }
+      state.rubricPreview = preview;
+      try { await preview.render(0, $('rubric-thumbnail'), 184); }
+      catch (error) { if (state.rubricPreview === preview) state.rubricPreview = null; preview.dispose(); throw error; }
+      if (generation !== state.rubricGeneration) { preview.dispose(); return; }
+      $('rubric-preview-card').hidden = false;
+      $('rubric-preview-meta').textContent = `${preview.pageCount} ${preview.pageCount === 1 ? 'page' : 'pages'}`;
+    })();
+    const [extracted, visual] = await Promise.allSettled([window.rehearsalDocuments.extractRubric(file), previewTask]);
     if (generation !== state.rubricGeneration) return;
+    if (state.rubricPreview) state.rubricFileName = file.name;
+    if (extracted.status === 'rejected') throw extracted.reason;
+    const result = extracted.value;
     if (typeof result?.text !== 'string' || !result.text.trim()) throw new Error('No readable rubric text was found. Paste the text below instead.');
     if (result.text.length > 40000) throw new Error('This rubric has more than 40,000 characters. Paste a shorter version below.');
     const name = typeof result.name === 'string' ? result.name : file.name;
     if (name.length > 255) throw new Error('Shorten the filename to 255 characters or fewer, then choose it again.');
     state.rubricFileName = name;
     $('instructor-rubric').value = result.text;
-    $('rubric-status').textContent = 'Rubric text is ready. Review it below; only this text is included in coaching.';
+    $('rubric-status').textContent = visual.status === 'fulfilled'
+      ? 'Rubric ready. Preview stays on your device; coaching uses the extracted text.'
+      : `Rubric text is ready. Preview unavailable: ${errorMessage(visual.reason)}`;
+    $('rubric-status').classList.toggle('error', visual.status === 'rejected');
     markPromptStale();
   } catch (error) {
     if (generation !== state.rubricGeneration) return;
-    $('rubric-status').textContent = `${errorMessage(error)}${replaced ? ' The previous rubric is no longer included.' : ''}`;
+    const message = state.rubricPreview && error?.code === 'RUBRIC_NO_TEXT'
+      ? 'This document has scanned or blank pages. Paste its rubric criteria below to include them in coaching.' : errorMessage(error);
+    $('rubric-status').textContent = `${state.rubricPreview ? 'Your document preview is ready. ' : ''}${message}${replaced ? ' The previous rubric is no longer included.' : ''}`;
     $('rubric-status').classList.add('error');
+    $('rubric-text-details').open = true;
   } finally {
     if (generation === state.rubricGeneration) {
       state.rubricLoading = false; state.rubricPendingName = '';
@@ -1657,8 +1720,10 @@ window.rehearsalHostedActions = {
     if (record.transcript) cacheTranscript(record.transcript);
     const input = record.report?.input || record.report?.meta;
     if (input) {
+      removeRubric();
       for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric']]) $(field).value = typeof input[key] === 'string' ? input[key] : '';
       state.rubricFileName = input.rubricFileName || ''; updateTargetHint(); updateRubricControls();
+      $('rubric-status').textContent = input.instructorRubric ? 'Saved rubric text restored. Choose the original file to see its preview again.' : 'No rubric was saved with this rehearsal.';
     }
     if (record.report) { state.report = record.report; renderReport(); }
     $('audio-save-status').textContent = 'Saved privately to your account.';
@@ -1709,7 +1774,11 @@ $('planned-transitions').addEventListener('input', () => { $('remove-transitions
 $('remove-transitions').addEventListener('click', () => { $('planned-transitions').value = ''; $('remove-transitions').hidden = true; markPromptStale(); });
 $('rubric-upload-button').addEventListener('click', () => $('rubric-upload').click());
 $('rubric-upload').addEventListener('change', () => importRubric($('rubric-upload').files[0]));
-$('remove-rubric').addEventListener('click', removeRubric);
+$('remove-rubric').addEventListener('click', () => { removeRubric(); $('rubric-upload-button').focus(); });
+$('rubric-preview-open').addEventListener('click', openRubricPreview);
+$('rubric-preview-close').addEventListener('click', () => $('rubric-preview-dialog').close());
+$('rubric-page-previous').addEventListener('click', () => showRubricPage(state.rubricPage - 1));
+$('rubric-page-next').addEventListener('click', () => showRubricPage(state.rubricPage + 1));
 $('instructor-rubric').addEventListener('input', () => {
   $('rubric-status').classList.remove('error');
   $('rubric-status').textContent = $('instructor-rubric').value.trim() ? 'This text will be included in coaching, even when this section is closed.' : 'No rubric text is included. Paste its text here or choose a file.';
@@ -1769,7 +1838,7 @@ $('practice-again').addEventListener('click', () => {
 navigator.mediaDevices?.addEventListener('devicechange', enumerateInputs);
 window.addEventListener('focus', () => { enumerateInputs(); refreshSavedRecordings(); });
 window.addEventListener('beforeunload', warnBeforeLeaving);
-window.addEventListener('pagehide', (event) => { if (event.persisted) return; state.chat?.dispose(); state.processing?.clear(); clearInterval(state.timer); stopPlaybackLoop(); cleanupMic(); cancelLiveSession(); if (state.audioURL) URL.revokeObjectURL(state.audioURL); state.requestController?.abort(); state.transcriptController?.abort(); });
+window.addEventListener('pagehide', (event) => { if (event.persisted) return; state.rubricGeneration++; clearRubricPreview(); state.chat?.dispose(); state.processing?.clear(); clearInterval(state.timer); stopPlaybackLoop(); cleanupMic(); cancelLiveSession(); if (state.audioURL) URL.revokeObjectURL(state.audioURL); state.requestController?.abort(); state.transcriptController?.abort(); });
 
 state.chat = createRehearsalChat({ document, request: api, getContext: getChatContext, onSignIn: openSettings });
 $('annotated-transcript').addEventListener('pointerdown', () => { state.transcriptSelectionAttached = false; });

@@ -16,7 +16,8 @@ test('hosted policy permits only its exact backend and required browser assets',
   assert.deepEqual(policy['worker-src'], ["'self'", 'blob:']);
   assert.deepEqual(policy['media-src'], ["'self'", 'blob:']);
   assert.deepEqual(policy['img-src'], ["'self'", 'data:']);
-  for (const name of ['default-src', 'base-uri', 'object-src', 'form-action', 'frame-src']) assert.deepEqual(policy[name], ["'none'"]);
+  assert.deepEqual(policy['frame-src'], ["'self'"], 'local document previews must not permit remote, data, or blob frames');
+  for (const name of ['default-src', 'base-uri', 'object-src', 'form-action']) assert.deepEqual(policy[name], ["'none'"]);
   assert.ok(!policy['frame-ancestors'], 'frame-ancestors is ineffective in a meta tag');
 });
 
@@ -24,6 +25,7 @@ test('unconfigured preview cannot reach remote providers or load remote scripts'
   const policy = directives(webContentSecurityPolicy());
   assert.deepEqual(policy['connect-src'], ["'self'"]);
   assert.deepEqual(policy['script-src'], ["'self'", "'wasm-unsafe-eval'"]);
+  assert.deepEqual(policy['frame-src'], ["'self'"]);
   assert.ok(!policy['script-src'].includes("'unsafe-eval'") && !policy['script-src'].includes("'unsafe-inline'"));
   assert.ok(!Object.values(policy).flat().some(value => value === '*' || value === 'https:'));
 });
@@ -103,6 +105,7 @@ test('production HTML places enforcing policy and referrer metadata before scrip
       assert.ok(html.indexOf('Content-Security-Policy') < html.indexOf('<script'));
       assert.ok(html.indexOf('name="referrer"') < html.indexOf('<script'));
       assert.equal((html.match(/Content-Security-Policy/g) || []).length, 1);
+      assert.match(html.replaceAll('&#39;', "'"), /frame-src 'self';/, 'production preview frames need the same narrow policy as local development');
       assert.equal(html.includes('https://pilot.supabase.co'), Boolean(env.VITE_SUPABASE_URL));
       assert.ok(!html.includes('sb_publishable_'), 'policy metadata must not include credentials');
     }

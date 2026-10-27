@@ -65,11 +65,19 @@
           <summary>Add rubric <span class="optional-inline">(optional)</span><span aria-hidden="true">+</span></summary>
           <p class="field-note">The coach uses your instructor’s criteria. The speech rating is a coaching estimate, not your course grade.</p>
           <div class="rubric-upload-row"><button class="secondary-button small-button" id="rubric-upload-button" type="button">Choose file <span aria-hidden="true">↑</span></button><span id="rubric-file-name">No file chosen</span><input id="rubric-upload" type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" hidden></div>
-          <p class="field-note">PDF, DOCX, or TXT · up to 5 MB · PDFs up to 30 pages</p>
-          <p class="rubric-status" id="rubric-status" role="status" aria-live="polite">Files are read on your device. Only the text below is sent for coaching.</p>
-          <label for="instructor-rubric">Rubric text <span class="optional-inline">paste or edit</span></label>
-          <textarea id="instructor-rubric" maxlength="40000" rows="6" placeholder="Paste your instructor’s rubric here, or choose a file above." aria-describedby="rubric-text-help"></textarea>
-          <div class="context-field-footer"><p class="field-note" id="rubric-text-help">Review extracted text before analyzing. Scanned pages may need you to paste the text manually.</p><button class="text-button quiet" id="remove-rubric" type="button" hidden>Remove rubric</button></div>
+          <p class="field-note">PDF, DOCX, or TXT · up to 5 MB · up to 30 preview pages</p>
+          <div class="rubric-preview-card" id="rubric-preview-card" hidden>
+            <div class="rubric-thumbnail" id="rubric-thumbnail" aria-hidden="true"></div>
+            <button class="rubric-preview-open" id="rubric-preview-open" type="button"><span>Open rubric preview <span aria-hidden="true">↗</span></span><span id="rubric-preview-meta"></span></button>
+          </div>
+          <p class="rubric-status" id="rubric-status" role="status" aria-live="polite">Preview stays on your device. Coaching uses the extracted text.</p>
+          <details class="rubric-text-details" id="rubric-text-details">
+            <summary>Paste or review rubric text</summary>
+            <label for="instructor-rubric">Text used for coaching</label>
+            <textarea id="instructor-rubric" maxlength="40000" rows="6" placeholder="Paste your instructor’s rubric here, or choose a file above." aria-describedby="rubric-text-help"></textarea>
+            <p class="field-note" id="rubric-text-help">You can edit this text without changing the document preview. For scanned pages, paste the criteria you want the coach to use.</p>
+          </details>
+          <div class="context-field-footer"><button class="text-button quiet" id="remove-rubric" type="button" hidden>Remove rubric</button></div>
         </details>
         <div class="prepare-tip"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 18h6M10 21h4M8 14.5a6 6 0 1 1 8 0c-1 .8-1 1.5-1 2.5H9c0-1 0-1.7-1-2.5Z"/></svg><p>Bullet points leave room for your natural voice.</p></div>
       </section>
@@ -218,6 +226,14 @@
       <button id="cancel-restart-confirm" class="primary-button" type="button">Yes, cancel and start over</button>
     </div>
   </dialog>
+  <dialog id="rubric-preview-dialog" aria-labelledby="rubric-preview-title">
+    <div class="dialog-heading"><div><p class="eyebrow">YOUR RUBRIC</p><h2 id="rubric-preview-title">Document preview</h2></div><button class="icon-button" id="rubric-preview-close" type="button" aria-label="Close rubric preview" autofocus>×</button></div>
+    <div class="rubric-page-controls"><button class="secondary-button small-button" id="rubric-page-previous" type="button" aria-label="Previous rubric page">← Previous</button><span id="rubric-page-label" role="status" aria-live="polite"></span><button class="secondary-button small-button" id="rubric-page-next" type="button" aria-label="Next rubric page">Next →</button></div>
+    <p class="rubric-status" id="rubric-preview-warning"></p>
+    <div class="rubric-document-scroll" id="rubric-document-scroll" role="region" aria-label="Rubric document page" tabindex="0"><div id="rubric-document-page"></div></div>
+    <p class="rubric-status" id="rubric-page-status" role="status" aria-live="polite"></p>
+  </dialog>
+
   <dialog id="account-dialog" aria-labelledby="account-title">
     <div class="dialog-heading"><div><p class="eyebrow">YOUR REHEARSALS</p><h2 id="account-title">Sign in</h2></div><button class="icon-button" id="account-close" type="button" aria-label="Close account">×</button></div>
     <p class="support-text">Sign in to save private rehearsals and receive live transcription and coaching.</p>
