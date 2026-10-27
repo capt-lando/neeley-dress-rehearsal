@@ -6,6 +6,8 @@ import { createLiveTranscription } from '../lib/live-transcription.mjs';
 import { createHostedLiveSession } from '../lib/hosted-live.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
+import { renderDiscussableTranscript, selectedTranscriptQuote } from '../lib/transcript-discussion.mjs';
+import { createRehearsalChat } from '../public/rehearsal-chat.js';
 import { analyzeSpeech, sanitizeAiFeedback } from '../lib/analysis-core.mjs';
 import { BARK_MODEL_ID, BARK_MODEL_LABEL, BARK_MODELS, BARK_CLEAN_ID } from '../lib/speech-models.mjs';
 
@@ -174,6 +176,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
     },
     Option: class { constructor(label, value) { this.label = label; this.value = value; } },
     Blob, Uint8Array, Float32Array, ArrayBuffer, DataView, Math, Date, AbortController, AbortSignal, DOMException,
+    renderDiscussableTranscript, selectedTranscriptQuote, createRehearsalChat,
     URL: {
       createObjectURL: blob => { const url = `blob:rehearsal-${++blobCounter}`; objectUrls.set(url, blob); return url; },
       revokeObjectURL: value => revoked.push(value),
@@ -191,7 +194,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
 globalThis.audioTest = {
   state, updateConfig, saveSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession, openCancelRestart, confirmCancelRestart, closeCancelRestart,
-  wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript,
+  wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript, renderSummaryDraft, attachTranscriptSelection, getChatContext,
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
   analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, setBusy,
   autosaveRecording, refreshSavedRecordings, renderSavedRecordings, openSavedRecording, deleteSavedRecording,
@@ -210,6 +213,46 @@ function microphone(label) {
   const track = { label, readyState: 'live', stopped: 0, onended: null, stop() { this.stopped++; this.readyState = 'ended'; } };
   return { track, getTracks: () => [track], getAudioTracks: () => [track] };
 }
+
+test('summary keeps its empty placeholder and fills with draft text without running analysis', () => {
+  const h = harness();
+  h.renderSummaryDraft();
+  assert.match(h.get('annotated-transcript').textContent, /words will appear/);
+  assert.equal(h.get('download-transcript').disabled, true);
+  h.renderSummaryDraft('My first point. My next point.', true);
+  assert.equal(elementText(h.get('annotated-transcript')), 'My first point. My next point.');
+  assert.equal(h.state.report, null);
+  assert.equal(h.get('speech-analysis-content').hidden, true);
+  assert.equal(h.get('annotation-legend').hidden, true);
+});
+
+test('clicking a sentence attaches it without a request or replacing the composed question', () => {
+  const h = harness();
+  h.renderSummaryDraft('A clear claim. Another point.');
+  const sentence = h.get('annotated-transcript').children[0], quotes = [];
+  h.get('chat-input').value = 'Can you make this clearer?';
+  h.state.chat = { selectQuote: quote => quotes.push(quote) };
+  h.attachTranscriptSelection({ type: 'click', target: { closest: selector => selector === '.transcript-sentence' ? sentence : null } });
+  assert.deepEqual(quotes, ['A clear claim.']);
+  assert.equal(h.get('chat-input').value, 'Can you make this clearer?');
+  assert.equal(h.state.report, null);
+});
+
+test('paragraph selection survives the click after pointerup and excludes annotation reference text', () => {
+  const h = harness(), quote = 'A clear claim. Another point.', quotes = [];
+  h.renderSummaryDraft(quote);
+  const sentence = h.get('annotated-transcript').children[0];
+  let referencesRemoved = false;
+  const fragment = { textContent: quote + '[1]', querySelectorAll: () => [{ remove() { referencesRemoved = true; fragment.textContent = quote; } }] };
+  h.window.getSelection = () => ({ isCollapsed: false, rangeCount: 1, anchorNode: sentence, focusNode: sentence,
+    getRangeAt: () => ({ cloneContents: () => fragment }) });
+  h.state.chat = { selectQuote(value) { quotes.push(value); h.window.getSelection = () => ({ isCollapsed: true }); } };
+  const target = { closest: selector => selector === '.transcript-sentence' ? sentence : null };
+  h.attachTranscriptSelection({ type: 'pointerup', target });
+  h.attachTranscriptSelection({ type: 'click', target });
+  assert.equal(referencesRemoved, true);
+  assert.deepEqual(quotes, [quote], 'the follow-up click must not replace a selected paragraph with one sentence');
+});
 const inputDevice = (deviceId, label = '') => ({ kind: 'audioinput', deviceId, label });
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const hostedConfig = { hosted: true, localSpeech: false, liveTranscription: false, transcriptionModel: 'bark-3.0-plus', analysisProvider: 'hosted', providers: [], auth: { signedIn: true }, analysisConfigured: true };
@@ -288,6 +331,11 @@ test('hosted live recording uses ten-second cloud segments, excludes pauses, and
   h.toggleRecordingPause(); h.captureRecordingSamples(new Float32Array(48000).fill(0.9), 48000); h.toggleRecordingPause();
   h.captureRecordingSamples(new Float32Array(48000).fill(0.25), 48000); await nextTurn();
   assert.equal(h.get('follow-transcript').textContent, 'Um, practice helps.');
+  assert.equal(elementText(h.get('annotated-transcript')), 'Um, practice helps.');
+  assert.equal(h.get('speech-analysis-content').hidden, true, 'live text does not invent analysis');
+  assert.equal(h.get('annotation-legend').hidden, true);
+  assert.equal(h.get('transcript-details').hidden, true, 'draft text is not editable mid-take');
+  assert.equal(h.getChatContext().context.text, 'Um, practice helps.');
   assert.equal(h.state.transcriptText, '', 'draft segments cannot be used for coaching');
   assert.match(h.get('follow-transcript-status').textContent, /10-second/);
   h.captureRecordingSamples(new Float32Array(4800).fill(-0.25), 48000);
@@ -1687,8 +1735,8 @@ test('hostile transcript and comment markup remain inert text in the page and do
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /default-src 'none'/);
   h.renderAnnotatedTranscript(report);
-  const mark = h.get('annotated-transcript').children.find(child => child.tagName === 'MARK');
-  assert.equal(mark.textContent, quote);
+  const marks = h.createdElements.filter(child => child.tagName === 'MARK');
+  assert.equal(marks.map(mark => mark.textContent).join(''), quote);
   assert.equal(h.get('annotations-notes').children[0].children[1].textContent, comment);
 });
 
@@ -1704,7 +1752,7 @@ test('local reports never display or export AI highlights even if stale annotati
     h.renderAnnotatedTranscript(report);
     assert.equal(h.get('annotations-notes').children.length, 0);
     assert.equal(h.get('annotated-transcript').children.length, 1);
-    assert.equal(h.get('annotated-transcript').children[0].textContent, text);
+    assert.equal(elementText(h.get('annotated-transcript')), text);
   }
 });
 

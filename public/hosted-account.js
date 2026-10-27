@@ -67,8 +67,8 @@ export function installHostedAccount(service, actions) {
       liveTranscription = Boolean(config.liveTranscription);
       dialog.querySelector('.key-privacy-note p').textContent = (liveTranscription
         ? 'While signed in, recording sends 10-second audio segments for cloud transcription. Stop saves the complete recording and transcript privately. Replay does not upload audio. '
-        : 'Create transcript or Analyze uploads and saves your recording, transcript, and resulting feedback privately. Recording and replay alone do not upload audio. ')
-        + 'Coaching also sends your transcript and preparation text to our configured AI provider. Raw rubric files stay on your device.';
+        : 'Cloud transcription sends audio to our speech service and saves your recording and transcript privately. When live transcription is enabled, audio is sent in chunks while you record. Replay does not upload audio. ')
+        + 'Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.';
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
       await actions.recoverPending?.();
       if (own !== generation || disposed) return;

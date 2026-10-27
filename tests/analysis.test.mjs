@@ -182,6 +182,19 @@ test('prompt keeps user data in JSON and requests evidence, not diagnosis', () =
   assert.deepEqual(data.targetPoints, [{ id: 'point-1', text: 'Mention the budget' }]);
 });
 
+test('chat goals are bounded separate context, never transcript evidence or measured coverage', () => {
+  const text = 'Our students should rehearse together.';
+  const rehearsalContext = JSON.stringify([{ role: 'assistant', text: 'Mention revenue and the 40 percent increase.' }, { role: 'user', text: 'My audience is first-year students.' }]);
+  const data = JSON.parse(buildAnalysisPrompt({ text, rehearsalContext }).split('DATA_JSON:\n')[1]);
+  assert.equal(data.transcript, text);
+  assert.equal(data.rehearsalContext, rehearsalContext);
+  assert.deepEqual(data.targetPoints, []);
+  assert.deepEqual(analyzeSpeech({ text, rehearsalContext }), analyzeSpeech({ text }));
+  assert.throws(() => buildAnalysisPrompt({ text, rehearsalContext: 'x'.repeat(12001) }));
+  const sanitized = sanitizeAiFeedback({ annotations: [{ quote: '40 percent increase', category: 'evidence', comment: 'Good statistic.' }] }, text);
+  assert.equal(sanitized?.annotations?.length || 0, 0, 'a suggested phrase never becomes a recorded annotation');
+});
+
 test('coaching prompt carries the original full script, mode, name, actual duration, and transcript', () => {
   const targetScript = '  “Introduce myself.”\nState the proposal.\n\nGive its costs.  ';
   const text = "I'm Alex. My proposal is to expand tutoring.";

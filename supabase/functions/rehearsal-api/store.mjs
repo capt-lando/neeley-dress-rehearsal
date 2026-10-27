@@ -13,6 +13,9 @@ const ERRORS = {
   live_closed:['This live rehearsal ended or expired. Save the recording and transcribe the full take.',409],
   live_order:['Send live audio in order, one section at a time.',409],
   live_duration:['The live transcript does not cover the complete recording. Save the take and transcribe it in full.',409],
+  chat_busy:['Your previous chat message is still processing. Please wait for it to finish.',409],
+  chat_limit:['You have reached the pilot chat allowance. Try again later.',429],
+  chat_expired:['This chat reply has expired. Send a new message to continue.',409],
 };
 function checked({ data, error }) {
   if (error) {
@@ -20,6 +23,7 @@ function checked({ data, error }) {
     const failure=known?fail(...known):fail('Private storage is temporarily unavailable.',503);
     if (error.message==='rate_limited') failure.retryAfter=60;
     if (error.message==='request_cancelled') failure.jobState='cancelled';
+    if (error.message==='chat_expired') failure.jobState='failed';
     throw failure;
   }
   return data;
@@ -67,6 +71,9 @@ export function createSupabaseStore(client) {
     requestStatus(user,request) { return rpc('rehearsal_get_request',{p_user:user,p_request:request}); },
     cancelRequest(user,recording,request) { return rpc('rehearsal_cancel_request',{p_user:user,p_recording:recording,p_request:request}); },
     completeRequest(user,request,response) { return rpc('rehearsal_complete_request',{p_user:user,p_request:request,p_response:response}); },
+    chatReserve(user,recording,request,inputHash) { return rpc('rehearsal_chat_reserve',{p_user:user,p_recording:recording,p_request:request,p_hash:inputHash}); },
+    chatComplete(user,request) { return rpc('rehearsal_chat_complete',{p_user:user,p_request:request}); },
+    chatFail(user,request) { return rpc('rehearsal_chat_fail',{p_user:user,p_request:request}); },
     liveStart(user,recording,request,title,inputHash,cost) { return rpc('rehearsal_live_start',{p_user:user,p_recording:recording,p_request:request,p_title:title,p_hash:inputHash,p_cost:cost}); },
     liveGet(user,recording) { return rpc('rehearsal_live_get',{p_user:user,p_recording:recording}); },
     livePrepare(user,recording) { return rpc('rehearsal_live_prepare',{p_user:user,p_recording:recording}); },

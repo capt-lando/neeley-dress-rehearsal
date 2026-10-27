@@ -2,13 +2,15 @@
 
 A minimal presentation practice app for Neeley students. Record an English rehearsal, compare it with a script or speaking points, and review word statistics, moments to improve, and thesis/rhetoric coaching.
 
-**The current local mode needs no Hugging Face account or token.** The public speech model downloads and runs on the device; coaching uses the student's provider key. A configurable cloud pilot adds Google/Microsoft login, private saved rehearsals in Supabase, opt-in usage metrics, and server-funded speech/coaching. It remains disabled until account/provider setup and real cloud checks pass.
+The deployed cloud pilot uses Google/Microsoft login, private saved rehearsals in Supabase, opt-in usage metrics, and server-funded speech/coaching. No student AI key or model download is needed. The optional local mode runs the public speech model on the device and uses the student's provider key for analysis; it needs no Hugging Face token.
 
 Ongoing development focuses on the web app. The pilot has one free experience for everyone, with no paid tiers or admin dashboard. See [project direction](PROJECT-DIRECTION.md), [cloud setup](docs/cloud-pilot.md), and [cost research](docs/cloud-costs.md). Microsoft login is not a claim of institutionally approved TCU SSO.
 
 In cloud mode, refreshing automatically reconnects to this tab's pending transcription or coaching request after sign-in. Recovery reads the existing request without submitting another paid job, then restores its saved recording and result. A live recording interrupted by refresh is canceled; any audio already saved is restored. Audio still held only in the interrupted page cannot be recovered. Only request identifiers are kept in this tab's recovery marker, and every recovery or cancellation is checked against the authenticated account on the server. If recovery cannot connect, the page offers **Retry recovery**.
 
 Signed-in audio uploads automatically save and transcribe after file-signature, size, decoding, and duration checks. Coaching still starts with **Analyze**. **Cancel and start over** is available during capture, processing, and recovery; a separate confirmation dialog prevents an accidental repeat click. Confirming cancels the current request and clears the current take from the screen while preserving saved rehearsals. The speech worker stops matching inference, and canceled jobs cannot publish late results.
+
+The Summary transcript area and Luna coach stay visible before and after a recording. Draft text fills the transcript as cloud speech segments finish; annotations and ratings require **Analyze**. Click a sentence or highlight a passage to attach it above the chat composer without sending a request or replacing your question. Only **Send** requests a reply. The coach is limited to presentation preparation and feedback and redirects unrelated tasks. Conversation is held only in the current tab, cleared on refresh/sign-out, and is not saved in the student's account or report. Current-session goals can guide analysis without becoming evidence of recorded speech. Content-free request hashes, statuses, and usage counters enforce retries and the existing budget; chat has its own per-user limits and cannot modify saved transcripts or ratings.
 
 ## Codex plugin and custom panel (paused)
 

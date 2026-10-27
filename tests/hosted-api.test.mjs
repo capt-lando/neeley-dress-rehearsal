@@ -420,6 +420,19 @@ test('coaching uses saved duration, retains all preparation inputs, and returns 
   const options=f.calls.find(c=>c[0]==='coach')[1];assert.equal(options.apiKey,'private-coach-key');assert.equal(options.browser,false);for(const value of ['Support tutoring.','Hello students.','Next, costs.','Explain the claim.'])assert.ok(options.prompt.includes(value));
   assert.equal((await f.call('/analyze-text',{method:'POST',body:{...body,text:'A changed speech.'}})).status,409);assert.equal(f.debits,1);
 });
+test('conversation guides analysis transiently but is absent from saved reports and recovery responses',async()=>{
+  const f=fixture();const rehearsalContext='Student: My audience is the campus investment committee. Assistant: Try a short opening story.';
+  const body={...analyze.body,rehearsalContext};
+  const response=await f.call('/analyze-text',{method:'POST',body}),report=await response.json();
+  assert.equal(response.status,200);
+  assert.ok(f.calls.find(c=>c[0]==='coach')[1].prompt.includes(rehearsalContext));
+  assert.equal(report.meta.rehearsalContext,undefined);
+  assert.doesNotMatch(JSON.stringify(report),/rehearsalContext|campus investment committee|short opening story/);
+  assert.doesNotMatch(JSON.stringify(f.rows.get(recording).report),/rehearsalContext|campus investment committee|short opening story/);
+  const retry=await f.call('/analyze-text',{method:'POST',body});assert.equal(retry.status,200);
+  assert.doesNotMatch(await retry.text(),/rehearsalContext|campus investment committee|short opening story/);
+  assert.equal(f.calls.filter(c=>c[0]==='coach').length,1);assert.equal(f.debits,1);
+});
 test('coaching persists partial results honestly and never retries or fabricates missing criteria',async()=>{
   const text=analyze.body.text;
   for(const audience of ['valid','missing','unverifiable']) {

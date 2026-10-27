@@ -3,6 +3,8 @@
 import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
+import { createRehearsalChat } from './rehearsal-chat.js';
+import { renderDiscussableTranscript, selectedTranscriptQuote } from '../lib/transcript-discussion.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -20,7 +22,64 @@ const state = {
   cloudRecordingId: '', accountId: '', recoveryController: null, recoveryPending: Boolean(window.rehearsalService?.hosted), recoveryNeedsConfig: false,
   audioPreparationGeneration: 0, audioMetadataCancel: null, processing: null,
   cancelRestartPending: false, cancelConfirmation: null,
+  chat: null, chatContextKey: 0, summaryTranscript: '', transcriptSelectionAttached: false,
 };
+
+function getChatContext() {
+  return {
+    ...(state.cloudRecordingId ? { recordingId: state.cloudRecordingId } : {}),
+    context: {
+      text: state.summaryTranscript,
+      targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value,
+      plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value,
+      instructorRubric: $('instructor-rubric').value,
+      phase: state.recording || state.liveTake ? 'recording' : state.summaryTranscript ? 'review' : 'prepare',
+    },
+  };
+}
+function syncChat() {
+  state.chat?.update({ available: Boolean(state.config.hosted && state.config.chatConfigured !== false),
+    signedIn: Boolean(state.config.auth?.signedIn), identity: state.accountId,
+    contextKey: state.chatContextKey, hasTranscript: Boolean(state.summaryTranscript.trim()) });
+}
+function renderSummaryDraft(text = '', live = false) {
+  state.summaryTranscript = String(text);
+  const container = $('annotated-transcript');
+  const hasText = Boolean(state.summaryTranscript.trim());
+  container.dataset.empty = String(!hasText);
+  container.setAttribute('aria-label', 'Rehearsal transcript. Select text to discuss with your coach.');
+  if (hasText) renderDiscussableTranscript({ document, container, text: state.summaryTranscript,
+    segments: [{ text: state.summaryTranscript, annotation: null }] });
+  else container.textContent = 'Your words will appear here as you record.';
+  $('annotation-title').textContent = 'Full transcript';
+  $('annotation-status').textContent = live
+    ? 'Draft text arrives as each speech segment finishes. Annotations begin when you press Analyze.'
+    : hasText ? 'Click a sentence or highlight a passage to add it to chat. Press Analyze for annotations.'
+      : 'Start a rehearsal to see your transcript. Press Analyze when you are ready for feedback.';
+  $('annotation-legend').hidden = true; $('annotations-notes').replaceChildren();
+  $('speech-analysis-content').hidden = true; $('analysis-disclaimer').hidden = true; $('coaching-notice').hidden = true;
+  $('transcript-details').hidden = !hasText || live; $('prompt-details').hidden = !hasText;
+  $('download-transcript').disabled = !hasText;
+  syncChat();
+}
+function attachTranscriptSelection(event = {}) {
+  if (event.type === 'click' && state.transcriptSelectionAttached) { state.transcriptSelectionAttached = false; return; }
+  const container = $('annotated-transcript');
+  const selected = selectedTranscriptQuote(container, window.getSelection?.());
+  if (selected) {
+    state.transcriptSelectionAttached = event.type === 'pointerup';
+    state.chat?.selectQuote(selected); return;
+  }
+  if (event.type === 'pointerup' || event.target?.closest?.('a')) return;
+  const sentence = event.target?.closest?.('.transcript-sentence');
+  if (sentence && container.contains(sentence)) {
+    state.chat?.selectQuote(sentence.dataset.quote.slice(0, 4000));
+    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      sentence.classList.add('is-attached');
+      sentence.addEventListener('animationend', () => sentence.classList.remove('is-attached'), { once: true });
+    }
+  }
+}
 
 const PROVIDER_GUIDES = {
   openai: { id: 'openai', label: 'ChatGPT (OpenAI)', keyUrl: 'https://platform.openai.com/api-keys', instructions: 'Sign in to the OpenAI API platform. Create an API key, then copy it here.' },
@@ -223,6 +282,7 @@ async function importRubric(file) {
 function updateConfig(config) {
   const previousSpeechModel = state.config.transcriptionModel;
   state.config = { ...state.config, ...config };
+  syncChat();
   const manualPanelTranscript = state.config.coachingViaHost && !state.audioBlob && !state.recording && !state.startingRecording;
   if (state.config.transcriptionModel !== previousSpeechModel && !manualPanelTranscript) resetTranscriptForModelChange();
   state.settingsProvider = state.config.analysisProvider || 'openai';
@@ -273,8 +333,7 @@ function resetTranscriptForModelChange() {
   $('transcript').value = '';
   renderFollowTranscript('');
   $('report').hidden = true;
-  $('annotated-transcript').replaceChildren(); $('annotations-notes').replaceChildren();
-  $('download-transcript').disabled = true;
+  state.chat?.selectQuote(''); renderSummaryDraft();
   markPromptStale();
   if (wasLive) showLiveFallback('The speech model changed. Transcribe the complete recording after you stop.');
   if (analyzing) setBusy(false);
@@ -628,6 +687,7 @@ function renderLiveProgress(take) {
     take.text = text;
     container.textContent = text || 'Your words will appear here as each batch is transcribed.';
     container.scrollTop = container.scrollHeight;
+    renderSummaryDraft(text, true);
   }
   container.classList.add('is-live');
   if ($('follow-transcript-status').textContent !== message) $('follow-transcript-status').textContent = message;
@@ -798,6 +858,7 @@ function discardAudio(reset = true) {
   state.transcriptController = null; state.transcriptPromise = null;
   state.transcriptGeneration = -1; state.transcriptModel = ''; state.transcriptText = ''; state.transcriptionAttempted = false;
   state.report = null; state.pendingSeek = null; state.scrubbing = false;
+  state.chat?.selectQuote('');
   stopPlaybackLoop();
   $('playback').pause(); $('playback').removeAttribute('src'); $('playback').load();
   if (state.audioURL) URL.revokeObjectURL(state.audioURL);
@@ -812,6 +873,7 @@ function discardAudio(reset = true) {
   $('annotated-transcript').replaceChildren();
   $('annotations-notes').replaceChildren();
   $('download-transcript').disabled = true;
+  renderSummaryDraft();
   markPromptStale();
   updatePlaybackUI();
   $('timer').textContent = '00:00';
@@ -1142,6 +1204,7 @@ function cacheTranscript(text, generation = state.audioGeneration) {
   state.transcriptModel = state.config.transcriptionModel;
   $('transcript').value = state.transcriptText;
   renderFollowTranscript(state.transcriptText);
+  if (!state.report) renderSummaryDraft(state.transcriptText);
   $('follow-transcript-status').textContent = state.transcriptText.trim() ? 'Your recorded words · edit the transcript below after analysis if recognition missed something.' : 'Your transcript is empty. Add the words you actually spoke before updating feedback.';
   $('follow-transcript-connect').hidden = Boolean(state.transcriptText.trim());
   markPromptStale();
@@ -1291,7 +1354,8 @@ async function uploadAudio(file) {
 function analysisInput(text, useAI = true) {
   const mode = targetMode();
   const instructorRubric = $('instructor-rubric').value;
-  return { text, targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value, targetMode: mode, plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value, instructorRubric, rubricFileName: instructorRubric.trim() ? state.rubricFileName : '', durationSeconds: state.duration, useAI, ...(state.config.hosted ? { recordingId: state.cloudRecordingId } : {}) };
+  const rehearsalContext = state.chat?.getRehearsalContext() || '';
+  return { text, targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value, targetMode: mode, plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value, instructorRubric, rubricFileName: instructorRubric.trim() ? state.rubricFileName : '', rehearsalContext, durationSeconds: state.duration, useAI, ...(state.config.hosted ? { recordingId: state.cloudRecordingId } : {}) };
 }
 function markPromptStale() {
   state.promptGeneration++;
@@ -1367,7 +1431,7 @@ async function runAnalysis({ corrected = false } = {}) {
     window.rehearsalAccount?.track(report.analysis?.method === 'ai' ? 'analysis_completed' : 'analysis_failed');
     window.rehearsalAccount?.refreshHistory();
     setStatus(state.transcriptText !== text ? 'The transcript changed while feedback was being prepared. Update feedback to analyze your latest corrections.' : '');
-    $('report').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    $('summary-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
     progress.finish(error.name === 'AbortError' ? 'cancelled' : 'error', error.name === 'AbortError' ? '' : errorMessage(error));
     if (error.name !== 'AbortError') window.rehearsalAccount?.track('analysis_failed');
@@ -1505,6 +1569,8 @@ function renderReport() {
   renderCoachingState(report);
   if (!state.transcriptText) cacheTranscript(report.transcript || '');
   renderAnnotatedTranscript(report);
+  $('transcript-details').hidden = false;
+  $('prompt-details').hidden = false;
   markPromptStale();
   if ($('prompt-details').open) loadPromptPreview();
 }
@@ -1537,17 +1603,13 @@ function renderAnnotatedTranscript(report) {
   const segments = annotationSegments(text, report.analysis?.method === 'ai' ? report.analysis.annotations : []);
   const container = $('annotated-transcript');
   const notes = $('annotations-notes');
-  container.replaceChildren(); notes.replaceChildren();
+  state.summaryTranscript = text;
+  container.dataset.empty = String(!text.trim());
+  renderDiscussableTranscript({ document, container, text, segments });
+  notes.replaceChildren();
   for (const segment of segments) {
-    if (!segment.annotation) { container.append(document.createTextNode(segment.text)); continue; }
+    if (!segment.annotation) continue;
     const item = segment.annotation;
-    const mark = addText('mark', segment.text, `annotation-${item.category}`);
-    mark.id = `annotation-quote-${item.number}`;
-    mark.setAttribute('aria-describedby', `annotation-note-${item.number}`);
-    const reference = addText('a', `[${item.number}]`, 'annotation-ref');
-    reference.href = `#annotation-note-${item.number}`;
-    reference.setAttribute('aria-label', `Read annotation ${item.number}: ${ANNOTATION_LABELS[item.category]}`);
-    container.append(mark, reference);
     const note = addText('li', '', `annotation-${item.category}`);
     note.id = `annotation-note-${item.number}`;
     note.append(addText('strong', `${ANNOTATION_LABELS[item.category]}: `), document.createTextNode(item.comment));
@@ -1565,6 +1627,7 @@ function renderAnnotatedTranscript(report) {
           ? 'AI coaching did not finish, so no color annotations are available. Your complete transcript appears below.'
           : 'Your complete transcript appears below. Connect an AI coach above, then analyze it for color annotations.';
   $('download-transcript').disabled = !text.trim();
+  syncChat();
 }
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
@@ -1581,8 +1644,9 @@ function buildAnnotatedDocument(report) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Dress Rehearsal — annotated transcript</title><style>body{font:16px/1.65 system-ui,sans-serif;color:#29262d;max-width:850px;margin:48px auto;padding:0 24px}h1{font-size:28px;line-height:1.2}p{color:#655f6b}.legend{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.legend span,mark{padding:2px 5px;border-radius:4px;color:inherit}.transcript{white-space:pre-wrap;font-size:19px;line-height:1.9;overflow-wrap:anywhere}.annotation-thesis{background:#e7daf4}.annotation-evidence{background:#d9ecdf}.annotation-structure{background:#dce9f5}.annotation-delivery{background:#fbe5c9}.annotation-clarity{background:#f7dfe7}.annotation-ref{font-size:11px;vertical-align:super;color:#5d347c;text-decoration:none;margin:0 3px}li{padding:8px 0}footer{font-size:13px;color:#655f6b;margin-top:32px}@media print{body{margin:0;max-width:none}mark,.legend span{print-color-adjust:exact;-webkit-print-color-adjust:exact}}</style></head><body><h1>${annotations.length ? 'Full annotated transcript' : 'Full transcript'}</h1><p>${annotations.length ? 'AI coaching notes on your original transcript.' : 'Original transcript. No grounded AI coaching annotations were available.'} The text below preserves the analyzed transcript; suggestions are separate.</p><div class="legend" aria-label="Annotation categories">${legend}</div><div class="transcript">${transcript}</div>${notes ? `<h2>Coaching notes</h2><ol>${notes}</ol>` : ''}<footer>Dress Rehearsal · Neeley presentation practice. Annotations are coaching suggestions, not an academic grade. Speech recognition can make mistakes.</footer></body></html>`;
 }
 async function downloadAnnotatedTranscript() {
-  if (!state.report?.transcript?.trim()) return;
-  const blob = new Blob([buildAnnotatedDocument(state.report)], { type: 'text/html;charset=utf-8' });
+  const report = state.report || { transcript: state.summaryTranscript || state.transcriptText };
+  if (!report.transcript?.trim()) return;
+  const blob = new Blob([buildAnnotatedDocument(report)], { type: 'text/html;charset=utf-8' });
   try { await downloadBlob(blob, `dress-rehearsal-transcript-${new Date().toISOString().slice(0, 10)}.html`); }
   catch (error) { setStatus(errorMessage(error), 'error'); }
 }
@@ -1652,6 +1716,8 @@ window.rehearsalHostedActions = {
   accountChanged(id) {
     if (state.accountId === id) return;
     state.accountId = id;
+    state.chatContextKey++;
+    syncChat();
     state.cancelConfirmation = null; $('cancel-restart-dialog').close();
     state.recoveryController?.abort(); state.recoveryController = null;
     state.recoveryNeedsConfig = false;
@@ -1672,6 +1738,8 @@ window.rehearsalHostedActions = {
   },
   restoreRecording(record) {
     if (!window.rehearsalHostedActions.canReplaceAudio()) throw new Error('Finish your current take before opening another recording.');
+    state.chatContextKey++;
+    syncChat();
     setAudio(record.blob, record.durationSeconds, record.title || 'My rehearsal');
     state.cloudRecordingId = record.id;
     if (record.transcript) cacheTranscript(record.transcript);
@@ -1810,7 +1878,16 @@ $('practice-again').addEventListener('click', () => {
 navigator.mediaDevices?.addEventListener('devicechange', enumerateInputs);
 window.addEventListener('focus', () => { enumerateInputs(); refreshSavedRecordings(); });
 window.addEventListener('beforeunload', warnBeforeLeaving);
-window.addEventListener('pagehide', (event) => { if (event.persisted) return; state.processing?.clear(); clearInterval(state.timer); stopPlaybackLoop(); cleanupMic(); cancelLiveSession(); if (state.audioURL) URL.revokeObjectURL(state.audioURL); state.requestController?.abort(); state.transcriptController?.abort(); });
+window.addEventListener('pagehide', (event) => { if (event.persisted) return; state.chat?.dispose(); state.processing?.clear(); clearInterval(state.timer); stopPlaybackLoop(); cleanupMic(); cancelLiveSession(); if (state.audioURL) URL.revokeObjectURL(state.audioURL); state.requestController?.abort(); state.transcriptController?.abort(); });
+
+state.chat = createRehearsalChat({ document, request: api, getContext: getChatContext, onSignIn: openSettings });
+$('annotated-transcript').addEventListener('pointerdown', () => { state.transcriptSelectionAttached = false; });
+for (const type of ['pointerup', 'click']) $('annotated-transcript').addEventListener(type, attachTranscriptSelection);
+$('annotated-transcript').addEventListener('keyup', event => {
+  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); attachTranscriptSelection(event); }
+  else if (event.shiftKey) attachTranscriptSelection({ type: 'pointerup' });
+});
+renderSummaryDraft();
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { enumerateInputs(); if (state.context?.state === 'suspended' && state.recording) state.context.resume().catch(() => {}); } });
 initializeInputDetection();
 refreshSavedRecordings();

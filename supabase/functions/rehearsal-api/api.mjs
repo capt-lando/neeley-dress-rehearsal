@@ -1,6 +1,7 @@
 import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions, coachingCompletion } from '../../../lib/analysis-core.mjs';
 import { PROVIDERS, requestCoaching } from '../../../lib/providers.mjs';
 import { createRequestLimit } from './request-limit.mjs';
+import { CHAT_MODEL, buildChatPrompt, requestCoachChat } from '../../../lib/coach-chat.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_AUDIO = 20 * 1024 * 1024;
@@ -82,14 +83,38 @@ export function inspectHostedWav(buffer, minDuration = 0.5, maxDuration = 600) {
   return number(size/32000,minDuration,maxDuration);
 }
 export function analysisInput(body, durationSeconds) {
-  exact(body,['recordingId','requestId','text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','rubricFileName','targetMode','speakerName','durationSeconds','useAI']);
+  exact(body,['recordingId','requestId','text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','rubricFileName','targetMode','speakerName','durationSeconds','useAI','rehearsalContext']);
   if (body.useAI !== undefined && body.useAI !== true) throw fail('Hosted analysis uses the managed AI coach.');
   if (body.targetMode !== undefined && !['points','script','both'].includes(body.targetMode)) throw fail('Choose a valid preparation view.');
   return {
     text:text(body.text,60000,true).trim(), targetScript:text(body.targetScript,30000),targetTalkingPoints:text(body.targetTalkingPoints,30000),
     plannedIntroduction:text(body.plannedIntroduction,8000),plannedTransitions:text(body.plannedTransitions,8000),instructorRubric:text(body.instructorRubric,40000),
     rubricFileName:text(body.rubricFileName,255),speakerName:text(body.speakerName,100),targetMode:body.targetMode||'points',durationSeconds,useAI:true,
+    ...(body.rehearsalContext===undefined?{}:{rehearsalContext:text(body.rehearsalContext,12000)}),
   };
+}
+export function chatInput(body) {
+  exact(body,['requestId','recordingId','message','history','context']);
+  const requestId=uuid(body.requestId),recordingId=body.recordingId===undefined?null:uuid(body.recordingId);
+  const message=text(body.message,2000,true).trim();
+  const history=body.history??[];
+  if(!Array.isArray(history)||history.length>12)throw fail('Keep the chat to the twelve most recent messages.');
+  let historySize=0;
+  const messages=history.map(item=>{
+    exact(item,['role','text']);
+    if(!['user','assistant'].includes(item.role))throw fail('Use a supported chat message.');
+    const value=text(item.text,4000,true);historySize+=value.length;
+    return {role:item.role,text:value};
+  });
+  if(historySize>16000)throw fail('The chat history is too long. Start a new conversation.');
+  const context=body.context??{};
+  exact(context,['text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','phase','selectedQuote']);
+  if(context.phase!==undefined&&!['prepare','recording','review'].includes(context.phase))throw fail('Use a valid rehearsal stage.');
+  return {requestId,recordingId,message,history:messages,context:{
+    text:text(context.text,60000),targetScript:text(context.targetScript,30000),targetTalkingPoints:text(context.targetTalkingPoints,30000),
+    plannedIntroduction:text(context.plannedIntroduction,8000),plannedTransitions:text(context.plannedTransitions,8000),instructorRubric:text(context.instructorRubric,40000),
+    phase:context.phase||'prepare',selectedQuote:text(context.selectedQuote,4000),
+  }};
 }
 export function validateEvents(body) {
   exact(body,['events']);
@@ -115,7 +140,7 @@ async function hash(value) { return [...new Uint8Array(await crypto.subtle.diges
 function metadata(row) { return {id:row.id,title:row.title,createdAt:row.created_at,durationSeconds:row.duration_seconds,sizeBytes:row.size_bytes,status:row.status}; }
 
 /** All data access uses a verified server-derived user ID; store is injectable for tests. */
-export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, now=Date.now, cancellationPollMs=2000 }) {
+export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, chat=requestCoachChat, now=Date.now, cancellationPollMs=2000 }) {
   const enterRequest=createRequestLimit({now});
   // Whole recordings can occupy several buffers; keep those operations below
   // the isolate memory ceiling while small UI requests can still proceed.
@@ -332,9 +357,46 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         const user=await identify(request,true);
         return json({hosted:true,configured:true,localSpeech:false,liveTranscription:Boolean(worker&&liveCost),liveChunkSeconds:10,retention:'private',auth:{signedIn:Boolean(user)},
           speechConfigured:Boolean(worker&&speechCost),analysisConfigured:Boolean(env.COACHING_API_KEY&&coachCost),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,
-          transcriptionModel:'bark-3.0-plus',providers:[],maxDurationSeconds:600,maxAudioBytes:MAX_AUDIO});
+          transcriptionModel:'bark-3.0-plus',providers:[],maxDurationSeconds:600,maxAudioBytes:MAX_AUDIO,
+          chatConfigured:Boolean(provider==='openai'&&env.COACHING_API_KEY),chatModel:CHAT_MODEL});
       }
       const user=await identify(request);
+      if(request.method==='POST'&&path==='/coach-chat') {
+        const input=chatInput(await jsonBody(request));
+        if(provider!=='openai'||!env.COACHING_API_KEY)throw fail('The rehearsal chat is not configured yet.',503);
+        const row=input.recordingId?await store.owned(user.id,input.recordingId):null;
+        if(input.recordingId&&(!row||row.status==='deleting'||row.upload_expired))throw fail('This recording was not found.',404);
+        const originalInputHash=await hash(input);
+        if(!input.context.text&&row?.transcript)input.context.text=row.transcript;
+        if(input.context.selectedQuote&&!input.context.text.includes(input.context.selectedQuote))throw fail('Select a passage from the current transcript.');
+        let prompt;try{prompt=buildChatPrompt(input,row?.report);}catch{throw fail('Shorten the transcript, script, rubric, or chat history.',413);}
+        const job=await store.chatReserve(user.id,input.recordingId,input.requestId,originalInputHash);
+        if(job.state==='completed')throw Object.assign(fail('This reply was already processed but chat replies are not saved. Send again to request a new reply.',409),{jobState:'failed'});
+        if(job.state!=='new') {
+          const error=fail(job.state==='reserved'?'Your previous chat message is still processing.':'This message could not finish. Send a new message to try again.',409);
+          if(job.state==='failed')error.jobState='failed';
+          throw error;
+        }
+        const task=(async()=>{
+          let completionStarted=false;
+          try {
+            const reply=await chat({apiKey:env.COACHING_API_KEY,prompt,fetchImpl,readBody:readLimited,
+              onUsage:usage=>console.info(JSON.stringify({event:'chat_usage',model:CHAT_MODEL,...usage}))});
+            if(typeof reply!=='string'||!reply.trim()||reply.length>4000)throw new Error('Invalid chat result');
+            const result={requestId:input.requestId,reply:reply.trim(),model:CHAT_MODEL};
+            completionStarted=true;
+            await store.chatComplete(user.id,input.requestId);
+            return json(result);
+          } catch(error) {
+            const failure=error?.safe?error:fail('Your coach could not reply just now. Your recording and feedback are unchanged. Try again shortly.',502);
+            try { await store.chatFail(user.id,input.requestId);if(!completionStarted)failure.jobState='failed'; } catch {}
+            throw failure;
+          }
+        })();
+        // A closed tab must not turn an already admitted reply into extra spend.
+        globalThis.EdgeRuntime?.waitUntil(task.catch(()=>{}));
+        return await task;
+      }
       const cancelRequest=path.match(/^\/requests\/([^/]+)\/cancel$/);
       if(cancelRequest&&request.method==='POST'){
         const body=await jsonBody(request);exact(body,['recordingId']);
@@ -438,7 +500,8 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
           if (report.analysis.method!=='ai') throw fail('The AI coach returned an incomplete report. Your recording is saved.',502);
           emit('feedback_validated');
           const completion=coachingCompletion(report.analysis);
-          const output={...report,transcript:input.text,warnings:completion.warnings,meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:completion.status,missingCoachingCriteria:completion.missingCriteria,localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
+          const {rehearsalContext:_conversation,...savedInput}=input;
+          const output={...report,transcript:input.text,warnings:completion.warnings,meta:{...savedInput,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:completion.status,missingCoachingCriteria:completion.missingCriteria,localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
           return output;
         },deliver);
       }

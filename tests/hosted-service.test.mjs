@@ -500,3 +500,93 @@ test('refresh retries unconfirmed cancellation instead of trusting a cancelled j
     assert.deepEqual(call.body, { recordingId: marker.recordingId });
   }
 });
+
+test('chat transport requires sign-in and preserves the explicit request ID and payload on retry', async () => {
+  const body = { requestId: randomUUID(), message: 'Help with my opening.', history: [], context: { phase: 'prepare' } };
+  const signedOut = fixture({ signedIn: false });
+  await assert.rejects(signedOut.service.request('/api/coach-chat', { method: 'POST', body }), { status: 401 });
+  assert.equal(signedOut.calls.length, 0);
+  const f = fixture({ handle: call => call.path === '/coach-chat' ? response({ requestId: call.body.requestId, model: 'gpt-6-luna', reply: 'Who is your audience?' }) : undefined });
+  for (let i = 0; i < 2; i++) {
+    const result = await f.service.request('/api/coach-chat', { method: 'POST', body: JSON.stringify(body) });
+    assert.equal(result.requestId, body.requestId); assert.equal(result.reply, 'Who is your audience?');
+  }
+  assert.equal(f.calls.length, 2); assert.equal(f.uploads.length, 0);
+  for (const call of f.calls) {
+    assert.equal(call.path, '/coach-chat'); assert.deepEqual(call.body, body);
+    assert.equal(call.headers.Authorization, 'Bearer private-session-token'); assert.equal(call.headers.apikey, publishableKey);
+    assert.equal(call.headers.Accept, undefined);
+  }
+  assert.equal(await f.service.getPendingRequest(), null);
+});
+
+test('chat can run alongside analysis without uploading audio or replacing its recovery marker', async () => {
+  const entered = deferred(), finished = deferred();
+  const f = fixture({ handle: async call => {
+    if (call.path === '/analyze-text') { entered.resolve(); await finished.promise; return response({ analysis: { method: 'ai' } }); }
+    if (call.path === '/coach-chat') return response({ requestId: call.body.requestId, model: 'gpt-6-luna', reply: 'We can work on your closing while the report loads.' });
+  } });
+  const analysis = f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'My recommendation.' } });
+  await entered.promise;
+  const key = `neeley-pending:${url}:${userId}`, before = f.recoveryStorage.getItem(key);
+  assert.ok(before);
+  await f.service.request('/api/coach-chat', { method: 'POST', body: { requestId: randomUUID(), message: 'Help me with the closing.', context: { phase: 'review' } } });
+  assert.equal(f.recoveryStorage.getItem(key), before); assert.equal(f.uploads.length, 0);
+  assert.deepEqual(f.calls.map(call => call.path), ['/analyze-text', '/coach-chat']);
+  finished.resolve(); await analysis;
+  assert.equal(await f.service.getPendingRequest(), null);
+});
+
+test('chat cancellation, disposal and account change interrupt stalled JSON bodies', async () => {
+  for (const mode of ['abort', 'dispose', 'account']) {
+    const entered = deferred(); let canceled = false;
+    const f = fixture({ handle: call => call.path === '/coach-chat' ? new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{"reply":"unfinished')); entered.resolve(); },
+      cancel() { canceled = true; return new Promise(() => {}); },
+    })) : undefined });
+    f.service.onAuthChange(() => {}); f.authChange(firstSession);
+    const controller = new AbortController();
+    const pending = f.service.request('/api/coach-chat', { method: 'POST', signal: controller.signal, body: { requestId: randomUUID(), message: 'Help me rehearse.' } });
+    await entered.promise;
+    if (mode === 'abort') controller.abort();
+    else if (mode === 'dispose') f.service.dispose();
+    else f.authChange(secondSession);
+    await assert.rejects(pending, error => error.name === 'AbortError' || [401, 410].includes(error.status));
+    assert.equal(canceled, true); assert.equal(f.calls.length, 1);
+  }
+});
+
+test('chat refuses mismatched identity, malformed JSON and oversized replies without another request', async () => {
+  const requestId = randomUUID(), body = { requestId, message: 'Who is my audience?' };
+  const results = [null, [], { requestId: randomUUID(), model: 'gpt-6-luna', reply: 'Wrong message.' },
+    { requestId, model: 'other-model', reply: 'Wrong model.' }, { requestId, model: 'gpt-6-luna', reply: '' },
+    { requestId, model: 'gpt-6-luna', reply: 'x'.repeat(4001) }];
+  for (const value of results) {
+    const f = fixture({ handle: () => response(value) });
+    await assert.rejects(f.service.request('/api/coach-chat', { method: 'POST', body }), { status: 502 });
+    assert.equal(f.calls.length, 1);
+  }
+  for (const value of ['{bad json}', 'x'.repeat(32769)]) {
+    const f = fixture({ handle: () => new Response(value) });
+    await assert.rejects(f.service.request('/api/coach-chat', { method: 'POST', body }), { status: 502 });
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('chat preserves safe failure states and never silently generates a replacement request ID', async () => {
+  for (const jobState of ['failed', 'not_started', undefined]) {
+    const body = { requestId: randomUUID(), message: 'Help with my thesis.' };
+    const f = fixture({ handle: () => response({ error: 'Chat temporarily unavailable.', ...(jobState ? { jobState } : {}) }, 502) });
+    await assert.rejects(f.service.request('/api/coach-chat', { method: 'POST', body }), error => error.status === 502 && error.jobState === jobState);
+    assert.equal(f.calls.length, 1); assert.equal(f.calls[0].body.requestId, body.requestId);
+    assert.equal(await f.service.getPendingRequest(), null);
+  }
+});
+
+test('chat method and request identity are validated before sending', async () => {
+  for (const options of [{ body: { requestId: randomUUID(), message: 'Hi' } },
+    { method: 'GET', body: { requestId: randomUUID(), message: 'Hi' } }, { method: 'POST', body: { requestId: 'bad', message: 'Hi' } }]) {
+    const f = fixture(); await assert.rejects(f.service.request('/api/coach-chat', options), { status: 400 });
+    assert.equal(f.calls.length, 0); assert.equal(f.uploads.length, 0);
+  }
+});
