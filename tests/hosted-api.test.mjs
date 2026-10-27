@@ -425,6 +425,40 @@ test('coaching uses saved duration, retains all preparation inputs, and returns 
   const options=f.calls.find(c=>c[0]==='coach')[1];assert.equal(options.apiKey,'private-coach-key');assert.equal(options.browser,false);for(const value of ['Support tutoring.','Hello students.','Next, costs.','Explain the claim.'])assert.ok(options.prompt.includes(value));
   assert.equal((await f.call('/analyze-text',{method:'POST',body:{...body,text:'A changed speech.'}})).status,409);assert.equal(f.debits,1);
 });
+test('assignment instructions survive analysis, private storage, replay and refresh recovery without truncation',async()=>{
+  const assignmentInstructions='  '+ 'A'.repeat(39969)+'\nFINAL ASSIGNMENT REQUIREMENT';
+  assert.equal(assignmentInstructions.length,40000);
+  const assignmentFileName='a'.repeat(250)+'.docx';
+  const f=fixture(),body={...analyze.body,assignmentInstructions,assignmentFileName,instructorRubric:'Separate assessment criteria.'};
+  const response=await f.call('/analyze-text',{method:'POST',body});assert.equal(response.status,200);
+  const report=await response.json(),prompt=f.calls.find(call=>call[0]==='coach')[1].prompt;
+  const data=JSON.parse(prompt.slice(prompt.lastIndexOf('\nDATA_JSON:\n')+'\nDATA_JSON:\n'.length));
+  assert.equal(data.assignmentInstructions,assignmentInstructions);assert.equal(data.assignmentFileName,assignmentFileName);
+  assert.equal(data.instructorRubric,body.instructorRubric);
+  const saved=(await(await f.call('/recordings/'+recording)).json()).recording.report;
+  const recovered=(await(await f.call('/requests/'+requestId)).json()).result;
+  const replay=await(await f.call('/analyze-text',{method:'POST',body})).json();
+  for(const value of [report,saved,recovered,replay,f.rows.get(recording).report]) {
+    assert.equal(value.meta.assignmentInstructions,assignmentInstructions);assert.equal(value.meta.assignmentFileName,assignmentFileName);
+  }
+  assert.equal(f.calls.filter(call=>call[0]==='coach').length,1);assert.equal(f.debits,1);
+  assert.equal((await f.call('/analyze-text',{method:'POST',body:{...body,assignmentInstructions:'Changed requirements.'}})).status,409);
+  f.rows.get(recording).user_id=other;
+  assert.equal((await f.call('/recordings/'+recording)).status,404);
+  assert.equal((await f.call('/requests/'+requestId)).status,404);
+});
+test('assignment inputs remain optional and invalid or oversized combined instructions fail before spending',async()=>{
+  const legacy=fixture(),report=await(await legacy.call('/analyze-text',analyze)).json();
+  assert.equal(report.meta.assignmentInstructions,'');assert.equal(report.meta.assignmentFileName,'');
+  for(const values of [{assignmentInstructions:'x'.repeat(40001)},{assignmentInstructions:{}},{assignmentFileName:'x'.repeat(256)},{assignmentFileName:null},{assignmentInstructions:'Valid',assignmentProvider:'openai'}]) {
+    const f=fixture();assert.equal((await f.call('/analyze-text',{method:'POST',body:{...analyze.body,...values}})).status,400);
+    assert.equal(f.debits,0);assert.equal(f.calls.some(call=>call[0]==='coach'),false);
+  }
+  const f=fixture(),response=await f.call('/analyze-text',{method:'POST',body:{...analyze.body,
+    assignmentInstructions:'界'.repeat(40000),instructorRubric:'界'.repeat(40000),targetScript:'界'.repeat(30000)}});
+  assert.equal(response.status,413);assert.match((await response.json()).error,/assignment instructions/);
+  assert.equal(f.debits,0);assert.equal(f.calls.some(call=>call[0]==='coach'),false);
+});
 test('conversation guides analysis transiently but is absent from saved reports and recovery responses',async()=>{
   const f=fixture();const rehearsalContext='Student: My audience is the campus investment committee. Assistant: Try a short opening story.';
   const body={...analyze.body,rehearsalContext};

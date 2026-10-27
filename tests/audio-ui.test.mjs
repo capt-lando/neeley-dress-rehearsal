@@ -196,7 +196,7 @@ globalThis.audioTest = {
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession, openCancelRestart, confirmCancelRestart, closeCancelRestart,
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript, renderSummaryDraft, attachTranscriptSelection, getChatContext,
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
-  analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, openRubricPreview, showRubricPage, setBusy,
+  analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, openRubricPreview, showRubricPage, importAssignment, removeAssignment, preparationDocuments, setBusy,
   autosaveRecording, refreshSavedRecordings, renderSavedRecordings, openSavedRecording, deleteSavedRecording,
   downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving
 };`, context);
@@ -206,6 +206,7 @@ globalThis.audioTest = {
     emitMediaEvent: (type, event) => emit(mediaEvents, type, event),
     emitWindowEvent: (type, event) => emit(windowEvents, type, event),
     emitDocumentEvent: (type, event) => emit(documentEvents, type, event),
+    emitElementEvent: (id, type, event) => emit(get(id), type, event),
     emitProgress: message => progressHandler(message) };
 }
 
@@ -1704,7 +1705,7 @@ test('collapsed practice context is preserved exactly in analysis and prompt pre
     if (id) detailsParents.set(id, [...stack]);
     stack.push(id || '(unnamed details)');
   }
-  for (const id of ['personal-details', 'transitions-details', 'rubric-details']) {
+  for (const id of ['personal-details', 'transitions-details', 'rubric-details', 'assignment-details']) {
     assert.deepEqual(detailsParents.get(id), [], `${id} must stay available when another optional section is closed`);
     assert.match(appHtml, new RegExp(`<details class="speaker-details[^\"]*" id="${id}">`));
   }
@@ -1722,15 +1723,23 @@ test('collapsed practice context is preserved exactly in analysis and prompt pre
   h.get('planned-transitions').value = transitions;
   h.get('instructor-rubric').value = rubric;
   h.state.rubricFileName = 'Course rubric.pdf';
+  const assignment = `  Assignment directions:\n${'Explain the proposal and audience. '.repeat(1100)}\nFINAL REQUIREMENT  `;
+  h.get('assignment-instructions').value = assignment;
+  h.state.assignmentFileName = 'Presentation assignment.docx';
   h.get('personal-details').open = false;
   h.get('transitions-details').open = false;
   h.get('rubric-details').open = false;
+  h.get('assignment-details').open = false;
   assert.equal(await h.loadPromptPreview(), 'Context included');
   assert.equal(payload.plannedIntroduction, introduction);
   assert.ok(!Object.hasOwn(payload, 'speakerName'));
   assert.equal(payload.plannedTransitions, transitions);
   assert.equal(payload.instructorRubric, rubric);
   assert.equal(payload.rubricFileName, 'Course rubric.pdf');
+  assert.equal(payload.assignmentInstructions, assignment);
+  assert.equal(payload.assignmentFileName, 'Presentation assignment.docx');
+  assert.equal(h.getChatContext().context.assignmentInstructions, assignment);
+  assert.equal(h.getChatContext().context.assignmentFileName, 'Presentation assignment.docx');
   assert.ok(!Object.hasOwn(payload, 'file') && !Object.hasOwn(payload, 'analysisApiKey'));
   assert.ok(!htmlIds.includes('speaker-name'));
   assert.match(appHtml, /id="planned-introduction" maxlength="8000"/);
@@ -1899,6 +1908,135 @@ test('restoring saved rubric text clears the preview of a different document', a
   assert.match(h.get('rubric-status').textContent, /original file/);
 });
 
+test('preparation attachments are independent optional disclosures and the idle title says Begin recording', () => {
+  for (const title of ['Make it personal', 'Add transitions', 'Add rubric', 'Attach assignment instructions']) {
+    assert.ok(appHtml.includes(`<summary>${title} <span class="optional-inline">(optional)</span>`));
+  }
+  assert.ok(appHtml.indexOf('id="assignment-details"') > appHtml.indexOf('id="rubric-details"'));
+  assert.match(appHtml, /id="assignment-instructions" maxlength="40000"/);
+  assert.match(appHtml, /id="record-title">Begin recording<\/h2>/);
+  assert.doesNotMatch(appSource + appHtml, /The floor is yours/);
+  const h = harness(); h.discardAudio();
+  assert.equal(h.get('record-title').textContent, 'Begin recording');
+  assert.equal(h.analysisInput('Speech').assignmentInstructions, '');
+  assert.equal(h.analysisInput('Speech').assignmentFileName, '');
+});
+
+test('simultaneous rubric and assignment imports keep independent previews and share only the loading gate', async () => {
+  const rubric = deferred(), assignment = deferred(), previews = { 'rubric.pdf': previewFixture(2), 'assignment.docx': previewFixture(3) };
+  let calls = 0;
+  const h = harness(async () => { calls++; throw new Error('Incomplete context must not be sent'); }, {
+    extractRubric: file => file.name === 'rubric.pdf' ? rubric.promise : assignment.promise,
+    prepareRubricPreview: async file => previews[file.name],
+  });
+  h.get('transcript').value = 'My completed speech.';
+  const importingRubric = h.importRubric({ name: 'rubric.pdf', size: 100 });
+  const importingAssignment = h.importAssignment({ name: 'assignment.docx', size: 100 });
+  rubric.resolve({ text: 'Use specific evidence', name: 'rubric.pdf' }); await importingRubric;
+  assert.equal(h.get('instructor-rubric').value, 'Use specific evidence');
+  assert.equal(h.state.rubricLoading, false); assert.equal(h.state.assignmentLoading, true);
+  assert.equal(h.get('analyze-button').disabled, true);
+  await h.runAnalysis({ corrected: true }); assert.equal(await h.loadPromptPreview(), '');
+  assert.throws(() => h.getChatContext(), { code: 'DOCUMENTS_LOADING' }); assert.equal(calls, 0);
+  assignment.resolve({ text: '  Propose a feasible solution.\nFive minute limit.  ', name: 'assignment.docx' }); await importingAssignment;
+  assert.equal(h.get('analyze-button').disabled, false);
+  assert.equal(h.get('assignment-instructions').value, '  Propose a feasible solution.\nFive minute limit.  ');
+  assert.equal(h.get('instructor-rubric').value, 'Use specific evidence');
+  await h.preparationDocuments.assignment.openPreview(); await h.preparationDocuments.assignment.showPage(2);
+  assert.equal(h.get('assignment-page-label').textContent, 'Page 3 of 3');
+  assert.equal(h.get('assignment-document-page').textContent, 'Actual page 3');
+  assert.equal(h.get('rubric-thumbnail').textContent, 'Actual page 1');
+  h.removeAssignment();
+  assert.equal(previews['assignment.docx'].disposed, 1); assert.equal(previews['rubric.pdf'].disposed, 0);
+  assert.equal(h.get('instructor-rubric').value, 'Use specific evidence');
+  assert.equal(h.state.rubricFileName, 'rubric.pdf');
+  assert.equal(h.getChatContext().context.assignmentInstructions, '');
+  assert.equal(h.getChatContext().context.assignmentFileName, '');
+  assert.equal(calls, 0);
+});
+
+test('scanned assignment keeps its preview and supports an editable text fallback without rubric labels', async () => {
+  const preview = previewFixture(1);
+  const h = harness(undefined, { startup: true,
+    extractRubric: async () => { throw Object.assign(new Error('Rubric text is unavailable.'), { code: 'RUBRIC_NO_TEXT' }); },
+    prepareRubricPreview: async () => preview,
+  });
+  h.get('instructor-rubric').value = 'Existing criteria'; h.state.rubricFileName = 'rubric.txt';
+  await h.importAssignment({ name: 'scanned-assignment.pdf', size: 100 });
+  assert.equal(h.get('assignment-preview-card').hidden, false);
+  assert.equal(h.get('assignment-text-details').open, true);
+  assert.match(h.get('assignment-status').textContent, /preview is ready.*assignment instructions/);
+  assert.doesNotMatch(h.get('assignment-status').textContent, /rubric/i);
+  h.get('assignment-instructions').value = 'Use three sources and recommend one solution.';
+  await h.emitElementEvent('assignment-instructions', 'input');
+  assert.equal(h.analysisInput('Speech').assignmentInstructions, 'Use three sources and recommend one solution.');
+  assert.equal(h.getChatContext().context.assignmentFileName, 'scanned-assignment.pdf');
+  assert.equal(h.get('instructor-rubric').value, 'Existing criteria');
+  assert.equal(preview.disposed, 0, 'editing extracted text retains the original visual');
+  h.get('assignment-instructions').value = ''; await h.emitElementEvent('assignment-instructions', 'input');
+  assert.equal(h.getChatContext().context.assignmentFileName, '');
+  assert.equal(h.analysisInput('Speech').assignmentFileName, '');
+  await h.importAssignment({ name: 'invalid.doc', size: 100 });
+  assert.match(h.get('assignment-status').textContent, /PDF, DOCX, or TXT/);
+  assert.doesNotMatch(h.get('assignment-status').textContent, /rubric/i);
+  assert.equal(h.get('instructor-rubric').value, 'Existing criteria');
+});
+
+test('late assignment extraction and preview cannot restore removed or replaced instructions', async () => {
+  const oldText = deferred(), oldPreview = deferred(), old = previewFixture(), current = previewFixture();
+  let oldSignal;
+  const h = harness(undefined, {
+    extractRubric: file => file.name === 'old.pdf' ? oldText.promise : Promise.resolve({ text: 'Current instructions', name: file.name }),
+    prepareRubricPreview: (file, options) => { if (file.name === 'old.pdf') { oldSignal = options.signal; return oldPreview.promise; } return Promise.resolve(current); },
+  });
+  const pending = h.importAssignment({ name: 'old.pdf', size: 100 });
+  await h.importAssignment({ name: 'current.docx', size: 100 });
+  assert.equal(oldSignal.aborted, true);
+  oldText.resolve({ text: 'Old instructions', name: 'old.pdf' }); oldPreview.resolve(old); await pending;
+  assert.equal(h.get('assignment-instructions').value, 'Current instructions');
+  assert.equal(h.state.assignmentPreview, current); assert.equal(old.disposed, 1); assert.equal(old.renders.length, 0);
+  h.removeAssignment(); assert.equal(current.disposed, 1);
+  assert.equal(h.state.assignmentFileName, ''); assert.equal(h.state.assignmentLoading, false);
+});
+
+test('account changes and page exit clear assignment text and cancel stale private attachment work', async () => {
+  const pending = deferred(), preview = previewFixture(), late = previewFixture();
+  let signal;
+  const h = harness(undefined, { startup: true,
+    extractRubric: file => file.name === 'pending.pdf' ? pending.promise : Promise.resolve({ text: 'Private assignment', name: file.name }),
+    prepareRubricPreview: async (file, options) => { signal = options.signal; return file.name === 'pending.pdf' ? late : preview; },
+  });
+  await h.importAssignment({ name: 'private.pdf', size: 100 });
+  h.window.rehearsalHostedActions.accountChanged('next-user');
+  assert.equal(signal.aborted, true); assert.equal(preview.disposed, 1);
+  assert.equal(h.get('assignment-instructions').value, ''); assert.equal(h.state.assignmentFileName, '');
+  assert.equal(h.getChatContext().context.assignmentInstructions, '');
+  const importing = h.importAssignment({ name: 'pending.pdf', size: 100 });
+  await Promise.resolve(); h.window.rehearsalHostedActions.accountChanged('third-user');
+  pending.resolve({ text: 'Late private instructions', name: 'pending.pdf' }); await importing;
+  assert.equal(signal.aborted, true); assert.equal(h.get('assignment-instructions').value, '');
+  const after = previewFixture(); h.window.rehearsalDocuments.prepareRubricPreview = async () => after;
+  await h.importAssignment({ name: 'after.pdf', size: 100 });
+  await h.emitWindowEvent('pagehide', { persisted: false }); assert.equal(after.disposed, 1);
+});
+
+test('saved feedback restores its assignment snapshot and older feedback clears a different assignment', async () => {
+  const preview = previewFixture();
+  const h = harness(undefined, { extractRubric: async () => ({ text: 'New instructions' }), prepareRubricPreview: async () => preview });
+  await h.importAssignment({ name: 'new.pdf', size: 100 });
+  const saved = { id: 'saved', blob: new Blob(['audio']), durationSeconds: 20, report: { input: { instructorRubric: 'Saved criteria', rubricFileName: 'saved-rubric.pdf', assignmentInstructions: 'Saved assignment requirements', assignmentFileName: 'saved-assignment.docx' } } };
+  h.window.rehearsalHostedActions.restoreRecording(saved);
+  assert.equal(preview.disposed, 1); assert.equal(h.get('assignment-preview-card').hidden, true);
+  assert.equal(h.get('assignment-instructions').value, 'Saved assignment requirements');
+  assert.equal(h.state.assignmentFileName, 'saved-assignment.docx');
+  assert.equal(h.getChatContext().context.assignmentInstructions, 'Saved assignment requirements');
+  assert.equal(h.get('instructor-rubric').value, 'Saved criteria');
+  assert.match(h.get('assignment-status').textContent, /original file/);
+  h.window.rehearsalHostedActions.restoreRecording({ ...saved, report: { input: { instructorRubric: 'Older criteria' } } });
+  assert.equal(h.get('assignment-instructions').value, ''); assert.equal(h.state.assignmentFileName, '');
+  assert.equal(h.get('instructor-rubric').value, 'Older criteria');
+});
+
 test('report context badges describe the analyzed snapshot rather than subsequently edited fields', async () => {
   const pending = deferred();
   let submitted;
@@ -1910,17 +2048,24 @@ test('report context badges describe the analyzed snapshot rather than subsequen
   h.get('planned-transitions').value = 'Next, consider the evidence.';
   h.get('instructor-rubric').value = 'Provide clear evidence.';
   h.state.rubricFileName = 'instructor.txt';
+  h.get('assignment-instructions').value = 'Present a feasible recommendation in five minutes.';
+  h.state.assignmentFileName = 'assignment.docx';
   const analyzing = h.runAnalysis({ corrected: true });
-  h.get('planned-introduction').value = ''; h.get('planned-transitions').value = ''; h.removeRubric();
+  h.get('planned-introduction').value = ''; h.get('planned-transitions').value = ''; h.removeRubric(); h.removeAssignment();
   pending.resolve({ transcript: submitted.text, wordStats: {}, blunders: {}, analysis: {} });
   await analyzing;
   assert.equal(h.state.report.input.instructorRubric, 'Provide clear evidence.');
   assert.equal(h.state.report.input.plannedIntroduction, 'Picture your first day on campus.');
   assert.equal(h.state.report.input.plannedTransitions, 'Next, consider the evidence.');
   assert.equal(h.state.report.input.rubricFileName, 'instructor.txt');
+  assert.equal(h.state.report.input.assignmentInstructions, 'Present a feasible recommendation in five minutes.');
+  assert.equal(h.state.report.input.assignmentFileName, 'assignment.docx');
   assert.equal(h.get('report-rubric-badge').hidden, false);
+  assert.equal(h.get('report-assignment-badge').hidden, false);
   assert.equal(h.get('report-transitions-badge').hidden, false);
   assert.equal(h.analysisInput('Next rehearsal.').instructorRubric, '');
+  assert.equal(h.analysisInput('Next rehearsal.').assignmentInstructions, '');
+  assert.equal(h.getChatContext().context.assignmentInstructions, '');
 });
 
 test('account setup never sends transcript data and enabling coaching reuses corrected text', async () => {

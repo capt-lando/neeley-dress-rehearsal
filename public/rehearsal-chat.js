@@ -45,7 +45,7 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
     elements.stop.hidden = !pending;
     elements.retry.hidden = !retry || !canSend || Boolean(pending);
     elements.form.setAttribute('aria-busy', String(Boolean(pending)));
-    elements['context-note'].textContent = !access.signedIn ? 'Sign in to plan your take and discuss your feedback.'
+    elements['context-note'].textContent = !access.signedIn ? 'Sign in to talk through your feedback.'
       : !access.available ? 'Your coach is connecting. Your rehearsal can stay open.'
         : access.hasTranscript ? 'Your current transcript and preparation are in context.'
           : 'Here before, during, and after your rehearsal.';
@@ -106,7 +106,10 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
         const requestId = uuid();
         attempt = { requestId, body: JSON.stringify({ requestId, ...(current.recordingId ? { recordingId: current.recordingId } : {}), message,
           history: historyWithinLimit(), context: { ...current.context, ...(quote ? { selectedQuote: quote } : {}) } }) };
-      } catch { status('Your rehearsal context could not be prepared. Please try again.'); return; }
+      } catch (error) {
+        status(error?.code === 'DOCUMENTS_LOADING' ? 'Wait for your documents to finish loading, or remove them before sending your message.' : 'Your rehearsal context could not be prepared. Please try again.');
+        return;
+      }
       recordMessage('user', message, quote);
       elements.message.value = ''; quote = ''; showQuote();
     }

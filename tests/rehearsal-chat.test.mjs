@@ -22,7 +22,7 @@ function harness(options = {}) {
   let context = { context: { phase: 'prepare', targetTalkingPoints: 'Practice once' } }, signIns = 0, serial = 0;
   const ui = createRehearsalChat({ document: { getElementById: get, createElement: tag => new Element(tag.toUpperCase()) },
     request(path, options) { const wait = deferred(); calls.push({ path, ...options }); pending.push(wait); return wait.promise; },
-    getContext: () => context, onSignIn: () => signIns++, uuid: options.uuid || (() => `00000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`) });
+    getContext: options.getContext || (() => context), onSignIn: () => signIns++, uuid: options.uuid || (() => `00000000-0000-4000-8000-${String(++serial).padStart(12, '0')}`) });
   const respond = (index, reply = 'Try one clear recommendation.') => pending[index].resolve({ requestId: JSON.parse(calls[index].body).requestId, model: 'gpt-6-luna', reply });
   const submit = message => { get('chat-message').value = message; get('chat-form').dispatch('submit'); };
   const text = () => get('chat-messages').children.map(row => row.children.at(-1).textContent);
@@ -40,6 +40,15 @@ test('signed-out chat offers sign-in and cannot spend', () => {
   const h = harness(); h.submit('Who is my audience?');
   assert.equal(h.calls.length, 0); assert.equal(h.signIns, 1); assert.equal(h.get('chat-message').disabled, true);
   h.get('chat-sign-in').dispatch('click'); assert.equal(h.signIns, 2);
+});
+
+test('loading documents keeps the typed message local and shows only the approved loading explanation', () => {
+  const h = harness({ getContext() { throw Object.assign(new Error('Private file details'), { code: 'DOCUMENTS_LOADING' }); } });
+  h.ready(); h.submit('How should I approach this assignment?');
+  assert.equal(h.calls.length, 0); assert.equal(h.get('chat-message').value, 'How should I approach this assignment?');
+  assert.match(h.get('chat-status').textContent, /documents to finish loading/);
+  assert.doesNotMatch(h.get('chat-status').textContent, /Private file details/);
+  assert.deepEqual(h.text(), ['Who is your audience?']);
 });
 
 test('selecting a quote only attaches context and preserves the typed question', async () => {

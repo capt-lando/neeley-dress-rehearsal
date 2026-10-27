@@ -7,7 +7,7 @@ A presentation practice app for Neeley students. Speak into the microphone, see 
 ## Practice
 
 1. Sign in with Google. Microsoft sign-in is supported when configured; this is not an institutionally approved TCU SSO integration.
-2. Add talking points, a script, or an optional introduction, transitions, and teacher rubric.
+2. Add talking points, a script, or an optional introduction, transitions, teacher rubric, and assignment instructions.
 3. Start recording. Audio streams to OpenAI and draft words appear as you speak. Silence does not end the recording. Pause excludes the break from the recording; Resume continues the same take.
 4. Press **Stop** to finish and save the recording and transcript privately. The existing ten-minute recording limit still applies. Replay reuses the saved audio and transcript.
 5. Choose **Analyze** when ready for coaching, annotations, and a practice rating. Coaching never starts because you paused speaking.
@@ -22,9 +22,9 @@ Refresh reconnects to an existing transcription or coaching request without subm
 
 Draft encryption keys are held by the authenticated backend and expire after 24 hours. Browser storage contains encrypted audio and an authenticated manifest, not the key. Account, project, recording, and request identifiers are checked before decryption or recovery. Guessing another recording ID does not grant access. Signing out clears that account's local drafts and releases in-memory keys. Browser storage eviction or unavailable storage can prevent recovery; the app reports checkpoint failures.
 
-Recordings, transcripts, and reports are private to the signed-in account. **My saved rehearsals** can reopen, download, or delete them. Provider credentials remain on the server. Optional analytics contain usage events, not recordings, transcripts, scripts, rubrics, or chat text.
+Recordings, transcripts, and reports are private to the signed-in account. **My saved rehearsals** can reopen, download, or delete them. Provider credentials remain on the server. Optional analytics contain usage events, not recordings, transcripts, scripts, rubrics, assignment instructions, or chat text.
 
-Luna chat uses the current transcript and preparation. Selecting a sentence or passage attaches it to the composer; only **Send** requests a reply. Chat stays in the current tab and clears on refresh or sign-out. It is not saved with the report. Preparation and rubric content are treated as inputs, not instructions that can override the coaching policy.
+Luna chat uses the current transcript and preparation, including attached assignment instructions. Selecting a sentence or passage attaches it to the composer; only **Send** requests a reply. Chat stays in the current tab and clears on refresh or sign-out. It is not saved with the report. Assignment directions establish the task requirements; rubric criteria guide feedback priorities. Neither can override the coaching policy or turn planned content into evidence of what was spoken.
 
 ## Feedback
 
@@ -32,7 +32,9 @@ The editable policy is `lib/coaching-prompt.md`. The validator rejects invented 
 
 Speech recognition can omit fillers, repetitions, or false starts. Counts are transcript-based estimates, not a count of every sound or a diagnosis. Review and correct the transcript before analyzing again.
 
-Rubrics accept PDF, DOCX, and TXT files up to 5 MB. A real page thumbnail opens into a larger, paginated preview. PDF pages (including scans), Word tables and embedded images, and plain text render locally without AI calls. Word previews approximate Word's layout; unsupported content is identified in the preview. Coaching still uses extracted text, available under **Paste or review rubric text**. Scans without readable text need pasted criteria. Original files stay in the current tab and are not uploaded or saved with rehearsals; choose the file again after reloading to restore its preview. Download the annotated transcript or breakdown sheet to keep a separate copy.
+**Add rubric** and **Attach assignment instructions** each accept PDF, DOCX, and TXT files up to 5 MB, with independent previews and text you can review or edit. A real page thumbnail opens into a larger, paginated preview. PDF pages (including scans), Word tables and embedded images, and plain text render locally without AI calls. Word previews approximate Word's layout; unsupported content is identified in the preview. Coaching uses extracted text; scans without readable text need pasted criteria or directions. Original files stay in the current tab and are not uploaded or saved with rehearsals; choose the file again after reloading to restore its preview. Download the annotated transcript or breakdown sheet to keep a separate copy.
+
+Assignment instructions are included in both chat and Analyze. The master prompt uses the stated purpose, audience, required topics, structure, duration, and other relevant requirements to guide planning and feedback, separately from the student's optional script and the teacher's rubric. Conflicting requirements are flagged rather than silently resolved. Feedback stays grounded in the transcript and measured timing, and the practice rating remains separate from a course grade.
 
 ## Development
 

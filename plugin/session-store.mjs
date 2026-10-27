@@ -5,6 +5,7 @@ export const INPUT_LIMITS = Object.freeze({
   text: 60_000, targetScript: 30_000, targetTalkingPoints: 30_000,
   plannedIntroduction: 8_000, plannedTransitions: 8_000,
   instructorRubric: 40_000, rubricFileName: 255, speakerName: 120,
+  assignmentInstructions: 40_000, assignmentFileName: 255,
 });
 export const MAX_FEEDBACK_BYTES = 2 * 1024 * 1024;
 const CRITERIA = ['claim', 'evidence', 'structure', 'audience', 'conclusion'];
@@ -174,6 +175,7 @@ export class RehearsalStore {
       meta: {
         generatedAt: new Date(this.#now()).toISOString(), durationSeconds: session.input.durationSeconds || null,
         targetMode: session.input.targetMode || 'points', speakerName: session.input.speakerName || '',
+        assignmentInstructions: session.input.assignmentInstructions || '', assignmentFileName: session.input.assignmentFileName || '',
         analysisProvider: 'codex', analysisProviderLabel: 'Codex', analysisModel: 'Codex',
         coachingStatus: 'complete', rehearsalId, revision,
       },

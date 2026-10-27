@@ -44,7 +44,8 @@ function fixture() {
 }
 function preparation(character) {
   return { recordingId, requestId, text: 'We should expand tutoring.', targetScript: character.repeat(30000),
-    targetTalkingPoints: character.repeat(10000), instructorRubric: character.repeat(40000) };
+    targetTalkingPoints: character.repeat(10000), instructorRubric: character.repeat(40000),
+    assignmentInstructions: character.repeat(40000), assignmentFileName: 'assignment.pdf' };
 }
 
 // 256 KiB plus the short provider instructions and message framing stays below
@@ -60,7 +61,7 @@ test('serialized multibyte coaching context is rejected before reservation or pr
   assert.ok(Buffer.byteLength(JSON.stringify(body)) < 512 * 1024, 'the request body is independently valid');
   const f = fixture(), response = await f.run(body);
   assert.equal(response.status, 413);
-  assert.match((await response.json()).error, /Shorten the script, rubric, or preparation notes/);
+  assert.match((await response.json()).error, /Shorten the assignment instructions, rubric, script, or preparation notes/);
   assert.deepEqual(f.calls, []);
 });
 

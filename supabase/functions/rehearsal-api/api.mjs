@@ -83,12 +83,13 @@ export function inspectHostedWav(buffer, minDuration = 0.5, maxDuration = 600) {
   return number(size/32000,minDuration,maxDuration);
 }
 export function analysisInput(body, durationSeconds) {
-  exact(body,['recordingId','requestId','text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','rubricFileName','targetMode','speakerName','durationSeconds','useAI','rehearsalContext']);
+  exact(body,['recordingId','requestId','text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','rubricFileName','assignmentInstructions','assignmentFileName','targetMode','speakerName','durationSeconds','useAI','rehearsalContext']);
   if (body.useAI !== undefined && body.useAI !== true) throw fail('Hosted analysis uses the managed AI coach.');
   if (body.targetMode !== undefined && !['points','script','both'].includes(body.targetMode)) throw fail('Choose a valid preparation view.');
   return {
     text:text(body.text,60000,true).trim(), targetScript:text(body.targetScript,30000),targetTalkingPoints:text(body.targetTalkingPoints,30000),
     plannedIntroduction:text(body.plannedIntroduction,8000),plannedTransitions:text(body.plannedTransitions,8000),instructorRubric:text(body.instructorRubric,40000),
+    assignmentInstructions:text(body.assignmentInstructions,40000),assignmentFileName:text(body.assignmentFileName,255),
     rubricFileName:text(body.rubricFileName,255),speakerName:text(body.speakerName,100),targetMode:body.targetMode||'points',durationSeconds,useAI:true,
     ...(body.rehearsalContext===undefined?{}:{rehearsalContext:text(body.rehearsalContext,12000)}),
   };
@@ -108,11 +109,12 @@ export function chatInput(body) {
   });
   if(historySize>16000)throw fail('The chat history is too long. Start a new conversation.');
   const context=body.context??{};
-  exact(context,['text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','phase','selectedQuote']);
+  exact(context,['text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','assignmentInstructions','assignmentFileName','phase','selectedQuote']);
   if(context.phase!==undefined&&!['prepare','recording','review'].includes(context.phase))throw fail('Use a valid rehearsal stage.');
   return {requestId,recordingId,message,history:messages,context:{
     text:text(context.text,60000),targetScript:text(context.targetScript,30000),targetTalkingPoints:text(context.targetTalkingPoints,30000),
     plannedIntroduction:text(context.plannedIntroduction,8000),plannedTransitions:text(context.plannedTransitions,8000),instructorRubric:text(context.instructorRubric,40000),
+    assignmentInstructions:text(context.assignmentInstructions,40000),assignmentFileName:text(context.assignmentFileName,255),
     phase:context.phase||'prepare',selectedQuote:text(context.selectedQuote,4000),
   }};
 }
@@ -314,7 +316,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         const originalInputHash=await hash(input);
         if(!input.context.text&&row?.transcript)input.context.text=row.transcript;
         if(input.context.selectedQuote&&!input.context.text.includes(input.context.selectedQuote))throw fail('Select a passage from the current transcript.');
-        let prompt;try{prompt=buildChatPrompt(input,row?.report);}catch{throw fail('Shorten the transcript, script, rubric, or chat history.',413);}
+        let prompt;try{prompt=buildChatPrompt(input,row?.report);}catch{throw fail('Shorten the assignment instructions, rubric, transcript, script, or chat history.',413);}
         const job=await store.chatReserve(user.id,input.recordingId,input.requestId,originalInputHash);
         if(job.state==='completed')throw Object.assign(fail('This reply was already processed but chat replies are not saved. Send again to request a new reply.',409),{jobState:'failed'});
         if(job.state!=='new') {
@@ -431,7 +433,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         if (!row.transcript) throw fail('Create a transcript for this recording before requesting coaching.',409);
         const input=analysisInput(body,row.duration_seconds);
         let prompt; try { prompt=buildAnalysisPrompt(input,policy); } catch { throw fail('Add a readable transcript and valid preparation text.'); }
-        if (new TextEncoder().encode(prompt).byteLength>256*1024) throw fail('Shorten the script, rubric, or preparation notes.',413);
+        if (new TextEncoder().encode(prompt).byteLength>256*1024) throw fail('Shorten the assignment instructions, rubric, script, or preparation notes.',413);
         validatingBatch=false;
         return await paid(user,id,requestId,'coach',input,coachCost,async (emit,signal)=>{
           let feedback, coachingUsage;

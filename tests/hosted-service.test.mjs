@@ -687,7 +687,7 @@ test('refresh retries unconfirmed cancellation instead of trusting a cancelled j
 });
 
 test('chat transport requires sign-in and preserves the explicit request ID and payload on retry', async () => {
-  const body = { requestId: randomUUID(), message: 'Help with my opening.', history: [], context: { phase: 'prepare' } };
+  const body = { requestId: randomUUID(), message: 'Help with my opening.', history: [], context: { phase: 'prepare', assignmentInstructions: 'Present for five minutes.\nFinish with one concrete action.', assignmentFileName: 'Assignment instructions.pdf' } };
   const signedOut = fixture({ signedIn: false });
   await assert.rejects(signedOut.service.request('/api/coach-chat', { method: 'POST', body }), { status: 401 });
   assert.equal(signedOut.calls.length, 0);

@@ -51,7 +51,7 @@
           <div class="textarea-meta"><span id="talking-points-help">One point per line. Your checklist can stand on its own.</span><span id="talking-point-count">0 points</span></div>
         </div>
         <details class="speaker-details" id="personal-details">
-          <summary>Make it personal <span class="optional-inline">optional</span><span aria-hidden="true">+</span></summary>
+          <summary>Make it personal <span class="optional-inline">(optional)</span><span aria-hidden="true">+</span></summary>
           <label for="planned-introduction">Introduction <span class="optional-inline">(optional)</span></label>
           <textarea id="planned-introduction" maxlength="8000" rows="4" placeholder="Write the opening you want to practice."></textarea>
         </details>
@@ -64,11 +64,11 @@
         <details class="speaker-details context-details" id="rubric-details">
           <summary>Add rubric <span class="optional-inline">(optional)</span><span aria-hidden="true">+</span></summary>
           <p class="field-note">The coach uses your instructor’s criteria. The speech rating is a coaching estimate, not your course grade.</p>
-          <div class="rubric-upload-row"><button class="secondary-button small-button" id="rubric-upload-button" type="button">Choose file <span aria-hidden="true">↑</span></button><span id="rubric-file-name">No file chosen</span><input id="rubric-upload" type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" hidden></div>
+          <div class="rubric-upload-row"><button class="secondary-button small-button" id="rubric-upload-button" type="button">Choose file <span aria-hidden="true">↑</span></button><span class="document-file-name" id="rubric-file-name">No file chosen</span><input id="rubric-upload" type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" hidden></div>
           <p class="field-note">PDF, DOCX, or TXT · up to 5 MB · up to 30 preview pages</p>
           <div class="rubric-preview-card" id="rubric-preview-card" hidden>
             <div class="rubric-thumbnail" id="rubric-thumbnail" aria-hidden="true"></div>
-            <button class="rubric-preview-open" id="rubric-preview-open" type="button"><span>Open rubric preview <span aria-hidden="true">↗</span></span><span id="rubric-preview-meta"></span></button>
+            <button class="rubric-preview-open" id="rubric-preview-open" type="button"><span>Open rubric preview <span aria-hidden="true">↗</span></span><span class="document-preview-meta" id="rubric-preview-meta"></span></button>
           </div>
           <p class="rubric-status" id="rubric-status" role="status" aria-live="polite">Preview stays on your device. Coaching uses the extracted text.</p>
           <details class="rubric-text-details" id="rubric-text-details">
@@ -79,13 +79,31 @@
           </details>
           <div class="context-field-footer"><button class="text-button quiet" id="remove-rubric" type="button" hidden>Remove rubric</button></div>
         </details>
-        <div class="prepare-tip"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 18h6M10 21h4M8 14.5a6 6 0 1 1 8 0c-1 .8-1 1.5-1 2.5H9c0-1 0-1.7-1-2.5Z"/></svg><p>Bullet points leave room for your natural voice.</p></div>
+        <details class="speaker-details context-details" id="assignment-details">
+          <summary>Attach assignment instructions <span class="optional-inline">(optional)</span><span aria-hidden="true">+</span></summary>
+          <p class="field-note">Include the assignment’s purpose, required content, format, and other directions. These instructions give your coach context alongside any rubric.</p>
+          <div class="rubric-upload-row"><button class="secondary-button small-button" id="assignment-upload-button" type="button">Choose file <span aria-hidden="true">↑</span></button><span class="document-file-name" id="assignment-file-name">No file chosen</span><input id="assignment-upload" type="file" accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain" hidden></div>
+          <p class="field-note">PDF, DOCX, or TXT · up to 5 MB · up to 30 preview pages</p>
+          <div class="rubric-preview-card" id="assignment-preview-card" hidden>
+            <div class="rubric-thumbnail" id="assignment-thumbnail" aria-hidden="true"></div>
+            <button class="rubric-preview-open" id="assignment-preview-open" type="button"><span>Open assignment preview <span aria-hidden="true">↗</span></span><span class="document-preview-meta" id="assignment-preview-meta"></span></button>
+          </div>
+          <p class="rubric-status" id="assignment-status" role="status" aria-live="polite">Preview stays on your device. Coaching uses the extracted text.</p>
+          <details class="rubric-text-details" id="assignment-text-details">
+            <summary>Paste or review assignment instructions</summary>
+            <label for="assignment-instructions">Text used for coaching</label>
+            <textarea id="assignment-instructions" maxlength="40000" rows="6" placeholder="Paste the assignment instructions here, or choose a file above." aria-describedby="assignment-text-help"></textarea>
+            <p class="field-note" id="assignment-text-help">You can edit this text without changing the document preview. For scanned pages, paste the instructions you want the coach to use.</p>
+          </details>
+          <div class="context-field-footer"><button class="text-button quiet" id="remove-assignment" type="button" hidden>Remove assignment instructions</button></div>
+        </details>
+        <div class="prepare-tip"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 18h6M10 21h4M8 14.5a6 6 0 1 1 8 0c-1 .8-1 1.5-1 2.5H9c0-1 0-1.7-1-2.5Z"/></svg><p>Adding context helps your coach tailor feedback to your presentation.</p></div>
       </section>
 
       <section class="record-panel panel" aria-labelledby="record-title">
         <div class="section-heading"><span class="section-index">REHEARSE</span><span class="audio-badge"><span></span>AUDIO ANALYSIS</span></div>
         <div class="record-stage">
-          <h2 id="record-title">The floor is yours.</h2>
+          <h2 id="record-title">Begin recording</h2>
           <div class="follow-transcript-panel" id="follow-transcript-panel" hidden>
             <div class="follow-transcript-heading"><span>YOUR TRANSCRIPT</span><span id="follow-transcript-status" role="status" aria-live="polite">Ready when you are</span></div>
             <div id="follow-transcript" class="follow-transcript" role="region" aria-label="Rehearsal transcript" tabindex="0">Your words appear here as you speak.</div>
@@ -181,7 +199,7 @@
       <details class="transcript-details prompt-details" id="prompt-details" hidden><summary><span>View coaching prompt</span><span aria-hidden="true">+</span></summary><p class="support-text">See the instructions and transcript prepared for your AI coach. This preview uses your latest edits and does not contact an AI provider.</p><div id="prompt-status" class="field-note" role="status"></div><label class="sr-only" for="coaching-prompt">Coaching prompt preview</label><textarea id="coaching-prompt" readonly rows="9" placeholder="Open this section to prepare your prompt."></textarea><div class="prompt-actions"><button class="text-button" id="refresh-prompt">Refresh preview</button><button class="secondary-button" id="copy-prompt">Copy prompt</button></div></details>
       </div>
       <aside id="rehearsal-chat" class="rehearsal-chat" aria-labelledby="chat-title">
-        <div class="chat-heading"><div><p class="eyebrow">LET’S TALK IT THROUGH</p><h2 id="chat-title">Your rehearsal coach</h2><p>Plan your take. Talk through your feedback.</p></div><span class="chat-model">Luna</span></div>
+        <div class="chat-heading"><div><h2 id="chat-title">Your rehearsal coach</h2><p>Talk through your feedback.</p></div><span class="chat-model">Luna</span></div>
         <div class="chat-context"><span class="chat-context-dot" aria-hidden="true"></span><p id="chat-context-note">Here before, during, and after your rehearsal.</p></div>
         <div id="chat-messages" class="chat-messages" role="log" aria-label="Conversation with your rehearsal coach" aria-live="polite" aria-relevant="additions text" tabindex="0"><div class="chat-message chat-message-assistant"><span class="sr-only">Coach: </span><p>Who is your audience?</p></div></div>
         <div id="chat-status" class="chat-status" role="status" aria-live="polite"></div>
@@ -195,7 +213,7 @@
 
     <section id="report" class="report" aria-labelledby="report-title" hidden>
       <div class="report-topline"><span id="report-source" class="report-source"></span></div>
-      <div class="report-context-badges"><span id="report-rubric-badge" hidden>Instructor rubric included</span><span id="report-transitions-badge" hidden>Planned transitions included</span></div>
+      <div class="report-context-badges"><span id="report-rubric-badge" hidden>Instructor rubric included</span><span id="report-assignment-badge" hidden>Assignment instructions included</span><span id="report-transitions-badge" hidden>Planned transitions included</span></div>
       <div class="report-header"><div><h2 id="report-title">Feedback</h2><p id="report-subtitle" class="support-text">Your rehearsal, broken down into things you can act on.</p></div><div class="report-actions"><button class="secondary-button small-button" id="download-report">Download report</button><button class="secondary-button small-button" id="print-report">Print</button></div></div>
       <div id="report-warnings" class="report-warnings" hidden></div>
 
@@ -226,12 +244,19 @@
       <button id="cancel-restart-confirm" class="primary-button" type="button">Yes, cancel and start over</button>
     </div>
   </dialog>
-  <dialog id="rubric-preview-dialog" aria-labelledby="rubric-preview-title">
-    <div class="dialog-heading"><div><p class="eyebrow">YOUR RUBRIC</p><h2 id="rubric-preview-title">Document preview</h2></div><button class="icon-button" id="rubric-preview-close" type="button" aria-label="Close rubric preview" autofocus>×</button></div>
-    <div class="rubric-page-controls"><button class="secondary-button small-button" id="rubric-page-previous" type="button" aria-label="Previous rubric page">← Previous</button><span id="rubric-page-label" role="status" aria-live="polite"></span><button class="secondary-button small-button" id="rubric-page-next" type="button" aria-label="Next rubric page">Next →</button></div>
-    <p class="rubric-status" id="rubric-preview-warning"></p>
-    <div class="rubric-document-scroll" id="rubric-document-scroll" role="region" aria-label="Rubric document page" tabindex="0"><div id="rubric-document-page"></div></div>
-    <p class="rubric-status" id="rubric-page-status" role="status" aria-live="polite"></p>
+  <dialog class="document-preview-dialog" id="rubric-preview-dialog" aria-labelledby="rubric-preview-title">
+    <div class="dialog-heading"><div><p class="eyebrow">YOUR RUBRIC</p><h2 class="document-preview-title" id="rubric-preview-title">Document preview</h2></div><button class="icon-button" id="rubric-preview-close" type="button" aria-label="Close rubric preview" autofocus>×</button></div>
+    <div class="rubric-page-controls"><button class="secondary-button small-button" id="rubric-page-previous" type="button" aria-label="Previous rubric page">← Previous</button><span class="document-page-label" id="rubric-page-label" role="status" aria-live="polite"></span><button class="secondary-button small-button" id="rubric-page-next" type="button" aria-label="Next rubric page">Next →</button></div>
+    <p class="rubric-status document-preview-warning" id="rubric-preview-warning"></p>
+    <div class="rubric-document-scroll" id="rubric-document-scroll" role="region" aria-label="Rubric document page" tabindex="0"><div class="document-page" id="rubric-document-page"></div></div>
+    <p class="rubric-status document-page-status" id="rubric-page-status" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog class="document-preview-dialog" id="assignment-preview-dialog" aria-labelledby="assignment-preview-title">
+    <div class="dialog-heading"><div><p class="eyebrow">ASSIGNMENT INSTRUCTIONS</p><h2 class="document-preview-title" id="assignment-preview-title">Document preview</h2></div><button class="icon-button" id="assignment-preview-close" type="button" aria-label="Close assignment preview" autofocus>×</button></div>
+    <div class="rubric-page-controls"><button class="secondary-button small-button" id="assignment-page-previous" type="button" aria-label="Previous assignment page">← Previous</button><span class="document-page-label" id="assignment-page-label" role="status" aria-live="polite"></span><button class="secondary-button small-button" id="assignment-page-next" type="button" aria-label="Next assignment page">Next →</button></div>
+    <p class="rubric-status document-preview-warning" id="assignment-preview-warning"></p>
+    <div class="rubric-document-scroll" id="assignment-document-scroll" role="region" aria-label="Assignment document page" tabindex="0"><div class="document-page" id="assignment-document-page"></div></div>
+    <p class="rubric-status document-page-status" id="assignment-page-status" role="status" aria-live="polite"></p>
   </dialog>
 
   <dialog id="account-dialog" aria-labelledby="account-title">
@@ -245,10 +270,10 @@
     <section id="account-details" hidden>
       <p id="account-summary"></p>
       <label class="usage-consent"><input type="checkbox" id="usage-consent"><span>Help improve the pilot with optional usage analytics.</span></label>
-      <p class="field-note">Includes time actively spent in app sections, repeat visits, and completed or failed analyses. Never includes your recording, transcript, script, rubric, or keystrokes. Turn this off at any time; coaching still works.</p>
+      <p class="field-note">Includes time actively spent in app sections, repeat visits, and completed or failed analyses. Never includes your recording, transcript, script, rubric, assignment instructions, or keystrokes. Turn this off at any time; coaching still works.</p>
       <button id="account-signout" class="text-button" type="button">Sign out of this account</button>
     </section>
-    <aside class="key-privacy-note"><strong>Your recording history is private to your account.</strong><p>Live transcription streams audio while you speak. Stop saves your recording and transcript privately. Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.</p><p>Pressing Send in chat shares your message, recent conversation, preparation text, and current transcript with our AI coach. Selecting text alone sends nothing. Chat history stays in this tab and clears when you refresh or sign out; we do not save it to your account or rehearsal. The current conversation can inform Analyze without being stored with the report.</p><p>Delete a saved rehearsal to remove its cloud audio, transcript, and feedback. Sign out on shared computers. Operational processing and account records are separate from optional usage analytics.</p></aside>
+    <aside class="key-privacy-note"><strong>Your recording history is private to your account.</strong><p>Live transcription streams audio while you speak. Stop saves your recording and transcript privately. Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Original rubric and assignment files stay on your device. Their extracted or pasted text is included when you request coaching.</p><p>Pressing Send in chat shares your message, recent conversation, preparation text, and current transcript with our AI coach. Selecting text alone sends nothing. Chat history stays in this tab and clears when you refresh or sign out; we do not save it to your account or rehearsal. The current conversation can inform Analyze without being stored with the report.</p><p>Delete a saved rehearsal to remove its cloud audio, transcript, and feedback. Sign out on shared computers. Operational processing and account records are separate from optional usage analytics.</p></aside>
     <p id="account-status" class="settings-status" role="status" aria-live="polite"></p>
   </dialog>
 </body>
