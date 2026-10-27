@@ -361,6 +361,30 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
           chatConfigured:Boolean(provider==='openai'&&env.COACHING_API_KEY),chatModel:CHAT_MODEL});
       }
       const user=await identify(request);
+      if(request.method==='POST'&&path==='/speech/prepare') {
+        if((await readLimited(request,0)).length)throw fail('Preparation does not accept a request body.');
+        if(!worker||!speechCost)throw fail('Cloud speech is not configured yet.',503);
+        // A server-generated ID cannot be confused with, recover, or cancel a
+        // student's recording. The private singleton lease limits all instances.
+        const requestId=crypto.randomUUID(),claim=await store.speechWarmupReserve(user.id,requestId,speechCost);
+        if(claim.state!=='new')return json({ready:claim.ready===true,state:claim.state});
+        const task=(async()=>{
+          let ready=false;
+          try {
+            const response=await fetchImpl(new URL('prepare',worker).href,{method:'POST',redirect:'error',headers:{...workerHeaders(),
+              'X-Rehearsal-Request':`${user.id}:${requestId}`,'X-Rehearsal-Prepare-Expires':String(now()+125000)},signal:AbortSignal.timeout(125000)});
+            if(response.ok) {
+              const result=JSON.parse(new TextDecoder().decode(await readLimited(response,1024)));
+              ready=result.ready===true&&result.model==='bark-3.0-plus';
+            }
+          } catch { /* Recording still uses its normal bounded preparation path. */ }
+          // An expired or superseded lease cannot publish a stale ready hint.
+          const settled=await store.speechWarmupFinish(user.id,requestId,ready);
+          return json({ready:settled.ready===true,state:settled.state});
+        })();
+        globalThis.EdgeRuntime?.waitUntil(task.catch(()=>{}));
+        return await task;
+      }
       if(request.method==='POST'&&path==='/coach-chat') {
         const input=chatInput(await jsonBody(request));
         if(provider!=='openai'||!env.COACHING_API_KEY)throw fail('The rehearsal chat is not configured yet.',503);

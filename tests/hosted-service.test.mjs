@@ -69,6 +69,44 @@ test('hosted configuration is off only when absent and rejects partial or secret
   ]) assert.throws(() => readHostedConfig(env));
 });
 
+test('sign-in speech startup deduplicates simultaneous callers and same-account auth events', async () => {
+  const pending = deferred();
+  const f = fixture({ handle: call => call.path === '/speech/prepare' ? pending.promise : undefined });
+  f.service.onAuthChange(() => {});
+  const calls = Array.from({ length: 100 }, () => f.service.prepareSpeech());
+  await new Promise(setImmediate);
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].path, '/speech/prepare');
+  assert.equal(f.calls[0].method, 'POST'); assert.equal(f.calls[0].body, undefined);
+  assert.equal(f.calls[0].headers.Authorization, 'Bearer private-session-token');
+  pending.resolve(response({ ready: true, state: 'ready' })); await Promise.all(calls);
+  f.authChange(firstSession); await f.service.prepareSpeech(); assert.equal(f.calls.length, 1);
+  assert.equal(await f.service.getPendingRequest(), null, 'warmup creates no recoverable recording job');
+});
+
+test('speech startup failure is not retried by token refresh and signed-out startup is inert', async () => {
+  const f = fixture({ handle: call => call.path === '/speech/prepare' ? response({ error: 'Unavailable' }, 503) : undefined });
+  f.service.onAuthChange(() => {});
+  await assert.rejects(f.service.prepareSpeech(), /Unavailable/);
+  f.authChange(firstSession); await assert.rejects(f.service.prepareSpeech(), /Unavailable/);
+  assert.equal(f.calls.length, 1);
+  const signedOut = fixture({ signedIn: false });
+  assert.deepEqual(await signedOut.service.prepareSpeech(), { ready: false, state: 'skipped' });
+  assert.equal(signedOut.calls.length, 0);
+});
+
+test('account changes abort old warmup without adopting its result', async () => {
+  const pending = deferred();
+  const f = fixture({ handle: call => call.path === '/speech/prepare' ? pending.promise.then(() => response({ ready: true, state: 'ready' })) : undefined });
+  f.service.onAuthChange(() => {});
+  const old = f.service.prepareSpeech(); await new Promise(setImmediate);
+  const rejection = assert.rejects(old, error => error.name === 'AbortError' || error.status === 401);
+  f.authChange(secondSession); assert.equal(f.calls[0].signal.aborted, true);
+  const next = f.service.prepareSpeech(); await new Promise(setImmediate);
+  assert.equal(f.calls.length, 2); assert.equal(f.calls[1].headers.Authorization, 'Bearer second-token');
+  pending.resolve(response({ ready: true, state: 'ready' }));
+  await rejection; await next;
+});
+
 test('opt-in progress delivers ordered server milestones and the unchanged final result', async () => {
   const final = { analysis: { method: 'ai', overallRating: 80 }, transcript: 'Café practice.' };
   for (const cached of [false, true]) {

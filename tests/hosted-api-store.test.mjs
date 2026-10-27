@@ -75,6 +75,13 @@ test('batch cancel and atomic completion use restricted owner-scoped RPCs',async
   await assert.rejects(cancelled.completeRequest('owner','request',{}),error=>error.status===409&&error.jobState==='cancelled');
 });
 
+test('speech startup reserves and acknowledges only the server-derived owner and operation',async()=>{
+  const calls=[]; const store=createSupabaseStore({async rpc(name,args){calls.push({name,args});return {data:{state:'new',ready:false}};}});
+  await store.speechWarmupReserve('owner','server-operation',75000); await store.speechWarmupFinish('owner','server-operation',true);
+  assert.deepEqual(calls,[{name:'rehearsal_speech_warmup_reserve',args:{p_user:'owner',p_request:'server-operation',p_cost:75000}},
+    {name:'rehearsal_speech_warmup_finish',args:{p_user:'owner',p_request:'server-operation',p_ready:true}}]);
+});
+
 test('only definite reservation refusals prove a request was not started',async()=>{
   for(const message of ['request_busy','daily_limit','budget_exhausted','request_conflict','private network failure']) {
     const store=createSupabaseStore({async rpc(){return {error:{message}};}});

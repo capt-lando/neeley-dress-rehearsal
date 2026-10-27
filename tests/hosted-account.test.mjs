@@ -11,7 +11,7 @@ const accountSource = (await readFile(new URL('../public/hosted-account.js', imp
   .replace(/^import .*\r?\n/gm, '').replace(/^export /gm, '').replaceAll('import.meta.env', 'undefined');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), recoverPending, configurationFailed, configurationReady } = {}) {
+function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), prepareSpeech, recoverPending, configurationFailed, configurationReady } = {}) {
   class Element {
     constructor(tagName = 'DIV') { this.tagName = tagName; this.listeners = new Map(); this.children = []; this.disabled = false; this.textContent = ''; }
     addEventListener(name, callback) { this.listeners.set(name, callback); }
@@ -30,6 +30,7 @@ function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription:
   let settingsCalls = 0;
   let identity = { id: 'first-user' }, authChanged;
   const service = {
+    prepareSpeech,
     getIdentity: () => getIdentity(identity),
     request(path, options) {
       if (path === '/api/config') return getConfig();
@@ -210,6 +211,26 @@ test('signed-in startup automatically reconciles pending work before refreshing 
   pending.resolve(); await turn();
   assert.equal(h.histories.length, 1);
   h.histories[0].resolve({ recordings: [] }); await turn();
+});
+
+test('signed-in speech startup runs without blocking recovery or history', async () => {
+  const warmup = deferred(), events = [];
+  const h = accountHarness({ getConfig: async () => ({ speechConfigured: true }),
+    prepareSpeech: () => { events.push('warmup'); return warmup.promise; }, recoverPending: async () => events.push('recovery') });
+  await turn();
+  assert.deepEqual(events, ['warmup', 'recovery']);
+  assert.equal(h.histories.length, 1, 'history appears while startup is still pending');
+  h.histories[0].resolve({ recordings: [] }); warmup.reject(new Error('GPU is unavailable')); await turn();
+  assert.equal(h.get('account-status').textContent, '', 'optional startup failure does not masquerade as sign-in failure');
+});
+
+test('signed-out and unconfigured accounts never start speech compute', async () => {
+  let starts = 0;
+  const h = accountHarness({ getConfig: async () => ({ speechConfigured: false }), prepareSpeech: async () => { starts++; } });
+  await turn(); h.histories[0].resolve({ recordings: [] });
+  await h.changeUser(null); assert.equal(starts, 0);
+  const signedOut = accountHarness({ getIdentity: async () => null, getConfig: async () => ({ speechConfigured: true }), prepareSpeech: async () => { starts++; } });
+  await turn(); assert.equal(starts, 0); assert.equal(signedOut.histories.length, 0);
 });
 
 test('initial configuration failure reaches the main UI and retry reloads configuration before recovery', async () => {

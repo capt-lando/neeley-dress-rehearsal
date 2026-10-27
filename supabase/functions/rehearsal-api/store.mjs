@@ -74,6 +74,8 @@ export function createSupabaseStore(client) {
     chatReserve(user,recording,request,inputHash) { return rpc('rehearsal_chat_reserve',{p_user:user,p_recording:recording,p_request:request,p_hash:inputHash}); },
     chatComplete(user,request) { return rpc('rehearsal_chat_complete',{p_user:user,p_request:request}); },
     chatFail(user,request) { return rpc('rehearsal_chat_fail',{p_user:user,p_request:request}); },
+    speechWarmupReserve(user,request,cost) { return rpc('rehearsal_speech_warmup_reserve',{p_user:user,p_request:request,p_cost:cost}); },
+    speechWarmupFinish(user,request,ready) { return rpc('rehearsal_speech_warmup_finish',{p_user:user,p_request:request,p_ready:ready}); },
     liveStart(user,recording,request,title,inputHash,cost) { return rpc('rehearsal_live_start',{p_user:user,p_recording:recording,p_request:request,p_title:title,p_hash:inputHash,p_cost:cost}); },
     liveGet(user,recording) { return rpc('rehearsal_live_get',{p_user:user,p_recording:recording}); },
     livePrepare(user,recording) { return rpc('rehearsal_live_prepare',{p_user:user,p_recording:recording}); },

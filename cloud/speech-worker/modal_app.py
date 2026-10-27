@@ -15,7 +15,8 @@ image = (
 app = modal.App("neeley-bark-speech")
 
 
-@app.function(image=image, gpu="L4", cpu=2, memory=8192,
+# Prefer L4, but allow the less expensive T4 when L4 capacity is unavailable.
+@app.function(image=image, gpu=["L4", "T4"], cpu=2, memory=8192,
               max_containers=1, scaledown_window=60, timeout=150,
               secrets=[modal.Secret.from_name("neeley-bark-worker")])
 @modal.concurrent(max_inputs=8)

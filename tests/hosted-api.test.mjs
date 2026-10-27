@@ -257,7 +257,7 @@ test('streaming retains request and audio concurrency guards through disconnecte
 });
 
 test('all app routes enforce distributed admission before data access or paid calls',async()=>{
-  const paths=[['/config','GET'],['/requests/'+requestId,'GET'],['/recordings','GET'],['/recordings','POST'],['/recordings/'+recording,'GET'],['/recordings/'+recording,'DELETE'],['/events','POST'],['/transcribe','POST'],['/analyze-text','POST'],['/live-sessions','POST'],['/live-sessions/'+recording,'GET'],['/live-sessions/'+recording,'DELETE'],['/live-sessions/'+recording+'/prepare','POST'],['/live-sessions/'+recording+'/chunks/0','POST'],['/live-sessions/'+recording+'/finish','POST']];
+  const paths=[['/config','GET'],['/speech/prepare','POST'],['/requests/'+requestId,'GET'],['/recordings','GET'],['/recordings','POST'],['/recordings/'+recording,'GET'],['/recordings/'+recording,'DELETE'],['/events','POST'],['/transcribe','POST'],['/analyze-text','POST'],['/live-sessions','POST'],['/live-sessions/'+recording,'GET'],['/live-sessions/'+recording,'DELETE'],['/live-sessions/'+recording+'/prepare','POST'],['/live-sessions/'+recording+'/chunks/0','POST'],['/live-sessions/'+recording+'/finish','POST']];
   for(const stage of ['global','user'])for(const [path,method] of paths) {
     const admissions=[];
     const f=fixture({store:{admitRequest:async id=>{admissions.push(id);if(stage==='global'||id)throw Object.assign(fail('Too many requests.',429),{retryAfter:60});}}});

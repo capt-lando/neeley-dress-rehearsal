@@ -61,14 +61,17 @@ class ProcessRunner:
 
 
 def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
-               cancellation_limit=MAX_CANCELLATIONS, clock=time.monotonic):
+               cancellation_limit=MAX_CANCELLATIONS, clock=time.monotonic,
+               request_timeout=INFERENCE_SECONDS, wall_clock=time.time):
     secret = token if token is not None else os.environ.get("BARK_WORKER_TOKEN", "")
     if not isinstance(secret, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", secret):
         raise RuntimeError("Set BARK_WORKER_TOKEN to a random URL-safe secret of at least 43 characters.")
     engine = runner or ProcessRunner()
     gate = asyncio.Lock()
     cancellations = {}
-    active = None
+    requests = {}
+    preparation = None
+    preparation_waiters = set()
 
     def prune_cancellations():
         now = clock()
@@ -94,12 +97,13 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
     @asynccontextmanager
     async def lifespan(_):
         yield
-        if active is not None:
-            active[1].cancel()
-            try:
-                await active[1]
-            except asyncio.CancelledError:
-                pass
+        pending = list(requests)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if preparation is not None:
+            preparation.cancel()
+            await asyncio.gather(preparation, return_exceptions=True)
         await engine.close()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -112,9 +116,19 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
         return response
 
     async def handle(request: Request, *, live=False, prepare=False):
-        nonlocal active
         authorize(request)
         key = request_key(request.headers.get("x-rehearsal-request"))
+        expires = request.headers.get("x-rehearsal-prepare-expires")
+        deadline = None
+        if expires is not None:
+            if not prepare or not re.fullmatch(r"[0-9]{13}", expires):
+                raise HTTPException(400, "Use a valid preparation deadline.")
+            deadline = int(expires) / 1000
+            remaining = deadline - wall_clock()
+            if remaining <= 0:
+                raise HTTPException(408, "This preparation request expired.")
+            if remaining > 150:
+                raise HTTPException(400, "Use a bounded preparation deadline.")
         prune_cancellations()
         if key in cancellations:
             raise HTTPException(409, "This speech request was canceled.")
@@ -126,25 +140,42 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
             if prepare:
                 raise HTTPException(400, "Send an empty preparation request.")
             raise HTTPException(413, "The recording is too large.")
-        if gate.locked():
+        if gate.locked() and preparation is None:
             raise HTTPException(429, "Speech worker is busy. Try again shortly.", headers={"Retry-After": "5"})
+
+        async def read_payload():
+            payload = bytearray()
+            async with asyncio.timeout(upload_timeout):
+                async for piece in request.stream():
+                    if len(payload) + len(piece) > limit:
+                        if prepare:
+                            raise HTTPException(400, "Send an empty preparation request.")
+                        raise HTTPException(413, "The recording is too large.")
+                    payload.extend(piece)
+            return payload
+
         async def operation():
             payload = bytearray()
             try:
-                async with asyncio.timeout(upload_timeout):
-                    async for piece in request.stream():
-                        if len(payload) + len(piece) > limit:
-                            if prepare:
-                                raise HTTPException(400, "Send an empty preparation request.")
-                            raise HTTPException(413, "The recording is too large.")
-                        payload.extend(piece)
-                duration = None if prepare else decode_wav(payload, live=live)[1]
-                if live and len(payload) < 44 + SAMPLE_RATE:
-                    # The model receives at least 0.5 seconds; keep the real tail duration below.
-                    payload.extend(b"\0" * (44 + SAMPLE_RATE - len(payload)))
-                    struct.pack_into("<I", payload, 4, len(payload) - 8)
-                    struct.pack_into("<I", payload, 40, len(payload) - 44)
-                message = await engine.run(bytes(payload))
+                if prepare:
+                    payload = await read_payload()
+                    await prepare_model()
+                    return JSONResponse({"ready": True, "model": "bark-3.0-plus"})
+                # Sign-in preparation is shared, but audio inference never is.
+                # Hold the request's own cancellation scope while waiting.
+                if preparation is not None:
+                    await join_preparation(preparation)
+                if gate.locked():
+                    raise HTTPException(429, "Speech worker is busy. Try again shortly.", headers={"Retry-After": "5"})
+                async with gate:
+                    payload = await read_payload()
+                    duration = decode_wav(payload, live=live)[1]
+                    if live and len(payload) < 44 + SAMPLE_RATE:
+                        # The model receives at least 0.5 seconds; keep the real tail duration below.
+                        payload.extend(b"\0" * (44 + SAMPLE_RATE - len(payload)))
+                        struct.pack_into("<I", payload, 4, len(payload) - 8)
+                        struct.pack_into("<I", payload, 40, len(payload) - 44)
+                    message = await engine.run(bytes(payload))
                 if message.get("ok") is not True:
                     if live and message.get("code") == "no_speech":
                         return JSONResponse({"text": "", "durationSeconds": duration,
@@ -153,10 +184,6 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
                     detail = "No usable speech was detected. Try another recording." if status == 422 else "Speech recognition is temporarily unavailable."
                     raise HTTPException(status, detail)
                 result = message["result"]
-                if prepare:
-                    if result.get("ready") is not True:
-                        raise HTTPException(503, "Speech recognition is temporarily unavailable.")
-                    return JSONResponse({"ready": True, "model": "bark-3.0-plus"})
                 if live:
                     result = result | {"durationSeconds": duration}
                 return JSONResponse(result)
@@ -171,21 +198,67 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
             finally:
                 payload.clear()
 
-        async with gate:
-            # No await separates the cancellation check and operation registration.
-            if key in cancellations:
-                raise HTTPException(409, "This speech request was canceled.")
-            task = asyncio.create_task(operation())
-            active = (key, task)
+        async def bounded_operation():
+            # Preparation waiting, upload, and inference share one deadline;
+            # joining a warmup must not grant a second full inference timeout.
+            timeout = request_timeout if deadline is None else min(request_timeout, max(0, deadline - wall_clock()))
             try:
-                return await task
-            except asyncio.CancelledError:
-                if key in cancellations:
-                    raise HTTPException(409, "This speech request was canceled.") from None
-                raise
-            finally:
-                if active is not None and active[1] is task:
-                    active = None
+                async with asyncio.timeout(timeout):
+                    return await operation()
+            except TimeoutError:
+                raise HTTPException(504, "Speech recognition timed out. Try again shortly.") from None
+
+        # No await separates the cancellation check and operation registration.
+        if key in cancellations:
+            raise HTTPException(409, "This speech request was canceled.")
+        task = asyncio.create_task(bounded_operation())
+        requests[task] = key
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if key in cancellations:
+                raise HTTPException(409, "This speech request was canceled.") from None
+            raise
+        finally:
+            requests.pop(task, None)
+
+    async def join_preparation(task):
+        if task.cancelling():
+            raise HTTPException(429, "Speech worker is busy. Try again shortly.", headers={"Retry-After": "5"})
+        waiter = asyncio.current_task()
+        preparation_waiters.add(waiter)
+        try:
+            await asyncio.shield(task)
+        finally:
+            preparation_waiters.discard(waiter)
+            # One canceled user must not discard another user's model warmup.
+            # If everybody leaves, stop the actual work before acknowledging.
+            if not preparation_waiters and not task.done():
+                if not task.cancelling():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def prepare_model():
+        nonlocal preparation
+        if preparation is None:
+            if gate.locked():
+                raise HTTPException(429, "Speech worker is busy. Try again shortly.", headers={"Retry-After": "5"})
+            # An unlocked asyncio.Lock acquires immediately. Register the shared
+            # task before yielding, so two arrivals cannot create two warmups.
+            await gate.acquire()
+
+            async def run():
+                nonlocal preparation
+                try:
+                    message = await engine.run(b"")
+                    if message.get("ok") is not True or message.get("result", {}).get("ready") is not True:
+                        raise HTTPException(503, "Speech recognition is temporarily unavailable.")
+                finally:
+                    preparation = None
+                    gate.release()
+
+            preparation = asyncio.create_task(run())
+        await join_preparation(preparation)
 
     @app.post("/cancel")
     async def cancel(request: Request):
@@ -217,12 +290,12 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS,
         if key not in cancellations and len(cancellations) >= cancellation_limit:
             raise HTTPException(429, "Cancellation capacity is temporarily unavailable.", headers={"Retry-After": "5"})
         cancellations[key] = clock() + CANCELLATION_SECONDS
-        current = active
-        if current is not None and current[0] == key:
-            task = current[1]
+        current = [task for task, owner in list(requests.items()) if owner == key]
+        for task in current:
             # Repeated control calls must not interrupt the first kill/pipe cleanup.
             if not task.cancelling():
                 task.cancel()
+        for task in current:
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
