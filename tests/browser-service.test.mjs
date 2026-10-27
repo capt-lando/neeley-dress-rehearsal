@@ -176,9 +176,43 @@ test('each selected coaching service receives its own key and returns grounded f
     assert.equal(seen.options.headers[keyHeader], keyHeader === 'Authorization' ? `Bearer ${provider}-privateKey` : `${provider}-privateKey`);
     if (provider === 'anthropic') assert.equal(seen.options.headers['anthropic-dangerous-direct-browser-access'], 'true');
     assert.equal(report.analysis.method, 'ai');
-    assert.equal(report.meta.coachingStatus, 'complete');
+    assert.equal(report.meta.coachingStatus, 'partial');
+    assert.deepEqual(report.meta.missingCoachingCriteria, ['claim', 'evidence', 'structure', 'audience', 'conclusion']);
+    assert.match(report.warnings[0], /AI coaching is partial/);
     assert.equal(report.meta.analysisProvider, provider);
     assert.ok(!JSON.stringify(report).includes('privateKey'));
+  }
+});
+
+test('coaching completeness reflects validated criteria without retries or invented scores', async () => {
+  const text = 'We should expand tutoring.';
+  for (const audience of ['valid', 'missing', 'unverifiable']) {
+    let calls = 0;
+    const rubric = ['claim', 'evidence', 'structure', 'audience', 'conclusion']
+      .filter(criterion => audience !== 'missing' || criterion !== 'audience')
+      .map(criterion => ({ criterion, score: 0, reason: 'A supported assessment.',
+        evidence: [criterion === 'audience' && audience === 'unverifiable' ? 'Words never spoken.' : text] }));
+    const service = create({ fetchImpl: async () => {
+      calls++;
+      return response(providerResponse('openai', { rubric, annotations: [{ category: 'thesis', quote: text, comment: 'Your proposal.' }] }));
+    } });
+    await service.request('/api/settings', post({ analysisApiKey: 'sk-test-private' }));
+    const report = await service.request('/api/analyze-text', post({ text }));
+    assert.equal(calls, 1);
+    assert.equal(report.analysis.annotations.length, 1);
+    assert.equal(report.analysis.method, 'ai');
+    if (audience === 'valid') {
+      assert.equal(report.meta.coachingStatus, 'complete');
+      assert.deepEqual(report.meta.missingCoachingCriteria, []);
+      assert.deepEqual(report.warnings, []);
+      assert.equal(report.analysis.overallRating, 0);
+    } else {
+      assert.equal(report.meta.coachingStatus, 'partial');
+      assert.deepEqual(report.meta.missingCoachingCriteria, ['audience']);
+      assert.match(report.warnings[0], /missing for: audience/);
+      assert.equal(report.analysis.overallRating, null);
+      assert.equal(report.analysis.rubric.find(item => item.criterion === 'audience').score, null);
+    }
   }
 });
 

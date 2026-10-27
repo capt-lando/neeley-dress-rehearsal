@@ -194,6 +194,32 @@ test('coaching uses saved duration, retains all preparation inputs, and returns 
   const options=f.calls.find(c=>c[0]==='coach')[1];assert.equal(options.apiKey,'private-coach-key');assert.equal(options.browser,false);for(const value of ['Support tutoring.','Hello students.','Next, costs.','Explain the claim.'])assert.ok(options.prompt.includes(value));
   assert.equal((await f.call('/analyze-text',{method:'POST',body:{...body,text:'A changed speech.'}})).status,409);assert.equal(f.debits,1);
 });
+test('coaching persists partial results honestly and never retries or fabricates missing criteria',async()=>{
+  const text=analyze.body.text;
+  for(const audience of ['valid','missing','unverifiable']) {
+    let calls=0;
+    const rubric=['claim','evidence','structure','audience','conclusion']
+      .filter(criterion=>audience!=='missing'||criterion!=='audience')
+      .map(criterion=>({criterion,score:0,reason:'A supported assessment.',
+        evidence:[criterion==='audience'&&audience==='unverifiable'?'Words never spoken.':text]}));
+    const f=fixture({coach:async()=>{calls++;return {rubric,annotations:[{category:'thesis',quote:text,comment:'Your proposal.'}]};}});
+    const response=await f.call('/analyze-text',analyze),report=await response.json();
+    assert.equal(response.status,200);assert.equal(calls,1);assert.equal(f.debits,1);
+    assert.equal(report.analysis.method,'ai');assert.equal(report.analysis.annotations.length,1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.rows.get(recording).report)),report);
+    assert.deepEqual(await(await f.call('/analyze-text',analyze)).json(),report);
+    assert.equal(calls,1);assert.equal(f.debits,1);
+    if(audience==='valid') {
+      assert.equal(report.meta.coachingStatus,'complete');assert.deepEqual(report.meta.missingCoachingCriteria,[]);
+      assert.deepEqual(report.warnings,[]);assert.equal(report.analysis.overallRating,0);
+    } else {
+      assert.equal(report.meta.coachingStatus,'partial');assert.deepEqual(report.meta.missingCoachingCriteria,['audience']);
+      assert.match(report.warnings[0],/missing for: audience/);assert.equal(report.analysis.overallRating,null);
+      assert.equal(report.analysis.rubric.find(item=>item.criterion==='audience').score,null);
+    }
+  }
+});
+
 test('invalid or unsupported analysis fails before consuming an AI reservation',async()=>{
   for(const input of [{text:'!!!'},{text:'a'.repeat(60001)},{targetScript:'a'.repeat(30001)},{useAI:false}]){const f=fixture();assert.equal((await f.call('/analyze-text',{method:'POST',body:{...analyze.body,...input}})).status,400);assert.equal(f.debits,0);}
   const missing=fixture();missing.rows.get(recording).transcript=null;assert.equal((await missing.call('/analyze-text',analyze)).status,409);assert.equal(missing.debits,0);

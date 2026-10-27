@@ -1,4 +1,4 @@
-import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions } from '../../../lib/analysis-core.mjs';
+import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions, coachingCompletion } from '../../../lib/analysis-core.mjs';
 import { PROVIDERS, requestCoaching } from '../../../lib/providers.mjs';
 import { createRequestLimit } from './request-limit.mjs';
 
@@ -343,7 +343,8 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
           catch { throw fail('The AI coach is unavailable. Your recording is saved; try again later.',502); }
           const report=analyzeSpeech({...input,aiFeedback:feedback});
           if (report.analysis.method!=='ai') throw fail('The AI coach returned an incomplete report. Your recording is saved.',502);
-          const output={...report,transcript:input.text,warnings:[],meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:'complete',localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
+          const completion=coachingCompletion(report.analysis);
+          const output={...report,transcript:input.text,warnings:completion.warnings,meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:completion.status,missingCoachingCriteria:completion.missingCriteria,localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
           await store.update(user.id,id,{status:'analyzed',transcript:input.text,report:output});
           return output;
         }));
