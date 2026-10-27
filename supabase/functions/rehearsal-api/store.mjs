@@ -3,6 +3,8 @@ import { fail } from './api.mjs';
 const ERRORS = {
   not_found:['This recording was not found.',404], request_conflict:['This request ID was already used for different data.',409],
   request_busy:['Another request is processing. Please wait for it to finish.',409],
+  request_cancelled:['This request was cancelled. You can start another rehearsal.',409],
+  recovery_limit:['Too many interrupted rehearsals. Please try again later.',429],
   storage_limit:['Your saved-recording limit is reached. Delete an older recording first.',429],
   daily_limit:['Your pilot usage limit is reached. Try again later.',429],
   rate_limited:['Too many requests. Wait a minute, then try again.',429],
@@ -17,12 +19,22 @@ function checked({ data, error }) {
     const known=ERRORS[error.message];
     const failure=known?fail(...known):fail('Private storage is temporarily unavailable.',503);
     if (error.message==='rate_limited') failure.retryAfter=60;
+    if (error.message==='request_cancelled') failure.jobState='cancelled';
     throw failure;
   }
   return data;
 }
 export function createSupabaseStore(client) {
-  const rpc=async(name,args)=>checked(await client.rpc(name,args));
+  const rpc=async(name,args)=>{
+    const result=await client.rpc(name,args);
+    try { return checked(result); }
+    catch(error) {
+      // These reserve failures occur after checking for this exact request ID
+      // and before creating a job. Transport errors and conflicts are uncertain.
+      if(name==='rehearsal_reserve'&&['request_busy','daily_limit','budget_exhausted'].includes(result?.error?.message))error.notStarted=true;
+      throw error;
+    }
+  };
   const recordings=()=>client.from('rehearsal_recordings');
   return {
     admitRequest(user=null) { return rpc('rehearsal_admit_request',{p_user:user}); },
@@ -52,6 +64,9 @@ export function createSupabaseStore(client) {
     },
     reserve(user,recording,request,kind,inputHash,cost) { return rpc('rehearsal_reserve',{p_user:user,p_recording:recording,p_request:request,p_kind:kind,p_hash:inputHash,p_cost:cost}); },
     finish(user,request,ok,response) { return rpc('rehearsal_finish',{p_user:user,p_request:request,p_ok:ok,p_response:response}); },
+    requestStatus(user,request) { return rpc('rehearsal_get_request',{p_user:user,p_request:request}); },
+    cancelRequest(user,recording,request) { return rpc('rehearsal_cancel_request',{p_user:user,p_recording:recording,p_request:request}); },
+    completeRequest(user,request,response) { return rpc('rehearsal_complete_request',{p_user:user,p_request:request,p_response:response}); },
     liveStart(user,recording,request,title,inputHash,cost) { return rpc('rehearsal_live_start',{p_user:user,p_recording:recording,p_request:request,p_title:title,p_hash:inputHash,p_cost:cost}); },
     liveGet(user,recording) { return rpc('rehearsal_live_get',{p_user:user,p_recording:recording}); },
     livePrepare(user,recording) { return rpc('rehearsal_live_prepare',{p_user:user,p_recording:recording}); },
@@ -59,6 +74,7 @@ export function createSupabaseStore(client) {
     liveChunk(user,recording,sequence,inputHash,samples,final) { return rpc('rehearsal_live_chunk',{p_user:user,p_recording:recording,p_sequence:sequence,p_hash:inputHash,p_samples:samples,p_final:final}); },
     liveChunkDone(user,recording,sequence,text) { return rpc('rehearsal_live_chunk_done',{p_user:user,p_recording:recording,p_sequence:sequence,p_text:text}); },
     liveClose(user,recording,cancel=false) { return rpc('rehearsal_live_close',{p_user:user,p_recording:recording,p_cancel:cancel}); },
+    liveCancel(user,recording,request) { return rpc('rehearsal_live_cancel',{p_user:user,p_recording:recording,p_request:request}); },
     liveFinish(user,recording,duration,size) { return rpc('rehearsal_live_finish',{p_user:user,p_recording:recording,p_duration:duration,p_size:size}); },
     events(user,events) { return rpc('rehearsal_ingest_events',{p_user:user,p_events:events}); },
   };

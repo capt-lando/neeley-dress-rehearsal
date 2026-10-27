@@ -15,7 +15,7 @@ function fixture({ request: override, saveAudio: save, sampleRate = 16000 } = {}
       calls.push({ path, ...options });
       if (override) await override(path, options);
       if (path === '/live-sessions') { active = true; return start; }
-      if (options.method === 'DELETE') { active = false; return { cancelled: true }; }
+      if (path.endsWith('/cancel')) { active = false; return { cancelled: true }; }
       if (path.endsWith('/prepare')) return { ready: true };
       if (path.endsWith('/finish')) return { recordingId, complete: active, text: active ? 'Um, I, I finish.' : '' };
       const index = Number(path.split('/').pop()); chunks.push(options.body.size);
@@ -32,9 +32,9 @@ test('cancel during session creation waits for its commit and never warms or sen
   } });
   f.session.push(new Float32Array(160000)); await started.promise;
   assert.equal(f.session.cancel(), true); await tick();
-  assert.equal(f.calls.length, 1, 'DELETE must wait until creation settles');
+  assert.equal(f.calls.length, 1, 'Cancellation waits until creation settles in this tab');
   response.resolve(); await tick(); await tick();
-  assert.deepEqual(f.calls.map(call => [call.path, call.method]), [['/live-sessions', 'POST'], ['/live-sessions/recording', 'DELETE']]);
+  assert.deepEqual(f.calls.map(call => [call.path, call.method]), [['/live-sessions', 'POST'], ['/live-sessions/recording/cancel', 'POST']]);
   assert.equal(f.active, false); assert.equal(f.chunks.length, 0);
   assert.equal(f.session.cancel(), false);
 });
@@ -51,7 +51,7 @@ test('a canceled take can finish saving after an outstanding start response sett
   f.session.push(new Float32Array(160000)); await started.promise; f.session.cancel();
   const finishing = f.session.finish(new Blob()); response.resolve();
   assert.equal((await finishing).complete, false);
-  assert.deepEqual(f.calls.map(call => call.path), ['/live-sessions', '/live-sessions/recording', '/live-sessions/recording/finish']);
+  assert.deepEqual(f.calls.map(call => call.path), ['/live-sessions', '/live-sessions/recording/cancel', '/live-sessions/recording/finish']);
 });
 
 test('a final source sample that rounds away does not invent audio or send an empty WAV', async () => {

@@ -213,3 +213,10 @@
 @media(prefers-reduced-motion:reduce){.processing-steps li[data-state="current"] .processing-dot{animation:none}}
 @media(max-width:420px){.processing-summary{align-items:flex-start;gap:8px;font-size:10px}.processing-label{font-size:9px}.processing-summary>[role="timer"]{font-size:9px}.processing-dot{width:17px;height:17px}.processing-steps li:not(:last-child):after{top:8px}}
 @media print{.processing-progress{display:none}}
+
+.cancel-recording{display:flex;margin:12px auto 0;color:#925169}
+#cancel-restart-dialog{width:500px;max-width:calc(100vw - 40px);margin:auto;padding:32px}
+.cancel-restart-actions{display:flex;justify-content:space-between;align-items:center;gap:28px;margin-top:32px}
+.cancel-restart-actions button{min-height:44px}
+#cloud-recovery button{margin-left:16px}
+@media(max-width:500px){.cancel-restart-actions{flex-direction:column;align-items:stretch;gap:22px}#cancel-restart-dialog{padding:25px}}

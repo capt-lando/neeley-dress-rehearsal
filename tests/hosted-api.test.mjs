@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHostedApi, inspectHostedWav, validateEvents, fail, readLimited } from '../supabase/functions/rehearsal-api/api.mjs';
+import { createSupabaseStore } from '../supabase/functions/rehearsal-api/store.mjs';
 
 const policyText=await readFile(new URL('../lib/coaching-prompt.md',import.meta.url),'utf8');
 const user='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-8222-222222222222';
@@ -16,7 +17,7 @@ function wav(seconds=1) {
 }
 function fixture(overrides={}) {
   const rows=new Map([[recording,{id:recording,user_id:user,title:'Practice',created_at:'2026-10-26T00:00:00Z',duration_seconds:1,size_bytes:wav().length,storage_path:`${user}/${recording}/audio.wav`,status:'transcribed',transcript:'We should expand tutoring.'}]]);
-  const jobs=new Map(),calls=[]; let debits=0;
+  const jobs=new Map(),calls=[],cancelled=new Set(); let debits=0;
   const store={
     async admitRequest(id) { calls.push(['admit',id]); },
     async verifyUser(value) { calls.push(['verify',value]); return value==='invalid'?null:{id:user,identities:[{provider:'google'}]}; },
@@ -29,17 +30,39 @@ function fixture(overrides={}) {
     async signAudio(path,seconds) { calls.push(['sign',path,seconds]);return 'https://project.supabase.co/storage/v1/object/sign/recordings/private?token=test'; },
     async remove(id,key) {assert.equal(id,user);rows.delete(key);},
     async reserve(id,key,request,kind,hash,cost) {
+      if(cancelled.has(request))throw Object.assign(fail('Cancelled.',409),{jobState:'cancelled'});
       calls.push(['reserve',id,key,kind,cost]);const prior=jobs.get(request);
       if(prior){if(prior.hash!==hash||prior.recording!==key||prior.kind!==kind)throw fail('Request conflict.',409);return {state:prior.state,response:prior.response};}
       if([...jobs.values()].some(j=>j.state==='reserved'))throw fail('Another request is processing.',409);
-      debits++;jobs.set(request,{hash,recording:key,kind,state:'reserved'});return {state:'new'};
+      debits++;jobs.set(request,{hash,recording:key,user:id,kind,state:'reserved'});return {state:'new'};
     },
-    async finish(id,request,ok,response) {const job=jobs.get(request);Object.assign(job,{state:ok?'completed':'failed',response});},
+    async finish(id,request,ok,response) {const job=jobs.get(request);if(job.state==='reserved')Object.assign(job,{state:ok?'completed':'failed',response});},
+    async completeRequest(id,request,response) {
+      const job=jobs.get(request);
+      if(job?.state==='cancelled')throw Object.assign(fail('Cancelled.',409),{jobState:'cancelled'});
+      if(job)Object.assign(rows.get(job.recording),job.kind==='coach'?{status:'analyzed',transcript:response.transcript,report:response}:{status:'transcribed',transcript:response.text,duration_seconds:response.durationSeconds,report:null});
+      await store.finish(id,request,true,response);return response;
+    },
+    async cancelRequest(id,key,request) {
+      const job=jobs.get(request),row=rows.get(key);
+      if(row?.user_id!==id)throw fail('Not found.',404);
+      if(job&&(job.user!==id||job.recording!==key))throw fail('Not found.',404);
+      if(!job){cancelled.add(request);return {state:'cancelled',kind:null};}
+      if(job.state==='reserved')job.state='cancelled';
+      return {state:job.state,kind:job.kind};
+    },
+    async requestStatus(id,request) {
+      calls.push(['requestStatus',id,request]);
+      const job=jobs.get(request),row=rows.get(job?.recording);
+      if(!job&&overrides.store?.reserve)return {state:'reserved'};
+      if (!job || job.user!==id || row?.user_id!==id || row.status==='deleting') throw fail('This recording was not found.',404);
+      return {recording_id:job.recording,kind:job.kind,state:job.state,created_at:'2026-10-26T00:00:00Z',finished_at:job.state==='reserved'?null:'2026-10-26T00:01:00Z',response:job.response};
+    },
     async events(id,events) {calls.push(['events',id,events]);return events.length;},
     ...overrides.store,
   };
   const app=createHostedApi({store,env:{...env,...overrides.env},policyText,
-    fetchImpl:async(url,options)=>{calls.push(['fetch',url,options]);return Response.json({text:'Um, we should expand tutoring.',durationSeconds:1,model:'bark-3.0-plus',chunks:[]});},
+    fetchImpl:async(url,options)=>{calls.push(['fetch',url,options]);return Response.json(url.endsWith('/cancel')?{cancelled:true}:{text:'Um, we should expand tutoring.',durationSeconds:1,model:'bark-3.0-plus',chunks:[]});},
     coach:async options=>{calls.push(['coach',options]);return {thesis:{summary:'Expand tutoring.',clarity:'An explicit claim.',evidence:['We should expand tutoring.']}};},...overrides,store,env:{...env,...overrides.env}});
   async function call(path,{method='GET',body,auth=token(),headers={}}={}) {
     return app(new Request('https://project.supabase.co/functions/v1/rehearsal-api'+path,{method,headers:{Origin:origin,...(auth?{Authorization:`Bearer ${auth}`} : {}),...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},body:body===undefined?undefined:JSON.stringify(body)}));
@@ -50,6 +73,108 @@ const transcribe={method:'POST',body:{recordingId:recording,requestId}};
 const analyze={method:'POST',body:{recordingId:recording,requestId,text:'We should expand tutoring.',targetTalkingPoints:'Expand tutoring',durationSeconds:600}};
 const streamHeaders={Accept:'application/x-ndjson'};
 const frames=async response=>(await response.text()).trim().split('\n').map(line=>JSON.parse(line));
+
+test('refresh polling recovers a disconnected batch request without a second paid admission',async()=>{
+  for (const kind of ['transcribe','coach']) {
+    let release;const wait=new Promise(resolve=>{release=resolve;});
+    const f=fixture(kind==='transcribe'
+      ? {fetchImpl:async()=>{await wait;return Response.json({text:'Recovered transcript.',durationSeconds:1,model:'bark-3.0-plus'});}}
+      : {coach:async()=>{await wait;return {thesis:{summary:'Tutoring.',clarity:'Clear.',evidence:['We should expand tutoring.']}};}});
+    const response=await f.call(kind==='transcribe'?'/transcribe':'/analyze-text',{...(kind==='transcribe'?transcribe:analyze),headers:streamHeaders});
+    assert.equal(response.status,200);await response.body.cancel();
+    const pending=await (await f.call('/requests/'+requestId)).json();
+    assert.deepEqual(pending,{requestId,recordingId:recording,kind,state:'reserved',createdAt:'2026-10-26T00:00:00Z',finishedAt:null,result:null});
+    release();await new Promise(setImmediate);
+    const finished=await (await f.call('/requests/'+requestId)).json();
+    assert.equal(finished.state,'completed');assert.deepEqual(finished.result,JSON.parse(JSON.stringify(f.jobs.get(requestId).response)));
+    assert.equal(f.debits,1);assert.equal(f.calls.filter(call=>call[0]==='reserve').length,1);
+    assert.equal(f.calls.filter(call=>call[0]==='requestStatus').length,3);
+    assert.doesNotMatch(JSON.stringify(finished),/private-worker|private-coach|input_hash|reserved_microusd/);
+  }
+});
+
+test('request recovery enforces sign-in, exact owner, valid IDs and deletion visibility',async()=>{
+  const f=fixture();await f.call('/transcribe',transcribe);
+  assert.equal((await f.call('/requests/'+requestId,{auth:null})).status,401);
+  assert.equal((await f.call('/requests/not-an-id')).status,400);
+  assert.equal((await f.call('/requests/'+other)).status,404);
+  assert.equal((await f.call('/requests/'+requestId+'?user='+user)).status,400);
+  f.jobs.get(requestId).user=other;
+  assert.equal((await f.call('/requests/'+requestId)).status,404);
+  f.jobs.get(requestId).user=user;f.rows.get(recording).status='deleting';
+  assert.equal((await f.call('/requests/'+requestId)).status,404);
+  assert.equal(f.debits,1);
+});
+
+test('explicit cancellation aborts running speech and coaching and preserves the saved take',async()=>{
+  for(const kind of ['transcribe','coach']) {
+    let begun,aborted=false,requests=0;const started=new Promise(resolve=>{begun=resolve;});
+    const waitForAbort=signal=>new Promise((_resolve,reject)=>{
+      requests++;begun();signal.addEventListener('abort',()=>{aborted=true;reject(signal.reason);},{once:true});
+    });
+    const f=fixture({cancellationPollMs:5,
+      fetchImpl:async(url,options)=>{
+        if(url.endsWith('/cancel')){assert.deepEqual(JSON.parse(options.body),{requestId:`${user}:${requestId}`});return Response.json({cancelled:true});}
+        assert.equal(options.headers['X-Rehearsal-Request'],`${user}:${requestId}`);return waitForAbort(options.signal);
+      },coach:async options=>waitForAbort(options.signal)});
+    const before=JSON.stringify(f.rows.get(recording));
+    const response=await f.call(kind==='transcribe'?'/transcribe':'/analyze-text',{...(kind==='transcribe'?transcribe:analyze),headers:streamHeaders});
+    await started;
+    const cancelled=await f.call(`/requests/${requestId}/cancel`,{method:'POST',body:{recordingId:recording}});
+    assert.deepEqual(await cancelled.json(),{requestId,recordingId:recording,cancelled:true,state:'cancelled'});
+    const events=await frames(response);assert.equal(events.at(-1).jobState,'cancelled');
+    assert.equal(aborted,true);assert.equal(requests,1);assert.equal(f.jobs.get(requestId).state,'cancelled');
+    assert.equal(JSON.stringify(f.rows.get(recording)),before);assert.equal(f.debits,1);
+    assert.equal(events.some(event=>event.stage==='saved'),false);
+  }
+});
+
+test('late provider output cannot overwrite saved content even before cancellation polling runs',async()=>{
+  let begun,release;const started=new Promise(resolve=>{begun=resolve;}),waiting=new Promise(resolve=>{release=resolve;});
+  const f=fixture({coach:async()=>{begun();await waiting;return {thesis:{summary:'Late feedback.',clarity:'Clear.',evidence:['We should expand tutoring.']}};}});
+  const before=JSON.stringify(f.rows.get(recording)),response=await f.call('/analyze-text',{...analyze,headers:streamHeaders});await started;
+  await f.call(`/requests/${requestId}/cancel`,{method:'POST',body:{recordingId:recording}});release();
+  assert.equal((await frames(response)).at(-1).jobState,'cancelled');
+  assert.equal(JSON.stringify(f.rows.get(recording)),before);assert.equal(f.jobs.get(requestId).state,'cancelled');
+});
+
+test('cancel before admission prevents paid work and cancellation cannot spoof another owner',async()=>{
+  const f=fixture(),path=`/requests/${requestId}/cancel`,options={method:'POST',body:{recordingId:recording}};
+  assert.equal((await f.call(path,{...options,auth:null})).status,401);
+  assert.equal((await f.call(path,{...options,body:{...options.body,userId:other}})).status,400);
+  assert.equal((await f.call(path,{...options,body:{recordingId:other}})).status,404);
+  assert.equal((await f.call(path,options)).status,200);
+  const response=await f.call('/transcribe',transcribe);
+  assert.equal(response.status,409);assert.equal((await response.json()).jobState,'cancelled');assert.equal(f.debits,0);
+  assert.equal(f.calls.some(call=>call[0]==='fetch'&&!call[1].endsWith('/cancel')),false);
+});
+
+test('cancelling an already completed request retains its exact result and saved recording',async()=>{
+  const f=fixture();const result=await(await f.call('/analyze-text',analyze)).json(),before=JSON.stringify(f.rows.get(recording));
+  const cancelled=await(await f.call(`/requests/${requestId}/cancel`,{method:'POST',body:{recordingId:recording}})).json();
+  assert.equal(cancelled.state,'completed');assert.equal(JSON.stringify(f.rows.get(recording)),before);
+  assert.deepEqual((await(await f.call('/requests/'+requestId)).json()).result,result);assert.equal(f.debits,1);
+});
+
+test('unconfirmed speech cancellation is retryable without reviving or recharging the request',async()=>{
+  let attempts=0;const f=fixture({fetchImpl:async(url)=>{assert.ok(url.endsWith('/cancel'));return ++attempts===1?Response.json({error:'private failure'},{status:503}):Response.json({cancelled:true});}});
+  const path=`/requests/${requestId}/cancel`,options={method:'POST',body:{recordingId:recording}};
+  const first=await f.call(path,options);assert.equal(first.status,503);assert.match((await first.json()).error,/not confirmed stopping/);
+  assert.equal((await f.call('/transcribe',transcribe)).status,409);assert.equal(f.debits,0);
+  assert.equal((await f.call(path,options)).status,200);assert.equal(attempts,2);assert.equal(f.debits,0);
+});
+
+test('failed and expired recovery expose no stale result or private job fields',async()=>{
+  for (const state of ['reserved','failed','expired']) {
+    const f=fixture({store:{requestStatus:async(id,key)=>{
+      assert.equal(id,user);assert.equal(key,requestId);
+      return {recording_id:recording,kind:'coach',state,created_at:'created',finished_at:null,response:{private:'incomplete'},input_hash:'private-hash',reserved_microusd:500000,user_id:other};
+    }}});
+    const response=await f.call('/requests/'+requestId);assert.equal(response.status,200);
+    assert.deepEqual(await response.json(),{requestId,recordingId:recording,kind:'coach',state,createdAt:'created',finishedAt:null,result:null});
+    assert.equal(f.debits,0);assert.equal(f.calls.some(call=>['reserve','fetch','coach'].includes(call[0])),false);
+  }
+});
 
 test('progress streams report real checkpoints and cached retries invoke no extra model calls',async()=>{
   for(const [path,options,expected] of [
@@ -132,7 +257,7 @@ test('streaming retains request and audio concurrency guards through disconnecte
 });
 
 test('all app routes enforce distributed admission before data access or paid calls',async()=>{
-  const paths=[['/config','GET'],['/recordings','GET'],['/recordings','POST'],['/recordings/'+recording,'GET'],['/recordings/'+recording,'DELETE'],['/events','POST'],['/transcribe','POST'],['/analyze-text','POST'],['/live-sessions','POST'],['/live-sessions/'+recording,'GET'],['/live-sessions/'+recording,'DELETE'],['/live-sessions/'+recording+'/prepare','POST'],['/live-sessions/'+recording+'/chunks/0','POST'],['/live-sessions/'+recording+'/finish','POST']];
+  const paths=[['/config','GET'],['/requests/'+requestId,'GET'],['/recordings','GET'],['/recordings','POST'],['/recordings/'+recording,'GET'],['/recordings/'+recording,'DELETE'],['/events','POST'],['/transcribe','POST'],['/analyze-text','POST'],['/live-sessions','POST'],['/live-sessions/'+recording,'GET'],['/live-sessions/'+recording,'DELETE'],['/live-sessions/'+recording+'/prepare','POST'],['/live-sessions/'+recording+'/chunks/0','POST'],['/live-sessions/'+recording+'/finish','POST']];
   for(const stage of ['global','user'])for(const [path,method] of paths) {
     const admissions=[];
     const f=fixture({store:{admitRequest:async id=>{admissions.push(id);if(stage==='global'||id)throw Object.assign(fail('Too many requests.',429),{retryAfter:60});}}});
@@ -265,10 +390,29 @@ test('admission failures and uncertain persistence never advertise a terminal jo
     assert.notEqual(result.status,200);assert.equal((await result.json()).jobState,undefined);
   }
 });
+
+test('known pre-admission refusals clear recovery state while uncertain failures retain it',async()=>{
+  for(const message of ['request_busy','daily_limit','budget_exhausted']) {
+    const backing=createSupabaseStore({async rpc(){return {error:{message}};}}),f=fixture({store:{reserve:backing.reserve}});
+    const response=await f.call('/transcribe',transcribe);
+    assert.ok([409,429].includes(response.status));assert.equal((await response.json()).jobState,'not_started');
+    assert.equal(f.jobs.size,0);assert.equal(f.debits,0);assert.equal(f.calls.some(call=>call[0]==='fetch'),false);
+  }
+  for(const options of [
+    {...transcribe,body:{...transcribe.body,unsupported:true}},
+    {...analyze,body:{...analyze.body,text:'!!!'}},
+  ]) {
+    const f=fixture(),response=await f.call(options.body.text?'/analyze-text':'/transcribe',options);
+    assert.equal(response.status,400);assert.equal((await response.json()).jobState,'not_started');assert.equal(f.debits,0);
+  }
+  const uncertain=fixture({store:{reserve:async()=>{throw new Error('Admission reply lost');}}});
+  const response=await uncertain.call('/transcribe',transcribe);
+  assert.equal(response.status,503);assert.equal((await response.json()).jobState,undefined);
+});
 test('concurrent duplicate requests cannot trigger a second upstream operation',async()=>{
   let release;const wait=new Promise(r=>{release=r;});let started;
   const begin=new Promise(r=>{started=r;});const f=fixture({fetchImpl:async()=>{started();await wait;return Response.json({text:'Hello there.',durationSeconds:1,model:'bark-3.0-plus'});}});
-  const first=f.call('/transcribe',transcribe);await begin;assert.equal((await f.call('/transcribe',transcribe)).status,409);release();assert.equal((await first).status,200);assert.equal(f.debits,1);
+  const first=f.call('/transcribe',transcribe);await begin;const retry=await f.call('/transcribe',transcribe);assert.equal(retry.status,409);assert.equal((await retry.json()).jobState,undefined);release();assert.equal((await first).status,200);assert.equal(f.debits,1);
 });
 test('coaching uses saved duration, retains all preparation inputs, and returns the existing report schema',async()=>{
   const f=fixture();const body={...analyze.body,targetScript:'Support tutoring.',plannedIntroduction:'Hello students.',plannedTransitions:'Next, costs.',instructorRubric:'Explain the claim.',rubricFileName:'Rubric.docx'};

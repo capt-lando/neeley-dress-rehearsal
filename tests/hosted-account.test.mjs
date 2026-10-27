@@ -11,7 +11,7 @@ const accountSource = (await readFile(new URL('../public/hosted-account.js', imp
   .replace(/^import .*\r?\n/gm, '').replace(/^export /gm, '').replaceAll('import.meta.env', 'undefined');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity) } = {}) {
+function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), recoverPending, configurationFailed, configurationReady } = {}) {
   class Element {
     constructor(tagName = 'DIV') { this.tagName = tagName; this.listeners = new Map(); this.children = []; this.disabled = false; this.textContent = ''; }
     addEventListener(name, callback) { this.listeners.set(name, callback); }
@@ -51,7 +51,7 @@ function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription:
     fetch: () => { settingsCalls++; return settings.promise; } };
   vm.createContext(context);
   vm.runInContext(`${accountSource}\nglobalThis.install = installHostedAccount;`, context);
-  context.install(service, { accountChanged() {}, updateConfig() {}, canReplaceAudio: () => true, restoreRecording: value => restored.push(value), recordingDeleted() {} });
+  context.install(service, { accountChanged() {}, updateConfig() {}, recoverPending, configurationFailed, configurationReady, canReplaceAudio: () => true, restoreRecording: value => restored.push(value), recordingDeleted() {} });
   return { get, window, histories, signouts, opens, deletes, restored, oauth, settings, get settingsCalls() { return settingsCalls; }, changeUser(id) { identity = id ? { id } : null; return authChanged(identity); } };
 }
 
@@ -200,4 +200,40 @@ test('1,000 mixed Google and Microsoft sign-in callbacks share one availability 
   h.settings.resolve(Response.json({ external: { google: true, azure: true } })); await Promise.all(attempts);
   assert.equal(h.oauth.length, 1); assert.deepEqual(h.oauth[0], ['google', redirect]);
   assert.equal(h.get('sign-in-google').disabled, false); assert.equal(h.get('sign-in-microsoft').disabled, false);
+});
+
+test('signed-in startup automatically reconciles pending work before refreshing its history', async () => {
+  const pending = deferred(); let checks = 0;
+  const h = accountHarness({ recoverPending: async () => { checks++; await pending.promise; } });
+  await turn();
+  assert.equal(checks, 1); assert.equal(h.histories.length, 0);
+  pending.resolve(); await turn();
+  assert.equal(h.histories.length, 1);
+  h.histories[0].resolve({ recordings: [] }); await turn();
+});
+
+test('initial configuration failure reaches the main UI and retry reloads configuration before recovery', async () => {
+  const events = []; let offline = true;
+  const h = accountHarness({
+    getConfig: async () => { events.push('config'); if (offline) throw new Error('Offline'); return { liveTranscription: true }; },
+    configurationFailed: message => events.push(`failed:${message}`),
+    configurationReady: () => events.push('ready'), recoverPending: async () => events.push('recover'),
+  });
+  await turn();
+  assert.deepEqual(events, ['config', 'failed:Offline']); assert.equal(h.histories.length, 0);
+  offline = false;
+  const retry = h.window.rehearsalAccount.refresh(); await turn();
+  assert.deepEqual(events, ['config', 'failed:Offline', 'config', 'ready', 'recover']);
+  h.histories[0].resolve({ recordings: [] }); await retry;
+});
+
+test('an old account configuration failure cannot show a recovery error in the newer account', async () => {
+  const pending = deferred(), failures = []; let calls = 0;
+  const h = accountHarness({ getConfig: () => ++calls === 1 ? pending.promise : Promise.resolve({ liveTranscription: true }),
+    configurationFailed: message => failures.push(message) });
+  await turn();
+  const switched = h.changeUser('second-user'); await turn();
+  pending.reject(new Error('Old private account failed')); await turn();
+  assert.deepEqual(failures, []); assert.notEqual(h.get('account-status').textContent, 'Old private account failed');
+  h.histories[0].resolve({ recordings: [] }); await switched;
 });

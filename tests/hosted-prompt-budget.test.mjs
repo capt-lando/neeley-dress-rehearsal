@@ -25,6 +25,8 @@ function fixture() {
       return { state: 'new' };
     },
     async finish() {},
+    async requestStatus() { return {state:'reserved'}; },
+    async completeRequest(_owner,_request,result) { return result; },
     async update() {},
   };
   const app = createHostedApi({ store, policyText,

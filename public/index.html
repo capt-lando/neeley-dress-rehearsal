@@ -94,6 +94,7 @@
           </div>
           <strong class="record-action-label" id="record-action-label">Start your rehearsal</strong>
           <button class="pause-recording secondary-button small-button" id="pause-recording" type="button" hidden>Pause recording</button>
+          <button class="text-button cancel-recording" id="cancel-recording" type="button" hidden>Cancel and start over</button>
           <div class="timer-row"><span class="timer" id="timer">00:00</span><span class="timer-limit">/ 10:00</span></div>
           <div class="input-meter" role="meter" aria-label="Microphone input level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="input-level" aria-hidden="true">
             <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
@@ -131,7 +132,7 @@
             <ol class="processing-steps" id="processing-steps" aria-label="Rehearsal processing stages"></ol>
           </div>
           <button class="primary-button analyze-button" id="analyze-button">Analyze rehearsal <span aria-hidden="true">↗</span></button>
-          <button class="text-button cancel-analysis" id="cancel-analysis" hidden>Cancel analysis</button>
+          <button class="text-button cancel-analysis" id="cancel-analysis" type="button" hidden>Cancel and start over</button>
         </div>
         <div class="record-footer"><span>Already have a recording?</span><button class="text-button" id="upload-button">Upload audio <span aria-hidden="true">↑</span></button><input type="file" id="audio-upload" accept="audio/*,.wav,.mp3,.m4a,.ogg,.webm,.flac" hidden></div>
         <details class="saved-recordings" id="saved-recordings-details">
@@ -147,8 +148,12 @@
         </details>
       </section>
     </div>
-    <p class="privacy-note"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span id="privacy-copy">Speech is transcribed in your browser. Completed recordings save only in this browser; clearing site data or private browsing can remove them. Your key, scripts, and transcripts stay in this tab’s memory. Analyze sends your transcript and preparation text to your chosen AI provider. Audio and full rubric files stay on this device.</span></p>
     <div id="app-status" class="app-status" role="status" aria-live="polite" hidden></div>
+    <div id="cloud-recovery" class="app-status" role="status" aria-live="polite" hidden>
+      <span id="cloud-recovery-message"></span>
+      <button id="cloud-recovery-retry" class="text-button" type="button" hidden>Retry recovery</button>
+      <button id="cloud-recovery-cancel" class="text-button" type="button" hidden>Cancel and start over</button>
+    </div>
 
     <section id="report" class="report" aria-labelledby="report-title" hidden>
       <div class="report-topline"><p class="eyebrow"><span class="small-line"></span> FEEDBACK</p><span id="report-source" class="report-source"></span></div>
@@ -189,6 +194,15 @@
     <p class="model-attribution">Speech recognition: <a href="https://huggingface.co/ConwayResearch/Underdog-Bark-3.0" target="_blank" rel="noopener noreferrer">Bark 3.0 by Conway Research</a>.<br>Based on <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3" target="_blank" rel="noopener noreferrer">NVIDIA Corporation’s parakeet-tdt-0.6b-v3</a> and <a href="https://huggingface.co/moondream/parakeet-ultra" target="_blank" rel="noopener noreferrer">Moondream’s parakeet-ultra</a>.<br>ONNX conversions: <a href="https://huggingface.co/ai-ecoverse/Underdog-Bark-3.0-ONNX" target="_blank" rel="noopener noreferrer">ai-ecoverse</a> &amp; <a href="https://huggingface.co/velddev/Underdog-Bark-3.0-Plus-sherpa-onnx" target="_blank" rel="noopener noreferrer">velddev</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a></p>
   </footer>
 
+  <dialog id="cancel-restart-dialog" aria-labelledby="cancel-restart-title" aria-describedby="cancel-restart-description">
+    <div class="dialog-heading"><h2 id="cancel-restart-title">Cancel and start over?</h2></div>
+    <p id="cancel-restart-description" class="support-text">This stops the current recording or processing request and clears this take from the screen. Saved rehearsals remain available.</p>
+    <p id="cancel-restart-status" class="settings-status" role="status" aria-live="polite"></p>
+    <div class="cancel-restart-actions">
+      <button id="cancel-restart-keep" class="secondary-button" type="button" autofocus>Keep working</button>
+      <button id="cancel-restart-confirm" class="primary-button" type="button">Yes, cancel and start over</button>
+    </div>
+  </dialog>
   <dialog id="account-dialog" aria-labelledby="account-title">
     <div class="dialog-heading"><div><p class="eyebrow">YOUR REHEARSALS</p><h2 id="account-title">Sign in</h2></div><button class="icon-button" id="account-close" type="button" aria-label="Close account">×</button></div>
     <p class="support-text">Sign in to save private rehearsals and receive cloud transcription and coaching. No personal AI key or speech-model download is needed.</p>

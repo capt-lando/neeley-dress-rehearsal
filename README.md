@@ -6,6 +6,10 @@ A minimal presentation practice app for Neeley students. Record an English rehea
 
 Ongoing development focuses on the web app. The pilot has one free experience for everyone, with no paid tiers or admin dashboard. See [project direction](PROJECT-DIRECTION.md), [cloud setup](docs/cloud-pilot.md), and [cost research](docs/cloud-costs.md). Microsoft login is not a claim of institutionally approved TCU SSO.
 
+In cloud mode, refreshing automatically reconnects to this tab's pending transcription or coaching request after sign-in. Recovery reads the existing request without submitting another paid job, then restores its saved recording and result. A live recording interrupted by refresh is canceled; any audio already saved is restored. Audio still held only in the interrupted page cannot be recovered. Only request identifiers are kept in this tab's recovery marker, and every recovery or cancellation is checked against the authenticated account on the server. If recovery cannot connect, the page offers **Retry recovery**.
+
+Signed-in audio uploads automatically save and transcribe after file-signature, size, decoding, and duration checks. Coaching still starts with **Analyze**. **Cancel and start over** is available during capture, processing, and recovery; a separate confirmation dialog prevents an accidental repeat click. Confirming cancels the current request and clears the current take from the screen while preserving saved rehearsals. The speech worker stops matching inference, and canceled jobs cannot publish late results.
+
 ## Codex plugin and custom panel (paused)
 
 Plugin development and distribution updates are paused at version 0.2.1. Website updates do not rebuild, publish, or change the installed plugin. The existing source and released ZIP remain available; the instructions below describe that edition.

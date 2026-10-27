@@ -18,6 +18,7 @@ app = modal.App("neeley-bark-speech")
 @app.function(image=image, gpu="L4", cpu=2, memory=8192,
               max_containers=1, scaledown_window=60, timeout=150,
               secrets=[modal.Secret.from_name("neeley-bark-worker")])
+@modal.concurrent(max_inputs=8)
 @modal.asgi_app(requires_proxy_auth=True)
 def speech():
     from server import create_app

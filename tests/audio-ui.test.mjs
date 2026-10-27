@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { createLiveTranscription } from '../lib/live-transcription.mjs';
 import { createHostedLiveSession } from '../lib/hosted-live.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
+import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
 import { analyzeSpeech, sanitizeAiFeedback } from '../lib/analysis-core.mjs';
 import { BARK_MODEL_ID, BARK_MODEL_LABEL, BARK_MODELS, BARK_CLEAN_ID } from '../lib/speech-models.mjs';
 
@@ -103,7 +104,7 @@ function deferred() {
 
 function response(value) { return value; }
 
-function harness(requestImpl = async () => { throw new Error('Unexpected browser-service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
+function harness(requestImpl = async () => { throw new Error('Unexpected browser-service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
   const elements = new Map();
   const missingIds = [];
   let ownerDocument;
@@ -143,7 +144,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
-    BARK_MODEL_ID, BARK_MODELS, createProcessingProgress,
+    BARK_MODEL_ID, BARK_MODELS, createProcessingProgress, validateAudioUploadHeader: validateUploadHeader,
     document: {
       getElementById: id => {
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
@@ -172,7 +173,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
       rehearsalRecordings: recordingStore,
     },
     Option: class { constructor(label, value) { this.label = label; this.value = value; } },
-    Blob, Uint8Array, Float32Array, ArrayBuffer, DataView, Math, Date, AbortController, DOMException,
+    Blob, Uint8Array, Float32Array, ArrayBuffer, DataView, Math, Date, AbortController, AbortSignal, DOMException,
     URL: {
       createObjectURL: blob => { const url = `blob:rehearsal-${++blobCounter}`; objectUrls.set(url, blob); return url; },
       revokeObjectURL: value => revoked.push(value),
@@ -189,7 +190,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   vm.runInContext(`${startup ? executableAppSource : declarations}
 globalThis.audioTest = {
   state, updateConfig, saveSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
-  startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession,
+  startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession, openCancelRestart, confirmCancelRestart, closeCancelRestart,
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript,
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
   analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, setBusy,
@@ -239,7 +240,7 @@ function cloudLiveSpeech(h, { recognize = async (_audio, index) => ['Um, practic
       async request(path, settings) {
         calls.push({ path, ...settings });
         if (path === '/live-sessions') return { recordingId: id };
-        if (settings.method === 'DELETE') return { recordingId: id, cancelled: true };
+        if (path.endsWith('/cancel')) return { recordingId: id, cancelled: true };
         if (path.endsWith('/prepare')) { await prepare(); return { ready: true }; }
         if (path.includes('/chunks/')) {
           const sequence = Number(path.split('/').at(-1));
@@ -269,7 +270,6 @@ test('hosted recording and replay never run local inference, upload audio, or sa
   await nextTurn();
   assert.deepEqual(requests, ['/api/config']);
   assert.match(h.get('audio-save-status').textContent, /This take is in this tab/);
-  assert.match(h.get('privacy-copy').textContent, /saves your recording, transcript, and feedback privately/);
   assert.equal(h.get('saved-recordings-details').hidden, true);
   assert.equal(h.get('cloud-recordings-details').hidden, false);
 });
@@ -290,7 +290,6 @@ test('hosted live recording uses ten-second cloud segments, excludes pauses, and
   assert.equal(h.get('follow-transcript').textContent, 'Um, practice helps.');
   assert.equal(h.state.transcriptText, '', 'draft segments cannot be used for coaching');
   assert.match(h.get('follow-transcript-status').textContent, /10-second/);
-  assert.match(h.get('privacy-copy').textContent, /recording sends 10-second audio segments/);
   h.captureRecordingSamples(new Float32Array(4800).fill(-0.25), 48000);
   h.stopRecording(); const finishing = h.state.livePromise;
   await nextTurn();
@@ -492,14 +491,14 @@ test('uploaded audio saves the prepared mono WAV rather than the original file',
 });
 
 test('cloud audio upload sends only newly encoded 16 kHz mono PCM, never the selected file or its metadata', async () => {
-  const metadata = 'ID3 private artist and embedded artwork <script>doNotSend()</script>';
+  const metadata = 'ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000private artist and embedded artwork <script>doNotSend()</script>';
   const original = new File([metadata], 'original.mp3', { type: 'audio/mpeg' });
   let sent;
   const h = harness(async (path, options) => {
     assert.equal(path, '/api/transcribe'); sent = options.body;
     assert.equal(options.headers['Content-Type'], 'audio/wav');
     return { text: 'Practice helps.', durationSeconds: 1, recordingId: 'owned' };
-  }, { decodeAudioData: async bytes => {
+  }, { validateUploadHeader: validateAudioUploadHeader, decodeAudioData: async bytes => {
     assert.equal(new TextDecoder().decode(bytes), metadata);
     return { duration: 1, sampleRate: 48000, length: 48000, numberOfChannels: 2, getChannelData: channel => new Float32Array(48000).fill(channel ? 0.5 : 0.25) };
   } });
@@ -542,7 +541,7 @@ test('unknown, unavailable or timed-out metadata preserves valid uploads and the
       decodeAudioData: async () => { decodes++; return { duration: metadata === 'understated' ? 601 : 1, sampleRate: 16000, length: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) }; },
     });
     const opening = h.uploadAudio(new File(['valid audio'], 'recording.webm'));
-    if (metadata === 'timeout') h.flushTimers();
+    if (metadata === 'timeout') { await nextTurn(); h.flushTimers(); }
     await opening;
     assert.equal(decodes, 1, metadata);
     if (metadata === 'understated') {
@@ -558,6 +557,7 @@ test('changing accounts cancels metadata work before file read and ignores its l
   const h = harness(undefined, { audioMetadata: audio => { lateMetadata = audio.listeners.get('loadedmetadata')[0]; } });
   h.updateConfig(hostedConfig); h.window.rehearsalHostedActions.accountChanged('first-user');
   const opening = h.uploadAudio({ name: 'private.wav', size: 10, arrayBuffer() { reads++; throw new Error('Must not read'); } });
+  await nextTurn();
   h.window.rehearsalHostedActions.accountChanged('second-user');
   await opening; lateMetadata(); h.flushTimers();
   assert.equal(reads, 0); assert.equal(h.state.audioBlob, null); assert.equal(h.state.busy, false);
@@ -1769,11 +1769,13 @@ test('local speech needs no coaching key and progress plus cancellation reach th
   assert.equal(h.get('follow-transcript-status').textContent, 'Downloading English speech model: 42%');
   assert.equal(h.get('cancel-analysis').hidden, false);
   h.get('cancel-analysis').listeners.get('click')[0]();
+  assert.equal(transcriptionSignal.aborted, false, 'the first click only opens confirmation');
+  await h.confirmCancelRestart();
   assert.equal(transcriptionSignal.aborted, true);
   pending.reject(Object.assign(new Error('Cancelled'), { name: 'AbortError' }));
   await assert.rejects(result, { name: 'AbortError' });
   assert.equal(h.get('cancel-analysis').hidden, true);
-  assert.equal(h.state.audioBlob.size, 'private recording'.length);
+  assert.equal(h.state.audioBlob, null);
   assert.equal(h.state.transcriptText, '');
 });
 
@@ -2046,8 +2048,6 @@ test('Codex settings apply only the speech model and never show a provider-key m
   });
   h.updateConfig(config);
   assert.equal(h.get('connection-label').textContent, 'Codex coaching');
-  assert.match(h.get('privacy-copy').textContent, /current Codex conversation/);
-  assert.doesNotMatch(h.get('privacy-copy').textContent, /API key|OpenAI|Claude|Gemini/);
   h.get('analysis-api-key').value = 'must-not-be-used';
   h.get('analysis-model').value = 'must-not-be-used';
   h.get('transcription-model').value = BARK_MODEL_ID;
@@ -2210,4 +2210,143 @@ test('stopping coaching ignores late progress and a late successful payload from
   assert.equal(h.get('processing-progress').dataset.state, 'cancelled');
   assert.ok(!timelineStates(h).includes('current'));
   assert.equal(h.state.busy, false);
+});
+
+test('refresh recovery locks new work, restores saved transcript, and then releases controls', async () => {
+  const h = harness(); h.updateConfig(hostedConfig);
+  const pending = deferred(), marker = { recordingId: 'recover-id', kind: 'transcribe' };
+  h.window.rehearsalService.getPendingRequest = async () => marker;
+  h.window.rehearsalService.recoverPending = async (_marker, options) => { options.onProgress('Still transcribing…'); return pending.promise; };
+  h.window.rehearsalHostedActions.accountChanged('first-user');
+  const recovery = h.window.rehearsalHostedActions.recoverPending(); await nextTurn();
+  assert.equal(h.get('record-button').disabled, true);
+  assert.equal(h.window.rehearsalHostedActions.canReplaceAudio(), false);
+  assert.equal(h.get('cloud-recovery-message').textContent, 'Still transcribing…');
+  pending.resolve({ record: { id: 'recover-id', blob: new Blob(['saved audio']), durationSeconds: 1, transcript: 'Recovered words.' }, message: 'Transcript restored.' });
+  await recovery;
+  assert.equal(h.state.transcriptText, 'Recovered words.'); assert.equal(h.state.cloudRecordingId, 'recover-id');
+  assert.equal(h.get('record-button').disabled, false); assert.equal(h.state.recoveryController, null);
+  assert.equal(h.get('cloud-recovery-message').textContent, 'Transcript restored.');
+});
+
+test('configuration failure releases the startup lock and its visible retry reconnects before checking pending work', async () => {
+  const h = harness(async () => hostedConfig, { startup: true }); await nextTurn();
+  let checked = 0, reconnected = 0; const pending = deferred();
+  h.window.rehearsalService.getPendingRequest = async () => { checked++; return null; };
+  h.window.rehearsalHostedActions.accountChanged('first-user');
+  assert.equal(h.get('record-button').disabled, true);
+  h.window.rehearsalHostedActions.configurationFailed('Offline');
+  assert.equal(h.get('record-button').disabled, false); assert.equal(h.state.recoveryPending, false);
+  assert.equal(h.get('cloud-recovery').hidden, false); assert.equal(h.get('cloud-recovery-retry').hidden, false);
+  assert.match(h.get('cloud-recovery-message').textContent, /Offline/);
+  h.window.rehearsalAccount = { async refresh() {
+    reconnected++; await pending.promise;
+    h.window.rehearsalHostedActions.configurationReady();
+    await h.window.rehearsalHostedActions.recoverPending();
+  } };
+  const retry = h.get('cloud-recovery-retry').click();
+  assert.equal(reconnected, 1); assert.equal(checked, 0); assert.equal(h.get('record-button').disabled, true);
+  await h.get('cloud-recovery-retry').click(); assert.equal(reconnected, 1);
+  pending.resolve(); await retry;
+  assert.equal(checked, 1); assert.equal(h.state.recoveryNeedsConfig, false);
+  assert.equal(h.get('cloud-recovery').hidden, true); assert.equal(h.get('record-button').disabled, false);
+  assert.equal(h.get('cloud-recovery-retry').disabled, false);
+});
+
+test('an old account recovery can never restore private audio, text, report, or preparation after account switch', async () => {
+  const h = harness(); h.updateConfig(hostedConfig); const pending = deferred();
+  h.window.rehearsalService.getPendingRequest = async () => ({ recordingId: 'private-a', kind: 'coach' });
+  let recoverySignal;
+  h.window.rehearsalService.recoverPending = async (_marker, { signal }) => { recoverySignal = signal; return pending.promise; };
+  h.window.rehearsalHostedActions.accountChanged('first-user');
+  const recovery = h.window.rehearsalHostedActions.recoverPending(); await nextTurn();
+  h.window.rehearsalHostedActions.accountChanged('second-user');
+  assert.equal(recoverySignal.aborted, true);
+  pending.resolve({ record: { id: 'private-a', blob: new Blob(['private audio']), durationSeconds: 1, transcript: 'Private words.', report: { private: true, meta: { targetScript: 'Private preparation' } } }, message: 'Private result' });
+  await recovery;
+  assert.equal(h.state.audioBlob, null); assert.equal(h.state.transcriptText, ''); assert.equal(h.state.report, null);
+  assert.equal(h.get('target-script').value, ''); assert.equal(h.get('cloud-recovery').hidden, true);
+  assert.notEqual(h.get('cloud-recovery-message').textContent, 'Private result');
+});
+
+test('recovery errors show a retry and late results cannot overwrite newer local work', async () => {
+  const h = harness(); h.updateConfig(hostedConfig);
+  h.window.rehearsalService.getPendingRequest = async () => ({ recordingId: 'recover-id', kind: 'transcribe' });
+  h.window.rehearsalService.recoverPending = async () => { throw new Error('Connection unavailable. Retry recovery.'); };
+  h.window.rehearsalHostedActions.accountChanged('first-user');
+  await h.window.rehearsalHostedActions.recoverPending();
+  assert.equal(h.get('cloud-recovery-retry').hidden, false); assert.equal(h.state.busy, false);
+  const pending = deferred(); h.window.rehearsalService.recoverPending = () => pending.promise;
+  const recovery = h.window.rehearsalHostedActions.recoverPending(); await nextTurn();
+  const newer = new Blob(['new take']); h.setAudio(newer, 1, 'New take');
+  pending.resolve({ record: { id: 'recover-id', blob: new Blob(['old']), durationSeconds: 1, transcript: 'Old words' }, message: 'Old result' });
+  await recovery;
+  assert.equal(h.state.audioBlob, newer); assert.equal(h.state.transcriptText, '');
+  assert.notEqual(h.get('cloud-recovery-message').textContent, 'Old result');
+});
+
+test('cancel and start over requires a separate moved-pointer confirmation and discards capture without autosaving', async () => {
+  const h = harness(); h.updateConfig(hostedConfig); let canceled = 0;
+  h.window.rehearsalService.cancelCurrentRequest = async () => { canceled++; return { cancelled: true }; };
+  await h.enableMic(); await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000);
+  assert.equal(h.get('cancel-recording').hidden, false);
+  h.openCancelRestart({ clientX: 100, clientY: 150, detail: 1 });
+  assert.equal(h.get('cancel-restart-dialog').open, true);
+  assert.equal(h.document.activeElement, h.get('cancel-restart-keep'));
+  await h.confirmCancelRestart({ detail: 1 });
+  assert.equal(canceled, 0); assert.equal(h.state.recording, true);
+  h.state.cancelConfirmation.moved = true;
+  await h.confirmCancelRestart({ detail: 1 });
+  assert.equal(canceled, 1); assert.equal(h.state.recording, false); assert.equal(h.state.samples.length, 0);
+  assert.equal(h.state.audioBlob, null); assert.equal(h.storageCalls.save.length, 0); assert.equal(h.state.stream, null);
+  assert.equal(h.get('cancel-restart-dialog').open, false); assert.equal(h.get('record-button').disabled, false);
+  assert.equal(h.document.activeElement, h.get('record-button'));
+});
+
+test('failed cancellation keeps captured samples paused and requires an acknowledged retry before reset', async () => {
+  const h = harness(); h.updateConfig(hostedConfig); let succeed = false;
+  h.window.rehearsalService.cancelCurrentRequest = async () => { if (!succeed) throw new Error('Offline'); return { cancelled: true }; };
+  await h.enableMic(); await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000);
+  h.openCancelRestart(); await h.confirmCancelRestart();
+  assert.equal(h.state.sampleCount, 16000); assert.equal(h.state.recording, true); assert.equal(h.state.recordingPaused, true);
+  assert.equal(h.get('cancel-restart-dialog').open, true); assert.match(h.get('cancel-restart-status').textContent, /could not be confirmed/);
+  assert.equal(h.get('cancel-restart-confirm').textContent, 'Retry cancellation');
+  succeed = true; await h.confirmCancelRestart();
+  assert.equal(h.state.sampleCount, 0); assert.equal(h.state.recording, false); assert.equal(h.state.audioBlob, null);
+});
+
+test('canceling processing retains saved history, clears current playback, and suppresses late results', async () => {
+  const pending = deferred();
+  const h = harness(() => pending.promise); h.updateConfig(hostedConfig);
+  h.window.rehearsalService.cancelCurrentRequest = async () => ({ cancelled: true });
+  const saved = { id: 'existing-saved-take', blob: new Blob(['saved']) }; h.savedRecords.set(saved.id, saved);
+  h.setAudio(saved.blob, 1, 'Saved take');
+  const processing = h.ensureTranscript().catch(error => error);
+  h.openCancelRestart(); await h.confirmCancelRestart();
+  pending.resolve({ recordingId: saved.id, text: 'Late result.', durationSeconds: 1 }); await processing;
+  assert.equal(h.state.audioBlob, null); assert.equal(h.state.transcriptText, ''); assert.equal(h.state.report, null);
+  assert.equal(h.savedRecords.get(saved.id), saved); assert.equal(h.storageCalls.remove.length, 0);
+});
+
+test('validated signed-in uploads transcribe automatically without requesting coaching', async () => {
+  const calls = [];
+  const h = harness(async (path, options) => { calls.push(path); assert.equal(path, '/api/transcribe'); assert.equal(options.body.type, 'audio/wav'); return { text: 'Uploaded speech.', durationSeconds: 1, recordingId: 'uploaded-id' }; }, {
+    validateUploadHeader: validateAudioUploadHeader,
+    decodeAudioData: async () => ({ duration: 1, sampleRate: 16000, length: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) }),
+  });
+  h.updateConfig(hostedConfig);
+  await h.uploadAudio(new File([Buffer.from('RIFF0000WAVEdata0000')], 'valid.wav', { type: 'audio/wav' }));
+  assert.deepEqual(calls, ['/api/transcribe']); assert.equal(h.state.transcriptText, 'Uploaded speech.');
+  assert.equal(h.state.cloudRecordingId, 'uploaded-id'); assert.equal(h.state.report, null);
+});
+
+test('executable or HTML uploads never reach native decoding, metadata playback, or cloud processing', async () => {
+  for (const bytes of ['MZ executable disguised as audio', '<html><script>malicious</script></html>']) {
+    let decoded = 0, metadata = 0, sent = 0;
+    const h = harness(async () => { sent++; }, { validateUploadHeader: validateAudioUploadHeader,
+      audioMetadata: () => { metadata++; }, decodeAudioData: async () => { decoded++; } });
+    h.updateConfig(hostedConfig); await h.uploadAudio(new File([bytes], 'recording.wav', { type: 'audio/wav' }));
+    assert.equal(decoded, 0); assert.equal(metadata, 0); assert.equal(sent, 0); assert.equal(h.state.audioBlob, null);
+    assert.match(h.get('app-status').textContent, /not a supported audio recording/);
+  }
 });

@@ -16,7 +16,7 @@ function progressResponse(run, headers, release) {
     try { send({type:'result',data:await run(stage=>send({type:'progress',stage}))}); }
     catch(error) {
       send({type:'error',error:error?.safe?error.message:'The service could not complete this request.',status:error?.safe?error.status:503,
-        ...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})});
+        ...(error?.safe&&['failed','cancelled'].includes(error.jobState)?{jobState:error.jobState}:{})});
     } finally {
       if(!closed){closed=true;controller.close();}
       release();
@@ -115,7 +115,7 @@ async function hash(value) { return [...new Uint8Array(await crypto.subtle.diges
 function metadata(row) { return {id:row.id,title:row.title,createdAt:row.created_at,durationSeconds:row.duration_seconds,sizeBytes:row.size_bytes,status:row.status}; }
 
 /** All data access uses a verified server-derived user ID; store is injectable for tests. */
-export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, now=Date.now }) {
+export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, now=Date.now, cancellationPollMs=2000 }) {
   const enterRequest=createRequestLimit({now});
   // Whole recordings can occupy several buffers; keep those operations below
   // the isolate memory ceiling while small UI requests can still proceed.
@@ -148,43 +148,86 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
   }
   async function paid(user,recordingId,requestId,kind,input,cost,run,deliver) {
     if (!cost) throw fail('The pilot service is not configured yet.',503);
-    const job=await store.reserve(user.id,recordingId,requestId,kind,await hash(input),cost);
+    let job;
+    try { job=await store.reserve(user.id,recordingId,requestId,kind,await hash(input),cost); }
+    catch(error) { if(error?.safe&&error.notStarted===true)error.jobState='not_started';throw error; }
     if (job.state==='completed') return deliver(async emit=>{emit('cached_result');return job.response;});
     if (job.state!=='new') {
+      if (job.state==='cancelled') throw cancellationError();
       const error=fail(job.state==='reserved'?'This request is still processing.':'This request already failed. Start a new request to retry.',409);
       if (job.state==='failed') error.jobState='failed';
       throw error;
     }
     return deliver(async emit=>{
       let completionStarted=false;
+      const watching=watchCancellation(user.id,requestId);
       try {
         emit('accepted');
-        const result=await run(emit);
+        await watching.ready;watching.signal.throwIfAborted();
+        const result=await run(emit,watching.signal);
+        watching.signal.throwIfAborted();watching.close();
         completionStarted=true;
-        await store.finish(user.id,requestId,true,result);
+        const saved=await store.completeRequest(user.id,requestId,result);
         emit('saved');
-        return result;
+        return saved;
       } catch (error) {
-        const failure=error?.safe?error:fail('The service could not complete this request.',503);
+        const failure=watching.signal.aborted?watching.signal.reason:error?.safe?error:fail('The service could not complete this request.',503);
         try {
           await store.finish(user.id,requestId,false,null);
           // A lost completion acknowledgement might already have committed success.
-          if (!completionStarted) failure.jobState='failed';
+          if (!completionStarted && failure.jobState!=='cancelled') failure.jobState='failed';
         } catch { /* Preserve the request ID while persisted job state is uncertain. */ }
         throw failure;
-      }
+      } finally { watching.close(); }
     });
   }
-  async function liveWorker(path, audio) {
+  function cancellationError() { return Object.assign(fail('This request was cancelled. You can start another rehearsal.',409),{jobState:'cancelled'}); }
+  function watchCancellation(user,request) {
+    const controller=new AbortController();let stopped=false,timer;
+    const poll=async()=>{
+      try {
+        const job=await store.requestStatus(user,request);
+        if (!stopped && job?.state!=='reserved') controller.abort(cancellationError());
+      } catch(error) {
+        if(!stopped)controller.abort(error?.safe?error:fail('Processing status could not be checked. Your recording is saved.',503));
+      } finally {
+        if(!stopped&&!controller.signal.aborted)timer=setTimeout(poll,cancellationPollMs);
+      }
+    };
+    return {signal:controller.signal,ready:poll(),close(){stopped=true;clearTimeout(timer);}};
+  }
+  const workerHeaders=()=>({Authorization:`Bearer ${env.BARK_WORKER_TOKEN}`,
+    ...(env.BARK_WORKER_MODAL_KEY?{'Modal-Key':env.BARK_WORKER_MODAL_KEY,'Modal-Secret':env.BARK_WORKER_MODAL_SECRET}:{})});
+  async function cancelSpeech(user,request) {
+    if(!worker)return;
+    try {
+      const response=await fetchImpl(new URL('cancel',worker).href,{method:'POST',redirect:'error',headers:{...workerHeaders(),'Content-Type':'application/json'},
+        body:JSON.stringify({requestId:`${user}:${request}`}),signal:AbortSignal.timeout(20000)});
+      if(!response.ok)throw new Error('Unconfirmed cancellation');
+      const result=JSON.parse(new TextDecoder().decode(await readLimited(response,1024,20000)));
+      if(result?.cancelled!==true)throw new Error('Unconfirmed cancellation');
+    } catch { throw fail('Your request is cancelled, but the speech service has not confirmed stopping. Try Cancel again.',503); }
+  }
+  async function liveWorker(path, audio, user, request) {
+    const watching=watchCancellation(user,request);
+    try {
+    await watching.ready;watching.signal.throwIfAborted();
     const response=await fetchImpl(new URL(path,worker).href,{method:'POST',redirect:'error',headers:{
-      Authorization:`Bearer ${env.BARK_WORKER_TOKEN}`,...(audio?{'Content-Type':'audio/wav'}:{}),
-      ...(env.BARK_WORKER_MODAL_KEY?{'Modal-Key':env.BARK_WORKER_MODAL_KEY,'Modal-Secret':env.BARK_WORKER_MODAL_SECRET}:{})},
-      ...(audio?{body:audio}:{}),signal:AbortSignal.timeout(125000)});
+      ...workerHeaders(),'X-Rehearsal-Request':`${user}:${request}`,...(audio?{'Content-Type':'audio/wav'}:{})},
+      ...(audio?{body:audio}:{}),signal:AbortSignal.any([watching.signal,AbortSignal.timeout(125000)])});
     if (!response.ok) throw fail('Live transcription is unavailable. Your recording remains in this tab; save and transcribe the complete take.',response.status===429?429:502);
     try { return JSON.parse(new TextDecoder().decode(await readLimited(response,512*1024))); }
     catch { throw fail('The speech worker returned an unreadable response.',502); }
+    } finally { watching.close(); }
   }
   async function liveAction(request,path,user) {
+    const cancellation=path.match(/^\/live-sessions\/([^/]+)\/cancel$/);
+    if (cancellation && request.method==='POST') {
+      const body=await jsonBody(request);exact(body,['requestId']);
+      const id=uuid(cancellation[1]),result=await store.liveCancel(user.id,id,uuid(body.requestId));
+      if(result.status==='cancelled')await cancelSpeech(user.id,body.requestId);
+      return {recordingId:id,cancelled:true,status:result.status,audioSaved:result.audio_saved===true};
+    }
     if (!worker || !liveCost) throw fail('Live cloud transcription is not configured yet.',503);
     if (path==='/live-sessions' && request.method==='POST') {
       const body=await jsonBody(request); exact(body,['recordingId','requestId','title']);
@@ -200,7 +243,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       const session=await store.liveGet(user.id,id);
       return {recordingId:id,status:session.status,ready:session.prepare_state==='completed',nextSequence:session.next_sequence,transcript:session.transcript,expiresAt:session.expires_at};
     }
-    if (!action && request.method==='DELETE') { await store.liveClose(user.id,id,true); return {recordingId:id,cancelled:true}; }
+    if (!action && request.method==='DELETE') { const session=await store.liveGet(user.id,id);await store.liveClose(user.id,id,true);await cancelSpeech(user.id,session.request_id);return {recordingId:id,cancelled:true}; }
     if (request.method!=='POST') throw fail('This live rehearsal action does not exist.',404);
     if (action==='prepare') {
       if ((await readLimited(request,0)).length) throw fail('Preparation does not accept a request body.');
@@ -208,7 +251,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       if (claim.state==='completed') return {recordingId:id,ready:true,model:'bark-3.0-plus'};
       if (claim.state!=='new') throw fail('The speech model is still preparing. Please wait.',409);
       try {
-        const result=await liveWorker('prepare');
+        const session=await store.liveGet(user.id,id),result=await liveWorker('prepare',null,user.id,session.request_id);
         if (result.ready!==true || result.model!=='bark-3.0-plus') throw fail('The speech worker could not prepare the model.',502);
         await store.livePrepared(user.id,id);
         return {recordingId:id,ready:true,model:'bark-3.0-plus'};
@@ -230,7 +273,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       if (claim.state!=='completed') {
         if (claim.state!=='new') throw fail('This section is still processing. Retry the same section after it finishes.',409);
         try {
-          const result=await liveWorker('transcribe-live',audio);
+          const session=await store.liveGet(user.id,id),result=await liveWorker('transcribe-live',audio,user.id,session.request_id);
           if (result.model!=='bark-3.0-plus' || typeof result.text!=='string' || result.text.length>60000 || typeof result.durationSeconds!=='number' || Math.abs(result.durationSeconds-durationSeconds)>1/16000) throw fail('The speech worker returned an invalid live transcript.',502);
           text=(await store.liveChunkDone(user.id,id,sequence,result.text.trim())).text;
         } catch (error) {
@@ -262,7 +305,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     const headers={'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Vary':'Origin'};
     if (origins.has(origin)) headers['Access-Control-Allow-Origin']=origin;
     const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers});
-    let release,releaseAudio;
+    let release,releaseAudio,validatingBatch=false;
     const deliver=async run=>{
       if(request.headers.get('accept')!=='application/x-ndjson') return json(await run(()=>{}));
       const releaseRequest=release,releaseWork=releaseAudio;
@@ -292,6 +335,20 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
           transcriptionModel:'bark-3.0-plus',providers:[],maxDurationSeconds:600,maxAudioBytes:MAX_AUDIO});
       }
       const user=await identify(request);
+      const cancelRequest=path.match(/^\/requests\/([^/]+)\/cancel$/);
+      if(cancelRequest&&request.method==='POST'){
+        const body=await jsonBody(request);exact(body,['recordingId']);
+        const id=uuid(cancelRequest[1]),recordingId=uuid(body.recordingId),job=await store.cancelRequest(user.id,recordingId,id);
+        if(job.state==='cancelled'&&job.kind!=='coach')await cancelSpeech(user.id,id);
+        return json({requestId:id,recordingId,cancelled:true,state:job.state});
+      }
+      const requestStatus=path.match(/^\/requests\/([^/]+)$/);
+      if (requestStatus && request.method==='GET') {
+        const id=uuid(requestStatus[1]),job=await store.requestStatus(user.id,id);
+        if (!job) throw fail('This request was not found.',404);
+        return json({requestId:id,recordingId:job.recording_id,kind:job.kind,state:job.state,
+          createdAt:job.created_at,finishedAt:job.finished_at,result:job.state==='completed'?job.response:null});
+      }
       if(request.method==='POST'&&(path==='/transcribe'||/^\/recordings\/[^/]+\/audio$/.test(path)||/^\/live-sessions\/[^/]+\/finish$/.test(path))) releaseAudio=enterAudio();
       if (path==='/live-sessions' || path.startsWith('/live-sessions/')) return json(await liveAction(request,path,user));
       if (request.method==='GET' && path==='/recordings') return json({recordings:(await store.list(user.id)).map(metadata)});
@@ -331,31 +388,31 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       }
       if (request.method==='POST' && path==='/events') return json({accepted:await store.events(user.id,validateEvents(await jsonBody(request)))});
       if (request.method==='POST' && ['/transcribe','/analyze-text'].includes(path)) {
+        validatingBatch=true;
         const body=await jsonBody(request),id=uuid(body.recordingId),requestId=uuid(body.requestId);
         const row=await store.owned(user.id,id);
         if (!row || row.status==='deleting') throw fail('This recording was not found.',404);
         if (path==='/transcribe') {
           exact(body,['recordingId','requestId']);
           if (!worker || !speechCost) throw fail('Cloud speech is not configured yet.',503);
-          return await paid(user,id,requestId,'transcribe',{recordingId:id},speechCost,async emit=>{
+          validatingBatch=false;
+          return await paid(user,id,requestId,'transcribe',{recordingId:id},speechCost,async (emit,signal)=>{
             const blob=await store.audio(row.storage_path);
             if (blob.size!==row.size_bytes || blob.size>MAX_AUDIO) throw fail('The stored audio does not match this recording. Upload it again.');
             const audio=await blob.arrayBuffer(),durationSeconds=inspectHostedWav(audio);
             emit('audio_validated');
-            await store.update(user.id,id,{status:'transcribing'});
             try {
+              signal.throwIfAborted();
               emit('speech_requested');
-              const response=await fetchImpl(worker,{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${env.BARK_WORKER_TOKEN}`,'Content-Type':'audio/wav',
-                ...(env.BARK_WORKER_MODAL_KEY?{'Modal-Key':env.BARK_WORKER_MODAL_KEY,'Modal-Secret':env.BARK_WORKER_MODAL_SECRET}:{})},body:audio,signal:AbortSignal.timeout(125000)});
+              const response=await fetchImpl(worker,{method:'POST',redirect:'error',headers:{...workerHeaders(),'Content-Type':'audio/wav','X-Rehearsal-Request':`${user.id}:${requestId}`},body:audio,signal:AbortSignal.any([signal,AbortSignal.timeout(125000)])});
               if (!response.ok) throw fail('Cloud transcription is unavailable. Try again shortly.',response.status===429?429:502);
               let result; try { result=JSON.parse(new TextDecoder().decode(await readLimited(response,512*1024))); } catch { throw fail('The speech worker returned an unreadable response.',502); }
               if (result.model!=='bark-3.0-plus' || typeof result.text!=='string' || !result.text.trim() || result.text.length>60000 || typeof result.durationSeconds!=='number' || Math.abs(result.durationSeconds-durationSeconds)>0.1) throw fail('The speech worker returned an invalid transcript.',502);
               emit('transcript_received');
               const output={text:result.text.trim(),durationSeconds,chunks:[],model:'bark-3.0-plus',localSpeech:false,recordingId:id};
-              await store.update(user.id,id,{status:'transcribed',transcript:output.text,duration_seconds:durationSeconds,report:null});
               return output;
             } catch (error) {
-              await store.update(user.id,id,{status:'failed'});
+              signal.throwIfAborted();
               if (error.safe) throw error;
               throw fail('Cloud transcription timed out or could not be reached. Your recording is saved.',502);
             }
@@ -366,29 +423,30 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         const input=analysisInput(body,row.duration_seconds);
         let prompt; try { prompt=buildAnalysisPrompt(input,policy); } catch { throw fail('Add a readable transcript and valid preparation text.'); }
         if (new TextEncoder().encode(prompt).byteLength>256*1024) throw fail('Shorten the script, rubric, or preparation notes.',413);
-        return await paid(user,id,requestId,'coach',input,coachCost,async emit=>{
+        validatingBatch=false;
+        return await paid(user,id,requestId,'coach',input,coachCost,async (emit,signal)=>{
           let feedback, coachingUsage;
           const coachingStarted=performance.now();
           emit('coach_requested');
-          try { feedback=await coach({provider,model,apiKey:env.COACHING_API_KEY,workspaceId:env.COACHING_WORKSPACE_ID,prompt,fetchImpl,browser:false,onUsage:usage=>{
+          try { feedback=await coach({provider,model,apiKey:env.COACHING_API_KEY,workspaceId:env.COACHING_WORKSPACE_ID,prompt,fetchImpl,browser:false,signal,onUsage:usage=>{
             coachingUsage={...usage,elapsedMs:Math.round(performance.now()-coachingStarted)};
             console.info(JSON.stringify({event:'coaching_usage',provider,model,...coachingUsage}));
           }}); }
-          catch { throw fail('The AI coach is unavailable. Your recording is saved; try again later.',502); }
+          catch { signal.throwIfAborted();throw fail('The AI coach is unavailable. Your recording is saved; try again later.',502); }
           emit('feedback_received');
           const report=analyzeSpeech({...input,aiFeedback:feedback});
           if (report.analysis.method!=='ai') throw fail('The AI coach returned an incomplete report. Your recording is saved.',502);
           emit('feedback_validated');
           const completion=coachingCompletion(report.analysis);
           const output={...report,transcript:input.text,warnings:completion.warnings,meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:completion.status,missingCoachingCriteria:completion.missingCriteria,localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
-          await store.update(user.id,id,{status:'analyzed',transcript:input.text,report:output});
           return output;
         },deliver);
       }
       throw fail('This app action does not exist.',404);
     } catch (error) {
+      if(validatingBatch&&error?.safe&&[400,404,409,413,415].includes(error.status))error.jobState='not_started';
       if(error?.safe&&error.retryAfter) headers['Retry-After']=String(Math.min(60,Math.max(1,Math.ceil(Number(error.retryAfter)||60))));
-      return json({error:error?.safe?error.message:'The service could not complete this request.',...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})},error?.safe?error.status:503);
+      return json({error:error?.safe?error.message:'The service could not complete this request.',...(error?.safe&&['failed','cancelled','not_started'].includes(error.jobState)?{jobState:error.jobState}:{})},error?.safe?error.status:503);
     } finally { releaseAudio?.();release?.(); }
   };
 }

@@ -12,13 +12,15 @@ function wav(samples=160000) {
   b.writeUInt16LE(1,20);b.writeUInt16LE(1,22);b.writeUInt32LE(16000,24);b.writeUInt32LE(32000,28);b.writeUInt16LE(2,32);b.writeUInt16LE(16,34);b.write('data',36);b.writeUInt32LE(samples*2,40);return b;
 }
 function fixture({network,store:extra={},env:settings={}}={}) {
-  const calls=[];let session=null,audio=wav(),debits=0;
+  const calls=[];let session=null,audio=wav(),debits=0,cancelled=false;
   function owned(owner,key) {assert.equal(owner,user);if(key!==id||!session)throw fail('Not found.',404);return session;}
   const store={
     async admitRequest(){},
     async verifyUser(value){return value===token?{id:user,identities:[{provider:'google'}]}:null;},async profile(){},
     async liveStart(owner,key,request,title,hash,cost){assert.equal(owner,user);assert.equal(key,id);assert.equal(request,requestId);assert.equal(cost,300000);calls.push('reserve');
-      if(!session){debits++;session={status:'active',prepare_state:'idle',next_sequence:0,chunks:[],transcript:'',expires_at:'2026-10-27T12:12:00Z',storage_path:`${user}/${id}/audio.wav`};}return session;},
+      if(cancelled)throw fail('This live rehearsal ended.',409);
+      if(!session){debits++;session={request_id:requestId,status:'active',prepare_state:'idle',next_sequence:0,chunks:[],transcript:'',expires_at:'2026-10-27T12:12:00Z',storage_path:`${user}/${id}/audio.wav`};}return session;},
+    async requestStatus(owner,request){assert.equal(owner,user);assert.equal(request,requestId);return {state:session?.status==='active'?'reserved':session?.status==='completed'?'completed':'failed'};},
     async liveGet(owner,key){return owned(owner,key);},
     async livePrepare(owner,key){const s=owned(owner,key);if(s.status!=='active')throw fail('Ended.',409);const state=s.prepare_state;if(state==='idle')s.prepare_state='reserved';return {state:state==='idle'?'new':state};},
     async livePrepared(owner,key){const s=owned(owner,key);if(s.status!=='active')throw fail('Ended.',409);s.prepare_state='completed';},
@@ -28,6 +30,8 @@ function fixture({network,store:extra={},env:settings={}}={}) {
       s.chunks.push({state:'reserved',hash,samples,final});s.final=final;return {state:'new'};},
     async liveChunkDone(owner,key,seq,text){const s=owned(owner,key);if(s.status!=='active')throw fail('Ended.',409);Object.assign(s.chunks[seq],{state:'completed',text});s.next_sequence++;s.transcript=s.chunks.map(c=>c.text||'').filter(Boolean).join(' ');return s.chunks[seq];},
     async liveClose(owner,key,cancel=false){const s=owned(owner,key);if(s.status==='active')s.status=cancel?'cancelled':'failed';},
+    async liveCancel(owner,key,request){assert.equal(owner,user);if(key!==id)throw fail('Not found.',404);if(request!==requestId)throw fail('Conflict.',409);
+      cancelled=true;if(session?.status==='active')session.status='cancelled';return {status:session?.status||'cancelled',audio_saved:false};},
     async owned(owner,key){owned(owner,key);return {status:'pending',storage_path:`${user}/${id}/audio.wav`};},
     async audio(path){assert.equal(path,`${user}/${id}/audio.wav`);return new Blob([audio]);},
     async liveFinish(owner,key,duration,size){const s=owned(owner,key);calls.push('finish');assert.equal(size,audio.length);assert.equal(duration,(size-44)/32000);
@@ -35,7 +39,7 @@ function fixture({network,store:extra={},env:settings={}}={}) {
     ...extra,
   };
   const env={ALLOWED_ORIGINS:origin,BARK_WORKER_URL:'https://worker.example/transcribe',BARK_WORKER_ALLOWED_HOSTS:'worker.example',BARK_WORKER_TOKEN:'worker-secret',BARK_WORKER_MODAL_KEY:'proxy-key',BARK_WORKER_MODAL_SECRET:'proxy-secret',BARK_RESERVE_MICROUSD:'75000',BARK_LIVE_RESERVE_MICROUSD:'300000',...settings};
-  const app=createHostedApi({store,env,policyText,fetchImpl:async(url,options)=>{calls.push({url,options});if(network)return network(url,options);return Response.json(url.endsWith('/prepare')?{ready:true,model:'bark-3.0-plus'}:{text:'Um, practice helps.',durationSeconds:(options.body.byteLength-44)/32000,model:'bark-3.0-plus'});}});
+  const app=createHostedApi({store,env,policyText,fetchImpl:async(url,options)=>{calls.push({url,options});if(url.endsWith('/cancel'))return Response.json({cancelled:true});if(network)return network(url,options);return Response.json(url.endsWith('/prepare')?{ready:true,model:'bark-3.0-plus'}:{text:'Um, practice helps.',durationSeconds:(options.body.byteLength-44)/32000,model:'bark-3.0-plus'});}});
   const call=(path,{method='POST',body,raw,final=false,auth=token,headers={}}={})=>app(new Request('https://project.supabase.co/functions/v1/rehearsal-api'+path,{method,headers:{Origin:origin,...(auth?{Authorization:`Bearer ${auth}`}:{ } ),...(raw?{'Content-Type':'audio/wav'}:body?{'Content-Type':'application/json'}:{}),...(final?{'X-Rehearsal-Final':'true'}:{}),...headers},...(raw?{body:raw}:body?{body:JSON.stringify(body)}:{})}));
   const start=()=>call('/live-sessions',{body:{recordingId:id,requestId,title:'Live practice'}});
   const prepare=()=>call(`/live-sessions/${id}/prepare`);
@@ -49,6 +53,38 @@ test('live session reserves once, warms only once, and keeps worker credentials 
   const requests=f.calls.filter(c=>c.url);assert.equal(requests.length,1);assert.equal(requests[0].url,'https://worker.example/prepare');
   assert.equal(requests[0].options.headers['Modal-Secret'],'proxy-secret');assert.equal(requests[0].options.body,undefined);assert.equal(requests[0].options.redirect,'error');
   assert.ok(f.calls.indexOf('reserve')<f.calls.indexOf(requests[0]));assert.doesNotMatch(JSON.stringify(await(await f.start()).json()),/secret|proxy-key/);
+});
+
+test('refresh cancellation closes the exact request regardless of whether start arrived first',async()=>{
+  for(const startFirst of [true,false]) {
+    const f=fixture();if(startFirst)await f.start();
+    const response=await f.call(`/live-sessions/${id}/cancel`,{body:{requestId}});
+    assert.equal(response.status,200);assert.deepEqual(await response.json(),{recordingId:id,cancelled:true,status:'cancelled',audioSaved:false});
+    assert.equal((await f.start()).status,409);
+    assert.equal((await f.call(`/live-sessions/${id}/cancel`,{body:{requestId}})).status,200);
+    assert.equal(f.debits,startFirst?1:0);assert.equal(f.calls.some(c=>c.url&&!c.url.endsWith('/cancel')),false);
+  }
+});
+
+test('refresh cancellation requires verified ownership and exact IDs even when speech is disabled',async()=>{
+  const f=fixture({env:{BARK_LIVE_RESERVE_MICROUSD:''}}),path=`/live-sessions/${id}/cancel`;
+  assert.equal((await f.call(path,{auth:null,body:{requestId}})).status,401);
+  assert.equal((await f.call(path,{body:{requestId,userId:other}})).status,400);
+  assert.equal((await f.call(path,{body:{requestId:other}})).status,409);
+  assert.equal((await f.call(`/live-sessions/${other}/cancel`,{body:{requestId}})).status,404);
+  assert.equal((await f.call(path,{body:{requestId:'invalid'}})).status,400);
+  assert.equal((await f.call(path,{body:{requestId}})).status,200);
+  assert.equal(f.debits,0);
+});
+
+test('refresh cancellation returns saved-audio presence and preserves a completed session',async()=>{
+  const f=fixture({store:{liveCancel:async(owner,key,request)=>{
+    assert.equal(owner,user);assert.equal(key,id);assert.equal(request,requestId);
+    return {status:'completed',audio_saved:true,transcript:'private content omitted'};
+  }}});
+  const response=await f.call(`/live-sessions/${id}/cancel`,{body:{requestId}});
+  assert.deepEqual(await response.json(),{recordingId:id,cancelled:true,status:'completed',audioSaved:true});
+  assert.equal(f.debits,0);
 });
 test('live routes reject anonymous, foreign-owner, unknown fields, and disabled configuration before worker calls',async()=>{
   const f=fixture();assert.equal((await f.call('/live-sessions',{auth:null,body:{recordingId:id,requestId}})).status,401);

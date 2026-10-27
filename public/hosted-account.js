@@ -42,6 +42,7 @@ export function installHostedAccount(service, actions) {
   };
   async function refresh(authIdentity) {
     const own = ++generation;
+    let configured = false;
     try {
       const identity = authIdentity === undefined ? await service.getIdentity() : authIdentity;
       if (own !== generation || disposed) return;
@@ -61,14 +62,23 @@ export function installHostedAccount(service, actions) {
       const config = await service.request('/api/config');
       if (own !== generation || disposed) return;
       actions.updateConfig(config);
+      configured = true;
+      actions.configurationReady?.();
       liveTranscription = Boolean(config.liveTranscription);
       dialog.querySelector('.key-privacy-note p').textContent = (liveTranscription
         ? 'While signed in, recording sends 10-second audio segments for cloud transcription. Stop saves the complete recording and transcript privately. Replay does not upload audio. '
         : 'Create transcript or Analyze uploads and saves your recording, transcript, and resulting feedback privately. Recording and replay alone do not upload audio. ')
         + 'Coaching also sends your transcript and preparation text to our configured AI provider. Raw rubric files stay on your device.';
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
+      await actions.recoverPending?.();
+      if (own !== generation || disposed) return;
       if (user) await refreshHistory(); else { $('cloud-recordings-list').replaceChildren(); $('cloud-recordings-status').textContent = 'Sign in to see recordings saved privately to your account.'; }
-    } catch (error) { if (own === generation) status(error.message); }
+    } catch (error) {
+      if (own === generation && !disposed) {
+        status(error.message);
+        if (!configured) actions.configurationFailed?.(error.message);
+      }
+    }
   }
   async function refreshHistory() {
     const own = generation;
@@ -160,7 +170,7 @@ export function installHostedAccount(service, actions) {
   document.addEventListener('visibilitychange', visibility);
   const timer = setInterval(() => { updateView(); analytics.flush(); }, 15_000);
   const unsubscribe = service.onAuthChange(refresh);
-  window.rehearsalAccount = { open: show, refreshHistory, track: name => { analytics.track(name); analytics.flush(); } };
+  window.rehearsalAccount = { open: show, refresh: () => refresh(), refreshHistory, track: name => { analytics.track(name); analytics.flush(); } };
   window.addEventListener('pagehide', event => {
     if (event.persisted) { analytics.setView({ visible: false }); analytics.flush(); return; }
     disposed = true; generation++; clearInterval(timer); unsubscribe(); analytics.dispose();

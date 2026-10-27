@@ -24,8 +24,9 @@ function wav(seconds = 1) {
   bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
   return new Blob([bytes], { type: 'audio/wav' });
 }
-function fixture({ signedIn = true, handle } = {}) {
+function fixture({ signedIn = true, handle, recoveryStorage } = {}) {
   const calls = [], uploads = [], oauth = [];
+  if (!recoveryStorage) { const saved = new Map(); recoveryStorage = { getItem: key => saved.get(key) || null, setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) }; }
   let session = signedIn ? { access_token: 'private-session-token', user: { id: userId } } : null;
   let authHandler;
   const client = {
@@ -47,11 +48,13 @@ function fixture({ signedIn = true, handle } = {}) {
     if (call.path === '/transcribe') return response({ text: 'Um, practice helps.', durationSeconds: 1, chunks: [], model: 'bark-3.0-plus', localSpeech: false, recordingId: call.body.recordingId });
     if (call.path === '/analyze-text') return response({ analysis: { method: 'ai' } });
     if (call.path === '/config') return response({ auth: { signedIn: true }, analysisConfigured: true });
+    if (call.path.startsWith('/requests/') && call.path.endsWith('/cancel')) return response({ recordingId: call.body.recordingId, requestId: call.path.split('/')[2], cancelled: true, state: 'cancelled' });
+    if (call.path.endsWith('/cancel')) return response({ recordingId: call.path.split('/')[2], cancelled: true, status: 'cancelled', audioSaved: false });
     if (call.method === 'DELETE') return response({ deleted: true });
     throw new Error('Unexpected request');
   };
-  const service = createHostedService({ client, url, publishableKey, policyText, fetchImpl, uuid: randomUUID });
-  return { service, client, calls, uploads, oauth, authChange(value) { session = value; authHandler?.('SIGNED_IN', session); } };
+  const service = createHostedService({ client, url, publishableKey, policyText, fetchImpl, uuid: randomUUID, recoveryStorage });
+  return { service, client, calls, uploads, oauth, recoveryStorage, authChange(value) { session = value; authHandler?.('SIGNED_IN', session); } };
 }
 
 test('hosted configuration is off only when absent and rejects partial or secret configuration', () => {
@@ -409,4 +412,91 @@ test('failed live saving never finalizes a report and explicit cancelled-session
   assert.equal(result.recordingId,id);assert.equal(saved,1);
   assert.equal(f.calls.filter(call=>call.path==='/recordings').length,0);
   assert.equal(f.uploads.length,2);assert.equal(f.uploads[0].path,f.uploads[1].path);
+});
+
+test('paid requests persist only account-scoped IDs before sending and survive refresh without resubmitting', async () => {
+  let stored, paid = 0;
+  const f = fixture({ handle: call => {
+    if (call.path !== '/analyze-text') return;
+    paid++;
+    stored = JSON.parse(f.recoveryStorage.getItem(`neeley-pending:${url}:${userId}`));
+    assert.equal(stored.requestId, call.body.requestId);
+    assert.equal(stored.recordingId, call.body.recordingId);
+    assert.equal(stored.userId, userId);
+    assert.doesNotMatch(JSON.stringify(stored), /Private preparation|Private transcript|private-session-token/);
+    throw new TypeError('Response lost during refresh');
+  } });
+  const id = randomUUID();
+  await assert.rejects(f.service.request('/api/analyze-text', { body: { recordingId: id, text: 'Private transcript', targetScript: 'Private preparation' } }), /Response lost/);
+  const refreshed = fixture({ recoveryStorage: f.recoveryStorage });
+  assert.deepEqual(await refreshed.service.getPendingRequest(), stored);
+  assert.equal(refreshed.calls.length, 0); assert.equal(paid, 1);
+  await assert.rejects(refreshed.service.request('/api/analyze-text', { body: { recordingId: id, text: 'New request' } }), /Recover the previous request/);
+  assert.equal(refreshed.calls.length, 0);
+});
+
+test('unavailable recovery storage prevents paid requests and a successful response clears its marker', async () => {
+  const denied = fixture({ recoveryStorage: { getItem: () => null, setItem() { throw new Error('Denied'); }, removeItem() {} } });
+  await assert.rejects(denied.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Words' } }), /Allow session storage/);
+  assert.equal(denied.calls.length, 0);
+  const good = fixture();
+  await good.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Words' } });
+  assert.equal(await good.service.getPendingRequest(), null);
+});
+
+test('cancel uses the exact persisted request tombstone, aborts the client wait, and clears the marker only after acknowledgement', async () => {
+  const entered = deferred(), delayed = deferred(); let expected;
+  const f = fixture({ handle: async call => {
+    if (call.path === '/analyze-text') { expected = call.body; entered.resolve(); await delayed.promise; return response({ transcript: 'Too late', analysis: { method: 'ai' } }); }
+  } });
+  const processing = f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Words' } });
+  await entered.promise;
+  const result = await f.service.cancelCurrentRequest();
+  const cancel = f.calls.find(call => call.path.endsWith('/cancel'));
+  assert.equal(cancel.path, `/requests/${expected.requestId}/cancel`);
+  assert.deepEqual(cancel.body, { recordingId: expected.recordingId });
+  assert.equal(result.cancelled, true); assert.equal(await f.service.getPendingRequest(), null);
+  delayed.resolve(); await assert.rejects(processing, { name: 'AbortError' });
+  assert.equal(f.calls.filter(call => call.path === '/analyze-text').length, 1);
+});
+
+test('unconfirmed cancellation keeps its recovery marker and can be safely retried', async () => {
+  let failCancel = true;
+  const f = fixture({ handle: call => {
+    if (call.path === '/analyze-text') throw new TypeError('Response lost');
+    if (call.path.endsWith('/cancel') && failCancel) return response({ error: 'Temporary outage' }, 503);
+  } });
+  await assert.rejects(f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Words' } }));
+  const before = await f.service.getPendingRequest();
+  await assert.rejects(f.service.cancelCurrentRequest(), { status: 503 });
+  assert.deepEqual(await f.service.getPendingRequest(), { ...before, phase: 'cancelling' });
+  failCancel = false; await f.service.cancelCurrentRequest();
+  assert.equal(await f.service.getPendingRequest(), null);
+});
+
+test('refresh retries unconfirmed cancellation instead of trusting a cancelled job before the worker stops', async () => {
+  const original = fixture({ handle: call => {
+    if (call.path === '/analyze-text') throw new TypeError('Response lost');
+    if (call.path.endsWith('/cancel')) return response({ error: 'Worker has not confirmed stopping' }, 503);
+  } });
+  await assert.rejects(original.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Words' } }));
+  await assert.rejects(original.service.cancelCurrentRequest(), { status: 503 });
+  let stopped = false;
+  const refreshed = fixture({ recoveryStorage: original.recoveryStorage, handle: call => {
+    assert.ok(call.path.endsWith('/cancel'), 'cancellation recovery must not poll the already cancelled job or reopen audio');
+    if (!stopped) return response({ error: 'Worker has not confirmed stopping' }, 503);
+  } });
+  const marker = await refreshed.service.getPendingRequest(); assert.equal(marker.phase, 'cancelling');
+  await assert.rejects(refreshed.service.recoverPending(marker), { status: 503 });
+  assert.deepEqual(await refreshed.service.getPendingRequest(), marker);
+  stopped = true;
+  const result = await refreshed.service.recoverPending(marker);
+  assert.equal(result.state, 'cancelled'); assert.equal(result.record, null);
+  assert.match(result.message, /cancellation was confirmed/);
+  assert.equal(await refreshed.service.getPendingRequest(), null);
+  assert.equal(refreshed.calls.length, 2);
+  for (const call of refreshed.calls) {
+    assert.equal(call.path, `/requests/${marker.requestId}/cancel`);
+    assert.deepEqual(call.body, { recordingId: marker.recordingId });
+  }
 });

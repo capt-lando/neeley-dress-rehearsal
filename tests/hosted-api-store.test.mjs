@@ -46,6 +46,47 @@ test('distributed rate admission uses only server-derived identity and a safe re
   await assert.rejects(limited.admitRequest(),error=>error.safe&&error.status===429&&error.retryAfter===60);
 });
 
+test('refresh recovery reads through the restricted RPC with the verified owner and safe errors',async()=>{
+  const calls=[],result={recording_id:'recording',kind:'coach',state:'completed',response:{report:'saved'}};
+  const store=createSupabaseStore({async rpc(name,args){calls.push([name,args]);return {data:result};}});
+  assert.deepEqual(await store.requestStatus('verified-owner','request'),result);
+  assert.deepEqual(calls,[['rehearsal_get_request',{p_user:'verified-owner',p_request:'request'}]]);
+  for (const [message,status] of [['not_found',404],['database password=secret',503]]) {
+    const failed=createSupabaseStore({async rpc(){return {error:{message}};}});
+    await assert.rejects(failed.requestStatus('owner','request'),error=>error.safe&&error.status===status&&!error.message.includes('password'));
+  }
+});
+
+test('refresh cancellation passes only verified owner and exact request identity to the restricted RPC',async()=>{
+  let sent;const result={status:'cancelled',audio_saved:false};
+  const store=createSupabaseStore({async rpc(name,args){sent={name,args};return {data:result};}});
+  assert.deepEqual(await store.liveCancel('verified-owner','recording','request'),result);
+  assert.deepEqual(sent,{name:'rehearsal_live_cancel',args:{p_user:'verified-owner',p_recording:'recording',p_request:'request'}});
+  const limited=createSupabaseStore({async rpc(){return {error:{message:'recovery_limit'}};}});
+  await assert.rejects(limited.liveCancel('owner','recording','request'),error=>error.safe&&error.status===429);
+});
+
+test('batch cancel and atomic completion use restricted owner-scoped RPCs',async()=>{
+  const calls=[];const store=createSupabaseStore({async rpc(name,args){calls.push({name,args});return {data:{state:'cancelled'}};}});
+  await store.cancelRequest('owner','recording','request');await store.completeRequest('owner','request',{text:'Saved text.'});
+  assert.deepEqual(calls,[{name:'rehearsal_cancel_request',args:{p_user:'owner',p_recording:'recording',p_request:'request'}},
+    {name:'rehearsal_complete_request',args:{p_user:'owner',p_request:'request',p_response:{text:'Saved text.'}}}]);
+  const cancelled=createSupabaseStore({async rpc(){return {error:{message:'request_cancelled'}};}});
+  await assert.rejects(cancelled.completeRequest('owner','request',{}),error=>error.status===409&&error.jobState==='cancelled');
+});
+
+test('only definite reservation refusals prove a request was not started',async()=>{
+  for(const message of ['request_busy','daily_limit','budget_exhausted','request_conflict','private network failure']) {
+    const store=createSupabaseStore({async rpc(){return {error:{message}};}});
+    await assert.rejects(store.reserve('owner','recording','request','coach','hash',1),error=>{
+      assert.equal(error.notStarted,['request_busy','daily_limit','budget_exhausted'].includes(message)?true:undefined);return true;
+    });
+    await assert.rejects(store.liveFinish('owner','recording',1,32044),error=>error.notStarted===undefined);
+  }
+  const uncertain=createSupabaseStore({async rpc(){throw new Error('Lost admission response');}});
+  await assert.rejects(uncertain.reserve('owner','recording','request','coach','hash',1),error=>error.notStarted===undefined);
+});
+
 test('gateway audio storage uses a fixed private bucket and never overwrites a prior take',async()=>{
   const bytes=new Uint8Array([1,2,3]),calls=[];
   const store=createSupabaseStore({storage:{from(bucket){return {async upload(path,payload,options){calls.push({bucket,path,payload,options});return {data:{path}};}};}}});
