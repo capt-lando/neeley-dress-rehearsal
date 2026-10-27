@@ -11,7 +11,7 @@ const accountSource = (await readFile(new URL('../public/hosted-account.js', imp
   .replace(/^import .*\r?\n/gm, '').replace(/^export /gm, '').replaceAll('import.meta.env', 'undefined');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function accountHarness() {
+function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity) } = {}) {
   class Element {
     constructor(tagName = 'DIV') { this.tagName = tagName; this.listeners = new Map(); this.children = []; this.disabled = false; this.textContent = ''; }
     addEventListener(name, callback) { this.listeners.set(name, callback); }
@@ -30,9 +30,9 @@ function accountHarness() {
   let settingsCalls = 0;
   let identity = { id: 'first-user' }, authChanged;
   const service = {
-    getIdentity: async () => identity,
+    getIdentity: () => getIdentity(identity),
     request(path, options) {
-      if (path === '/api/config') return Promise.resolve({ liveTranscription: true });
+      if (path === '/api/config') return getConfig();
       const pending = deferred();
       if (path === '/api/recordings') histories.push(pending);
       else if (options?.method === 'DELETE') deletes.push(pending);
@@ -52,7 +52,7 @@ function accountHarness() {
   vm.createContext(context);
   vm.runInContext(`${accountSource}\nglobalThis.install = installHostedAccount;`, context);
   context.install(service, { accountChanged() {}, updateConfig() {}, canReplaceAudio: () => true, restoreRecording: value => restored.push(value), recordingDeleted() {} });
-  return { get, window, histories, signouts, opens, deletes, restored, oauth, settings, get settingsCalls() { return settingsCalls; }, changeUser(id) { identity = { id }; return authChanged(); } };
+  return { get, window, histories, signouts, opens, deletes, restored, oauth, settings, get settingsCalls() { return settingsCalls; }, changeUser(id) { identity = id ? { id } : null; return authChanged(identity); } };
 }
 
 test('enabled Google and Microsoft sign-in use public settings before the existing OAuth flow', async () => {
@@ -122,6 +122,49 @@ test('a new account gets a separate history request and ignores the old account 
   h.histories[1].resolve({ recordings: [] }); await changed;
   assert.equal(h.get('cloud-history-refresh').disabled, false);
   assert.equal(h.get('cloud-recordings-list').children.length, 0);
+});
+
+test('rendered history clears immediately when another account configuration or history stalls or fails', async () => {
+  for (const stalledStage of ['configuration', 'history']) {
+    const configPending = deferred(); let blockConfiguration = false;
+    const h = accountHarness({ getConfig: () => blockConfiguration ? configPending.promise : Promise.resolve({ liveTranscription: true }) });
+    await turn();
+    h.histories[0].resolve({ recordings: [{ id: 'private-a', title: 'Private account A rehearsal', durationSeconds: 1, createdAt: 0 }] });
+    await turn();
+    assert.equal(h.get('cloud-recordings-list').children.length, 1);
+    blockConfiguration = stalledStage === 'configuration';
+    const changed = h.changeUser('second-user'); await turn();
+    assert.equal(h.get('cloud-recordings-list').children.length, 0, 'old titles and buttons must disappear before new network work completes');
+    assert.equal(h.get('cloud-recordings-status').textContent, '');
+    if (blockConfiguration) {
+      assert.equal(h.histories.length, 1);
+      assert.equal(h.get('cloud-history-refresh').disabled, false);
+      configPending.reject(new Error('Configuration unavailable'));
+    } else {
+      assert.equal(h.histories.length, 2);
+      h.histories[1].reject(new Error('History unavailable'));
+    }
+    await changed;
+    assert.equal(h.get('cloud-recordings-list').children.length, 0, 'failure cannot restore previous-account metadata');
+  }
+});
+
+test('auth event clears prior account history without depending on a second identity lookup', async () => {
+  let identityReads = 0;
+  const h = accountHarness({ getIdentity: async identity => {
+    if (++identityReads > 1) throw new Error('Session lookup unavailable');
+    return identity;
+  } });
+  await turn();
+  h.histories[0].resolve({ recordings: [{ id: 'private-a', title: 'Private account A rehearsal', durationSeconds: 1, createdAt: 0 }] }); await turn();
+  assert.equal(h.get('cloud-recordings-list').children.length, 1);
+  const changed = h.changeUser('second-user'); await turn();
+  assert.equal(h.get('cloud-recordings-list').children.length, 0);
+  assert.equal(identityReads, 1, 'the supplied auth identity controls immediate privacy cleanup');
+  h.histories[1].resolve({ recordings: [] }); await changed;
+  await h.changeUser(null);
+  assert.equal(h.get('cloud-recordings-list').children.length, 0);
+  assert.equal(h.get('account-details').hidden, true);
 });
 
 test('1,000 sign-out callbacks send once and a failed sign-out releases the button for retry', async () => {

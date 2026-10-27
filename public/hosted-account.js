@@ -40,13 +40,17 @@ export function installHostedAccount(service, actions) {
     analytics.setConsent(enabled);
     analytics.flush();
   };
-  async function refresh() {
+  async function refresh(authIdentity) {
     const own = ++generation;
     try {
-      const identity = await service.getIdentity();
+      const identity = authIdentity === undefined ? await service.getIdentity() : authIdentity;
       if (own !== generation || disposed) return;
       if (identity?.id !== user?.id) {
         analytics.setConsent(false);
+        $('cloud-recordings-list').replaceChildren();
+        $('cloud-recordings-status').textContent = '';
+        historyRequest = null;
+        $('cloud-history-refresh').disabled = false;
         actions.accountChanged(identity?.id || '');
       }
       user = identity;
