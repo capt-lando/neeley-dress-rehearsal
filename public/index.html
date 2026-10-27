@@ -126,6 +126,10 @@
             </div>
             <p class="playback-help" id="playback-help">Drag to any moment. Use arrow keys for smaller steps.</p>
           </div>
+          <div class="processing-progress" id="processing-progress" hidden>
+            <div class="processing-summary"><span id="processing-status" role="status" aria-live="polite">Preparing your rehearsal…</span><span id="processing-elapsed" role="timer" aria-live="off" aria-label="Elapsed processing time">0:00 elapsed</span></div>
+            <ol class="processing-steps" id="processing-steps" aria-label="Rehearsal processing stages"></ol>
+          </div>
           <button class="primary-button analyze-button" id="analyze-button">Analyze rehearsal <span aria-hidden="true">↗</span></button>
           <button class="text-button cancel-analysis" id="cancel-analysis" hidden>Cancel analysis</button>
         </div>

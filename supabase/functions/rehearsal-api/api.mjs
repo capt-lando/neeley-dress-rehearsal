@@ -7,6 +7,26 @@ const MAX_AUDIO = 20 * 1024 * 1024;
 const EVENT_NAMES = ['session_started','section_engaged','recording_completed','analysis_requested','analysis_completed','analysis_failed'];
 const SECTIONS = ['prepare','rehearse','feedback'];
 export function fail(message, status = 400) { return Object.assign(new Error(message), { status, safe: true }); }
+function progressResponse(run, headers, release) {
+  let controller, closed=false;
+  const encoder=new TextEncoder();
+  const body=new ReadableStream({start(value){controller=value;},cancel(){closed=true;}});
+  const send=value=>{if(!closed)try{controller.enqueue(encoder.encode(JSON.stringify(value)+'\n'));}catch{closed=true;}};
+  const task=(async()=>{
+    try { send({type:'result',data:await run(stage=>send({type:'progress',stage}))}); }
+    catch(error) {
+      send({type:'error',error:error?.safe?error.message:'The service could not complete this request.',status:error?.safe?error.status:503,
+        ...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})});
+    } finally {
+      if(!closed){closed=true;controller.close();}
+      release();
+    }
+  })();
+  // Keep the admitted job and its guards alive after a client disconnects; its
+  // bounded provider call still saves once and can be recovered with the same ID.
+  globalThis.EdgeRuntime?.waitUntil(task);
+  return new Response(body,{headers:{...headers,'Content-Type':'application/x-ndjson','X-Accel-Buffering':'no'}});
+}
 function exact(value, keys) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw fail('The request contains unsupported fields.');
 }
@@ -126,30 +146,34 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     await store.profile(user.id);
     return {id:user.id};
   }
-  async function paid(user,recordingId,requestId,kind,input,cost,run) {
+  async function paid(user,recordingId,requestId,kind,input,cost,run,deliver) {
     if (!cost) throw fail('The pilot service is not configured yet.',503);
     const job=await store.reserve(user.id,recordingId,requestId,kind,await hash(input),cost);
-    if (job.state==='completed') return job.response;
+    if (job.state==='completed') return deliver(async emit=>{emit('cached_result');return job.response;});
     if (job.state!=='new') {
       const error=fail(job.state==='reserved'?'This request is still processing.':'This request already failed. Start a new request to retry.',409);
       if (job.state==='failed') error.jobState='failed';
       throw error;
     }
-    let completionStarted=false;
-    try {
-      const result=await run();
-      completionStarted=true;
-      await store.finish(user.id,requestId,true,result);
-      return result;
-    } catch (error) {
-      const failure=error?.safe?error:fail('The service could not complete this request.',503);
+    return deliver(async emit=>{
+      let completionStarted=false;
       try {
-        await store.finish(user.id,requestId,false,null);
-        // A lost completion acknowledgement might already have committed success.
-        if (!completionStarted) failure.jobState='failed';
-      } catch { /* Preserve the request ID while persisted job state is uncertain. */ }
-      throw failure;
-    }
+        emit('accepted');
+        const result=await run(emit);
+        completionStarted=true;
+        await store.finish(user.id,requestId,true,result);
+        emit('saved');
+        return result;
+      } catch (error) {
+        const failure=error?.safe?error:fail('The service could not complete this request.',503);
+        try {
+          await store.finish(user.id,requestId,false,null);
+          // A lost completion acknowledgement might already have committed success.
+          if (!completionStarted) failure.jobState='failed';
+        } catch { /* Preserve the request ID while persisted job state is uncertain. */ }
+        throw failure;
+      }
+    });
   }
   async function liveWorker(path, audio) {
     const response=await fetchImpl(new URL(path,worker).href,{method:'POST',redirect:'error',headers:{
@@ -239,6 +263,12 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     if (origins.has(origin)) headers['Access-Control-Allow-Origin']=origin;
     const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers});
     let release,releaseAudio;
+    const deliver=async run=>{
+      if(request.headers.get('accept')!=='application/x-ndjson') return json(await run(()=>{}));
+      const releaseRequest=release,releaseWork=releaseAudio;
+      release=releaseAudio=undefined;
+      return progressResponse(run,headers,()=>{releaseWork?.();releaseRequest?.();});
+    };
     try {
       release=enterRequest();
       if (!origins.has(origin)) throw fail('This origin is not allowed.',403);
@@ -307,17 +337,20 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         if (path==='/transcribe') {
           exact(body,['recordingId','requestId']);
           if (!worker || !speechCost) throw fail('Cloud speech is not configured yet.',503);
-          return json(await paid(user,id,requestId,'transcribe',{recordingId:id},speechCost,async()=>{
+          return await paid(user,id,requestId,'transcribe',{recordingId:id},speechCost,async emit=>{
             const blob=await store.audio(row.storage_path);
             if (blob.size!==row.size_bytes || blob.size>MAX_AUDIO) throw fail('The stored audio does not match this recording. Upload it again.');
             const audio=await blob.arrayBuffer(),durationSeconds=inspectHostedWav(audio);
+            emit('audio_validated');
             await store.update(user.id,id,{status:'transcribing'});
             try {
+              emit('speech_requested');
               const response=await fetchImpl(worker,{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${env.BARK_WORKER_TOKEN}`,'Content-Type':'audio/wav',
                 ...(env.BARK_WORKER_MODAL_KEY?{'Modal-Key':env.BARK_WORKER_MODAL_KEY,'Modal-Secret':env.BARK_WORKER_MODAL_SECRET}:{})},body:audio,signal:AbortSignal.timeout(125000)});
               if (!response.ok) throw fail('Cloud transcription is unavailable. Try again shortly.',response.status===429?429:502);
               let result; try { result=JSON.parse(new TextDecoder().decode(await readLimited(response,512*1024))); } catch { throw fail('The speech worker returned an unreadable response.',502); }
               if (result.model!=='bark-3.0-plus' || typeof result.text!=='string' || !result.text.trim() || result.text.length>60000 || typeof result.durationSeconds!=='number' || Math.abs(result.durationSeconds-durationSeconds)>0.1) throw fail('The speech worker returned an invalid transcript.',502);
+              emit('transcript_received');
               const output={text:result.text.trim(),durationSeconds,chunks:[],model:'bark-3.0-plus',localSpeech:false,recordingId:id};
               await store.update(user.id,id,{status:'transcribed',transcript:output.text,duration_seconds:durationSeconds,report:null});
               return output;
@@ -326,28 +359,31 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
               if (error.safe) throw error;
               throw fail('Cloud transcription timed out or could not be reached. Your recording is saved.',502);
             }
-          }));
+          },deliver);
         }
         if (!env.COACHING_API_KEY || !coachCost) throw fail('The managed AI coach is not configured yet.',503);
         if (!row.transcript) throw fail('Create a transcript for this recording before requesting coaching.',409);
         const input=analysisInput(body,row.duration_seconds);
         let prompt; try { prompt=buildAnalysisPrompt(input,policy); } catch { throw fail('Add a readable transcript and valid preparation text.'); }
         if (new TextEncoder().encode(prompt).byteLength>256*1024) throw fail('Shorten the script, rubric, or preparation notes.',413);
-        return json(await paid(user,id,requestId,'coach',input,coachCost,async()=>{
+        return await paid(user,id,requestId,'coach',input,coachCost,async emit=>{
           let feedback, coachingUsage;
           const coachingStarted=performance.now();
+          emit('coach_requested');
           try { feedback=await coach({provider,model,apiKey:env.COACHING_API_KEY,workspaceId:env.COACHING_WORKSPACE_ID,prompt,fetchImpl,browser:false,onUsage:usage=>{
             coachingUsage={...usage,elapsedMs:Math.round(performance.now()-coachingStarted)};
             console.info(JSON.stringify({event:'coaching_usage',provider,model,...coachingUsage}));
           }}); }
           catch { throw fail('The AI coach is unavailable. Your recording is saved; try again later.',502); }
+          emit('feedback_received');
           const report=analyzeSpeech({...input,aiFeedback:feedback});
           if (report.analysis.method!=='ai') throw fail('The AI coach returned an incomplete report. Your recording is saved.',502);
+          emit('feedback_validated');
           const completion=coachingCompletion(report.analysis);
           const output={...report,transcript:input.text,warnings:completion.warnings,meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:completion.status,missingCoachingCriteria:completion.missingCriteria,localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
           await store.update(user.id,id,{status:'analyzed',transcript:input.text,report:output});
           return output;
-        }));
+        },deliver);
       }
       throw fail('This app action does not exist.',404);
     } catch (error) {

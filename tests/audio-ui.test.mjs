@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createLiveTranscription } from '../lib/live-transcription.mjs';
 import { createHostedLiveSession } from '../lib/hosted-live.mjs';
+import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { analyzeSpeech, sanitizeAiFeedback } from '../lib/analysis-core.mjs';
 import { BARK_MODEL_ID, BARK_MODEL_LABEL, BARK_MODELS, BARK_CLEAN_ID } from '../lib/speech-models.mjs';
 
@@ -19,7 +20,7 @@ function inspectWav(wav) {
 }
 
 const appSource = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
-const executableAppSource = appSource.replace("import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';", '');
+const executableAppSource = appSource.replace(/^import .*;\r?$/gm, '');
 const appHtml = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
 const htmlIds = [...appHtml.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
 const meterMarkup = appHtml.match(/id="input-level"[^>]*>([\s\S]*?)<\/span>\s*<\/div>/)?.[1] || '';
@@ -142,7 +143,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
-    BARK_MODEL_ID, BARK_MODELS,
+    BARK_MODEL_ID, BARK_MODELS, createProcessingProgress,
     document: {
       getElementById: id => {
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
@@ -2094,4 +2095,119 @@ test('changing a panel speech model preserves a manually pasted transcript and i
   assert.equal(h.state.transcriptText, 'Manually pasted rehearsal.');
   assert.equal(h.state.report, report);
   assert.equal(h.state.config.transcriptionModel, BARK_MODEL_ID);
+});
+
+const timelineStates = h => h.get('processing-steps').children.map(step => step.dataset.state);
+test('cloud progress follows real request events and keeps transcription completion separate from coaching', async () => {
+  const transcript = deferred(), coaching = deferred(), callbacks = {};
+  const h = harness((path, options) => { callbacks[path] = options.onProgress; return path === '/api/transcribe' ? transcript.promise : coaching.promise; });
+  Object.assign(h.state.config, hostedConfig); h.setAudio(new Blob(['audio']), 4, 'Progress fixture');
+  const processing = h.runAnalysis();
+  assert.deepEqual(timelineStates(h), ['current', 'waiting', 'waiting', 'waiting', 'waiting']);
+  const speech = callbacks['/api/transcribe'];
+  speech({ type: 'progress', stage: 'speech_requested' });
+  assert.deepEqual(timelineStates(h), ['complete', 'current', 'waiting', 'waiting', 'waiting']);
+  speech({ type: 'progress', stage: 'saved' });
+  assert.deepEqual(timelineStates(h), ['complete', 'complete', 'waiting', 'waiting', 'waiting']);
+  transcript.resolve({ text: 'Practice improves clarity.', durationSeconds: 4, recordingId: 'owned' }); await nextTurn();
+  const coach = callbacks['/api/analyze-text'];
+  coach({ type: 'progress', stage: 'accepted' });
+  assert.equal(timelineStates(h)[0], 'complete', 'second request cannot reset confirmed transcript progress');
+  coach({ type: 'progress', stage: 'coach_requested' });
+  assert.equal(timelineStates(h)[2], 'current');
+  coach({ type: 'progress', stage: 'feedback_received' });
+  assert.equal(timelineStates(h)[3], 'current');
+  coach({ type: 'progress', stage: 'feedback_validated' }); coach({ type: 'progress', stage: 'saved' });
+  assert.equal(timelineStates(h)[4], 'waiting', 'Ready waits for the actual validated result');
+  coaching.resolve({ transcript: 'Practice improves clarity.', analysis: { method: 'ai', overallRating: 80 } }); await processing;
+  assert.equal(h.get('processing-progress').dataset.state, 'complete');
+  assert.deepEqual(timelineStates(h), Array(5).fill('complete'));
+});
+
+test('transcript-only progress has no coaching stages and rejects unknown events', async () => {
+  const pending = deferred(); let callback;
+  const h = harness((_path, options) => { callback = options.onProgress; return pending.promise; });
+  Object.assign(h.state.config, hostedConfig); h.setAudio(new Blob(['audio']), 4, 'Transcript fixture');
+  const processing = h.ensureTranscript();
+  assert.equal(h.get('processing-steps').children.length, 3);
+  const before = h.get('processing-status').textContent;
+  callback({ type: 'progress', stage: 'model_thinking', text: '<img src=x onerror=alert(1)>' });
+  assert.equal(h.get('processing-status').textContent, before);
+  pending.resolve({ text: 'A complete transcript.', durationSeconds: 4, recordingId: 'owned' }); await processing;
+  assert.equal(h.get('processing-status').textContent, 'Your transcript is ready.');
+  assert.deepEqual(timelineStates(h), ['complete', 'complete', 'complete']);
+});
+
+test('existing transcript skips speech stages and partial feedback cannot show all checks complete', async () => {
+  const pending = deferred(); let callback;
+  const h = harness((path, options) => { assert.equal(path, '/api/analyze-text'); callback = options.onProgress; return pending.promise; });
+  Object.assign(h.state.config, hostedConfig); h.get('transcript').value = 'A corrected transcript.';
+  const processing = h.runAnalysis({ corrected: true });
+  assert.equal(h.get('processing-steps').children.length, 4);
+  callback({ type: 'progress', stage: 'cached_result' });
+  pending.resolve({ transcript: 'A corrected transcript.', analysis: { method: 'ai', overallRating: null } }); await processing;
+  assert.equal(h.get('processing-progress').dataset.state, 'partial');
+  assert.equal(timelineStates(h)[2], 'incomplete');
+  assert.match(elementText(h.get('processing-steps')), /Feedback ready/);
+  assert.match(h.get('processing-status').textContent, /limitations/);
+});
+
+test('failure and abort stop timeline activity and ignore late events without claiming server cancellation', async () => {
+  for (const abort of [false, true]) {
+    const pending = deferred(); let callback;
+    const h = harness((_path, options) => { callback = options.onProgress; return pending.promise; });
+    Object.assign(h.state.config, hostedConfig); h.setAudio(new Blob(['audio']), 4, 'Cancelled fixture');
+    const processing = h.ensureTranscript().catch(error => error);
+    callback({ type: 'progress', stage: 'speech_requested' });
+    if (abort) h.state.transcriptController.abort();
+    pending.reject(Object.assign(new Error(abort ? 'Stopped waiting' : 'Cloud unavailable'), { name: abort ? 'AbortError' : 'Error' })); await processing;
+    assert.equal(h.get('processing-progress').dataset.state, abort ? 'cancelled' : 'error');
+    assert.ok(!timelineStates(h).includes('current'));
+    if (abort) assert.match(h.get('processing-status').textContent, /may still finish/);
+    const before = h.get('processing-status').textContent; callback({ type: 'progress', stage: 'saved' });
+    assert.equal(h.get('processing-status').textContent, before);
+  }
+});
+
+test('account changes and new audio hide old progress and ignore late updates', async () => {
+  for (const replace of ['account', 'audio']) {
+    const pending = deferred(); let callback;
+    const h = harness((_path, options) => { callback = options.onProgress; return pending.promise; });
+    Object.assign(h.state.config, hostedConfig); h.setAudio(new Blob(['audio']), 4, 'Private fixture');
+    const processing = h.ensureTranscript().catch(error => error);
+    if (replace === 'account') h.window.rehearsalHostedActions.accountChanged('another-user');
+    else h.setAudio(new Blob(['new audio']), 4, 'Replacement');
+    assert.equal(h.get('processing-progress').hidden, true);
+    callback({ type: 'progress', stage: 'saved' }); pending.resolve({ text: 'Stale private words.', durationSeconds: 4 }); await processing;
+    assert.equal(h.get('processing-progress').hidden, true);
+    assert.equal(h.state.transcriptText, '');
+  }
+});
+
+test('elapsed time never fabricates milestones and timers release after completion', () => {
+  const h = harness(); let time = 1000, callback, cleared = 0;
+  const progress = createProcessingProgress({ container: h.get('processing-progress'), list: h.get('processing-steps'), status: h.get('processing-status'), elapsed: h.get('processing-elapsed'),
+    hosted: false, analysis: true, needsTranscript: false, now: () => time, setTimer: value => { callback = value; return 42; }, clearTimer: id => { assert.equal(id, 42); cleared++; } });
+  time += 25000; callback();
+  assert.equal(h.get('processing-elapsed').textContent, '0:25 elapsed');
+  assert.deepEqual(timelineStates(h), ['current', 'waiting']);
+  progress.event({ type: 'progress', stage: 'feedback_validated' }, 'coach');
+  assert.deepEqual(timelineStates(h), ['current', 'waiting'], 'local mode cannot imply server-confirmed stages');
+  progress.finish(); assert.equal(cleared, 1);
+  time += 5000; callback(); assert.equal(h.get('processing-elapsed').textContent, '0:25 elapsed');
+  assert.match(appHtml, /id="processing-elapsed"[^>]*aria-live="off"/);
+});
+
+test('stopping coaching ignores late progress and a late successful payload from a service that ignores abort', async () => {
+  const pending = deferred(); let callback;
+  const h = harness((_path, options) => { callback = options.onProgress; return pending.promise; });
+  Object.assign(h.state.config, hostedConfig); h.get('transcript').value = 'An existing transcript.';
+  const processing = h.runAnalysis({ corrected: true });
+  callback({ type: 'progress', stage: 'coach_requested' }); h.state.requestController.abort();
+  callback({ type: 'progress', stage: 'feedback_validated' });
+  pending.resolve({ transcript: 'An existing transcript.', analysis: { method: 'ai', overallRating: 90 } }); await processing;
+  assert.equal(h.state.report, null);
+  assert.equal(h.get('processing-progress').dataset.state, 'cancelled');
+  assert.ok(!timelineStates(h).includes('current'));
+  assert.equal(h.state.busy, false);
 });

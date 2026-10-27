@@ -1,6 +1,7 @@
 'use strict';
 
 import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';
+import { createProcessingProgress } from '../lib/processing-progress.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -16,7 +17,7 @@ const state = {
   rubricLoading: false, rubricGeneration: 0, rubricFileName: '', rubricPendingName: '', targetView: 'points',
   audioSave: null, pendingAudioSaves: new Set(), unsavedRecordings: new Map(), savedRecordings: [], libraryGeneration: 0, libraryOpenGeneration: 0, libraryBusy: false, libraryFocus: null,
   cloudRecordingId: '', accountId: '',
-  audioPreparationGeneration: 0, audioMetadataCancel: null,
+  audioPreparationGeneration: 0, audioMetadataCancel: null, processing: null,
 };
 
 const PROVIDER_GUIDES = {
@@ -31,6 +32,15 @@ function setStatus(message, type = '') {
   $('app-status').textContent = message;
   $('app-status').className = `app-status ${type}`;
   $('app-status').hidden = !message;
+}
+function beginProcessing({ analysis = false, needsTranscript = true, signal } = {}) {
+  state.processing?.clear();
+  const generation = state.audioGeneration;
+  let progress;
+  progress = createProcessingProgress({ container: $('processing-progress'), list: $('processing-steps'), status: $('processing-status'), elapsed: $('processing-elapsed'),
+    hosted: state.config.hosted, analysis, needsTranscript, signal, setTimer: setInterval, clearTimer: clearInterval, isCurrent: () => state.processing === progress && generation === state.audioGeneration });
+  state.processing = progress;
+  return progress;
 }
 function setBusy(busy, message = '') {
   state.busy = busy;
@@ -51,7 +61,7 @@ function syncRecordingControls() {
 function syncCancelControls() {
   // Audio decoding cannot be interrupted by the browser's decodeAudioData API.
   $('cancel-analysis').hidden = state.preparingAudio || !(state.requestController || state.transcriptController || state.livePromise);
-  $('cancel-analysis').textContent = state.requestController ? 'Cancel analysis' : 'Cancel transcription';
+  $('cancel-analysis').textContent = state.config.hosted ? 'Stop waiting' : state.requestController ? 'Cancel analysis' : 'Cancel transcription';
 }
 function syncAnalysisControls() {
   const blocked = state.busy || state.rubricLoading || state.startingRecording || state.recording || state.requestingMic || Boolean(state.liveTake);
@@ -189,6 +199,7 @@ function updateSpeechModelNote() {
   $('speech-model-note').textContent = model?.downloadNote || '';
 }
 function resetTranscriptForModelChange() {
+  state.processing?.clear();
   const analyzing = Boolean(state.requestController);
   const wasLive = Boolean(state.liveTake);
   cancelLiveSession();
@@ -714,6 +725,7 @@ function setAudio(blob, duration, caption, { savedRecording = null, preserveCapt
   if (!savedRecording) autosaveRecording(record);
 }
 function discardAudio(reset = true) {
+  state.processing?.clear();
   cancelLiveSession();
   state.liveFailure = '';
   state.libraryOpenGeneration++;
@@ -1078,7 +1090,7 @@ function cacheTranscript(text, generation = state.audioGeneration) {
 function supersededAudioError() {
   return Object.assign(new Error('This recording was replaced.'), { name: 'AbortError' });
 }
-function ensureTranscript() {
+function ensureTranscript(progress = null) {
   const generation = state.audioGeneration;
   const model = state.config.transcriptionModel;
   if (!state.audioBlob) return Promise.reject(new Error('Record or upload a rehearsal first.'));
@@ -1088,6 +1100,8 @@ function ensureTranscript() {
   if (state.transcriptPromise) return state.transcriptPromise;
   const audio = state.audioBlob;
   const controller = new AbortController();
+  const ownProgress = !progress;
+  progress ||= beginProcessing({ signal: controller.signal });
   state.transcriptController = controller;
   state.transcriptionAttempted = true;
   $('follow-transcript-status').textContent = state.config.hosted ? 'Saving and transcribing this recording in the cloud… You can keep listening.' : 'Preparing speech recognition on your device… You can keep listening.';
@@ -1097,7 +1111,7 @@ function ensureTranscript() {
   promise = (async () => {
     try {
       const result = await api('/api/transcribe', {
-        method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: audio, signal: controller.signal,
+        method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: audio, signal: controller.signal, onProgress: event => progress.event(event, 'transcribe'),
       });
       if (controller.signal.aborted || generation !== state.audioGeneration || audio !== state.audioBlob || model !== state.config.transcriptionModel) throw supersededAudioError();
       const text = typeof result.text === 'string' ? result.text : '';
@@ -1112,15 +1126,18 @@ function ensureTranscript() {
       }
       cacheTranscript(text, generation);
       updatePlaybackUI();
+      progress.transcriptReady();
+      if (ownProgress) progress.finish();
       return text;
     } catch (error) {
+      progress.finish(error.name === 'AbortError' ? 'cancelled' : 'error', error.name === 'AbortError' ? '' : errorMessage(error));
       if (generation === state.audioGeneration && error.name !== 'AbortError') {
         $('follow-transcript-status').textContent = `${errorMessage(error)} Your audio is still available to replay.`;
         $('follow-transcript-connect').textContent = 'Retry transcript';
         $('follow-transcript-connect').hidden = false;
       } else if (generation === state.audioGeneration && error.name === 'AbortError') {
         state.transcriptionAttempted = false;
-        $('follow-transcript-status').textContent = 'Transcription stopped. Your audio is still available to replay.';
+        $('follow-transcript-status').textContent = state.config.hosted ? 'Stopped waiting. Your audio is still here; processing may finish in saved rehearsals.' : 'Transcription stopped. Your audio is still available to replay.';
         $('follow-transcript-connect').textContent = 'Create transcript';
         $('follow-transcript-connect').hidden = false;
       }
@@ -1261,30 +1278,34 @@ async function runAnalysis({ corrected = false } = {}) {
   const signal = state.requestController.signal;
   const generation = ++state.analysisGeneration;
   const audioGeneration = state.audioGeneration;
+  const progress = beginProcessing({ analysis: true, needsTranscript: !corrected && !(state.transcriptGeneration === audioGeneration && state.transcriptText.trim()), signal });
   setBusy(true, state.transcriptText.trim() || corrected ? 'Reviewing your transcript and preparing coaching…' : 'Transcribing your rehearsal. You can keep listening while your words are prepared…');
   try {
     let text;
     if (corrected) {
       text = $('transcript').value;
       cacheTranscript(text, audioGeneration);
-    } else text = await ensureTranscript();
+    } else text = await ensureTranscript(progress);
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration || signal.aborted) throw supersededAudioError();
     if (state.rubricLoading) throw new Error('The rubric is still loading. When it is ready, choose Analyze again to include its text.');
     state.duration = state.audioDuration || state.duration;
     const input = analysisInput(text, true);
+    progress.transcriptReady(); progress.coachingRequested();
     setStatus(state.config.coachingViaHost ? 'Coaching requested in this Codex conversation. Waiting for your annotated report…' : 'Your transcript is ready. Reviewing word habits, speaking points, and the bigger picture…', 'busy');
-    const report = await api('/api/analyze-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal });
-    if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration) return;
+    const report = await api('/api/analyze-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal, onProgress: event => progress.event(event, 'coach') });
+    if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration || signal.aborted) return;
     state.report = { ...report, transcript: report.transcript || text, input: { targetScript: input.targetScript, targetTalkingPoints: input.targetTalkingPoints, targetMode: input.targetMode, plannedIntroduction: input.plannedIntroduction, plannedTransitions: input.plannedTransitions, instructorRubric: input.instructorRubric, rubricFileName: input.rubricFileName } };
     renderReport();
+    progress.finish(report.analysis?.method === 'ai' && Number.isFinite(report.analysis.overallRating) ? 'complete' : 'partial', report.analysis?.method === 'ai' && Number.isFinite(report.analysis.overallRating) ? '' : 'Feedback is ready with limitations. Review the notice in your report.');
     window.rehearsalAccount?.track(report.analysis?.method === 'ai' ? 'analysis_completed' : 'analysis_failed');
     window.rehearsalAccount?.refreshHistory();
     setStatus(state.transcriptText !== text ? 'The transcript changed while feedback was being prepared. Update feedback to analyze your latest corrections.' : '');
     $('report').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
+    progress.finish(error.name === 'AbortError' ? 'cancelled' : 'error', error.name === 'AbortError' ? '' : errorMessage(error));
     if (error.name !== 'AbortError') window.rehearsalAccount?.track('analysis_failed');
     if (generation === state.analysisGeneration) {
-      if (error.name === 'AbortError') setStatus('Analysis stopped. Your recording is still here when you’re ready.');
+      if (error.name === 'AbortError') setStatus(state.config.hosted ? 'Stopped waiting. Your recording is safe; processing may still finish in saved rehearsals.' : 'Analysis stopped. Your recording is still here when you’re ready.');
       else setStatus(errorMessage(error), 'error');
     }
   } finally {
@@ -1647,7 +1668,7 @@ $('practice-again').addEventListener('click', () => {
 navigator.mediaDevices?.addEventListener('devicechange', enumerateInputs);
 window.addEventListener('focus', () => { enumerateInputs(); refreshSavedRecordings(); });
 window.addEventListener('beforeunload', warnBeforeLeaving);
-window.addEventListener('pagehide', (event) => { if (event.persisted) return; clearInterval(state.timer); stopPlaybackLoop(); cleanupMic(); cancelLiveSession(); if (state.audioURL) URL.revokeObjectURL(state.audioURL); state.requestController?.abort(); state.transcriptController?.abort(); });
+window.addEventListener('pagehide', (event) => { if (event.persisted) return; state.processing?.clear(); clearInterval(state.timer); stopPlaybackLoop(); cleanupMic(); cancelLiveSession(); if (state.audioURL) URL.revokeObjectURL(state.audioURL); state.requestController?.abort(); state.transcriptController?.abort(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { enumerateInputs(); if (state.context?.state === 'suspended' && state.recording) state.context.resume().catch(() => {}); } });
 initializeInputDetection();
 refreshSavedRecordings();

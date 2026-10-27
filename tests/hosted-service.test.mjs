@@ -9,6 +9,11 @@ const url = 'https://pilot.supabase.co', publishableKey = 'sb_publishable_test';
 const userId = '12345678-1234-4123-8123-123456789012';
 const response = (value, status = 200) => new Response(JSON.stringify(value), { status });
 function deferred() { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; }
+function ndjson(events) {
+  return new Response(events.map(event => JSON.stringify(event)).join('\n') + '\n', { headers: { 'Content-Type': 'application/x-ndjson' } });
+}
+const coachStages = ['accepted', 'coach_requested', 'feedback_received', 'feedback_validated', 'saved'];
+const progressFrames = stages => stages.map(stage => ({ type: 'progress', stage }));
 const firstSession = { access_token: 'private-session-token', user: { id: userId } };
 const secondSession = { access_token: 'second-token', user: { id: 'abcdefab-1234-4123-8123-123456789012' } };
 function wav(seconds = 1) {
@@ -59,6 +64,97 @@ test('hosted configuration is off only when absent and rejects partial or secret
     { VITE_SUPABASE_URL: `${url}/evil`, VITE_SUPABASE_PUBLISHABLE_KEY: publishableKey },
     { VITE_SUPABASE_URL: 'https://secret@pilot.supabase.co', VITE_SUPABASE_PUBLISHABLE_KEY: publishableKey },
   ]) assert.throws(() => readHostedConfig(env));
+});
+
+test('opt-in progress delivers ordered server milestones and the unchanged final result', async () => {
+  const final = { analysis: { method: 'ai', overallRating: 80 }, transcript: 'Café practice.' };
+  for (const cached of [false, true]) {
+    const stages = cached ? ['cached_result'] : coachStages;
+    const bytes = new TextEncoder().encode(progressFrames(stages).concat({ type: 'result', data: final }).map(event => JSON.stringify(event)).join('\n') + '\n');
+    const f = fixture({ handle: call => call.path === '/analyze-text' ? new Response(new ReadableStream({
+      start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); },
+    }), { headers: { 'Content-Type': 'application/x-ndjson' } }) : undefined });
+    const events = [];
+    const report = await f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Café practice.' }, onProgress: event => events.push(event) });
+    assert.deepEqual(report, final); assert.deepEqual(events, progressFrames(stages));
+    assert.equal(f.calls.at(-1).headers.Accept, 'application/x-ndjson'); assert.equal(f.calls.length, 1);
+  }
+});
+
+test('progress is opt-in, supports older JSON responses, and cannot change request credentials', async () => {
+  const f = fixture();
+  const body = { recordingId: randomUUID(), text: 'Practice.' };
+  await f.service.request('/api/analyze-text', { body });
+  assert.equal(f.calls.at(-1).headers.Accept, undefined);
+  let callbacks = 0;
+  const report = await f.service.request('/api/analyze-text', { body, onProgress: () => callbacks++ });
+  assert.deepEqual(report, { analysis: { method: 'ai' } }); assert.equal(callbacks, 0);
+  assert.equal(f.calls.at(-1).headers.Authorization, 'Bearer private-session-token');
+});
+
+test('transcription progress starts on the paid POST after the single validated audio upload', async () => {
+  const stages = ['accepted', 'audio_validated', 'speech_requested', 'transcript_received', 'saved'];
+  const f = fixture({ handle: call => call.path === '/transcribe' ? ndjson([
+    ...progressFrames(stages), { type: 'result', data: { text: 'Practice.', recordingId: call.body.recordingId } },
+  ]) : undefined });
+  const seen = [];
+  const result = await f.service.request('/api/transcribe', { body: wav(), onProgress: event => seen.push(event.stage) });
+  assert.equal(result.text, 'Practice.'); assert.deepEqual(seen, stages); assert.equal(f.uploads.length, 1);
+  assert.equal(f.uploads[0].headers.Accept, undefined); assert.equal(f.calls.at(-1).headers.Accept, 'application/x-ndjson');
+});
+
+test('stream failures preserve retry IDs unless the server confirms a terminal failed job', async () => {
+  for (const jobState of [undefined, 'failed']) {
+    let first = true;
+    const f = fixture({ handle: call => {
+      if (call.path === '/analyze-text' && first) { first = false; return ndjson([
+        ...progressFrames(['accepted', 'coach_requested']), { type: 'error', error: 'Coaching unavailable.', status: 502, ...(jobState ? { jobState } : {}) },
+      ]); }
+    } });
+    const body = { recordingId: randomUUID(), text: 'Practice.' }, seen = [];
+    await assert.rejects(f.service.request('/api/analyze-text', { body, onProgress: event => seen.push(event.stage) }), { status: 502 });
+    assert.deepEqual(seen, ['accepted', 'coach_requested']);
+    await f.service.request('/api/analyze-text', { body, onProgress: () => {} });
+    assert.equal(f.calls[0].body.requestId === f.calls[1].body.requestId, !jobState);
+  }
+});
+
+test('malformed, oversized, out-of-order and truncated streams fail without invented completion', async () => {
+  const valid = progressFrames(coachStages);
+  for (const events of [
+    [], [{ type: 'progress', stage: 'model_thinking' }], progressFrames(['accepted', 'saved']),
+    progressFrames(['accepted', 'accepted']), [{ type: 'progress', stage: 'accepted', secret: 'extra' }],
+    [{ type: 'result', data: {} }], valid, [...valid, { type: 'result', data: {} }, { type: 'result', data: {} }],
+    [{ type: 'error', status: 200, error: 'Invalid' }], [{ type: 'error', status: 502, error: 'x'.repeat(501) }],
+  ]) {
+    const f = fixture({ handle: call => call.path === '/analyze-text' ? ndjson(events) : undefined });
+    await assert.rejects(f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Practice.' }, onProgress: () => {} }), { status: 502 });
+    assert.equal(f.calls.length, 1);
+  }
+  for (const content of ['{bad json}\n', JSON.stringify({ type: 'result', data: {} }), 'x'.repeat(2 * 1024 * 1024 + 1)]) {
+    const f = fixture({ handle: () => new Response(content, { headers: { 'Content-Type': 'application/x-ndjson' } }) });
+    await assert.rejects(f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Practice.' }, onProgress: () => {} }), { status: 502 });
+  }
+});
+
+test('cancel, dispose and account changes cancel stalled stream readers and suppress further progress', async () => {
+  for (const mode of ['cancel', 'dispose', 'account']) {
+    const started = deferred(); let canceled = false;
+    const f = fixture({ handle: call => call.path === '/analyze-text' ? new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify({ type: 'progress', stage: 'accepted' }) + '\n')); },
+      cancel() { canceled = true; return new Promise(() => {}); },
+    }), { headers: { 'Content-Type': 'application/x-ndjson' } }) : undefined });
+    f.service.onAuthChange(() => {}); f.authChange(firstSession);
+    const controller = new AbortController(), seen = [];
+    const pending = f.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Practice.' }, signal: controller.signal,
+      onProgress: event => { seen.push(event.stage); started.resolve(); } });
+    await started.promise;
+    if (mode === 'cancel') controller.abort();
+    else if (mode === 'dispose') f.service.dispose();
+    else f.authChange(secondSession);
+    await assert.rejects(pending, error => error.name === 'AbortError' || error.status === 401 || error.status === 410);
+    assert.equal(canceled, true); assert.deepEqual(seen, ['accepted']);
+  }
 });
 
 test('live speech uses the authenticated gateway, saves once, and reuses its recording for coaching', async () => {

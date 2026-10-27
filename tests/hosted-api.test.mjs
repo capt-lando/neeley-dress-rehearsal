@@ -48,6 +48,88 @@ function fixture(overrides={}) {
 }
 const transcribe={method:'POST',body:{recordingId:recording,requestId}};
 const analyze={method:'POST',body:{recordingId:recording,requestId,text:'We should expand tutoring.',targetTalkingPoints:'Expand tutoring',durationSeconds:600}};
+const streamHeaders={Accept:'application/x-ndjson'};
+const frames=async response=>(await response.text()).trim().split('\n').map(line=>JSON.parse(line));
+
+test('progress streams report real checkpoints and cached retries invoke no extra model calls',async()=>{
+  for(const [path,options,expected] of [
+    ['/transcribe',transcribe,['accepted','audio_validated','speech_requested','transcript_received','saved']],
+    ['/analyze-text',analyze,['accepted','coach_requested','feedback_received','feedback_validated','saved']],
+  ]) {
+    const f=fixture(),response=await f.call(path,{...options,headers:streamHeaders});
+    assert.equal(response.status,200);assert.equal(response.headers.get('content-type'),'application/x-ndjson');
+    const events=await frames(response);
+    assert.deepEqual(events.slice(0,-1).map(event=>event.stage),expected);
+    assert.ok(events.slice(0,-1).every(event=>Object.keys(event).sort().join(',')==='stage,type'));
+    assert.equal(events.at(-1).type,'result');assert.equal(f.jobs.get(requestId).state,'completed');
+    const replay=await frames(await f.call(path,{...options,headers:streamHeaders}));
+    assert.deepEqual(replay,[{type:'progress',stage:'cached_result'},events.at(-1)]);
+    assert.equal(f.debits,1);assert.equal(f.calls.filter(call=>call[0]===(path==='/transcribe'?'fetch':'coach')).length,1);
+    assert.doesNotMatch(JSON.stringify(events),/private-worker|private-coach|Bearer|Modal-Secret/);
+  }
+});
+
+test('stream opt-in preserves early authentication, ownership, validation and quota HTTP errors',async()=>{
+  for(const [overrides,options,status] of [
+    [{},{...analyze,auth:null},401],
+    [{store:{owned:async()=>null}},analyze,404],
+    [{},{...analyze,body:{...analyze.body,text:'!!!'}},400],
+    [{store:{reserve:async()=>{throw fail('Daily limit.',429);}}},analyze,429],
+  ]) {
+    const f=fixture(overrides),response=await f.call('/analyze-text',{...options,headers:streamHeaders});
+    assert.equal(response.status,status);assert.equal(response.headers.get('content-type'),'application/json');
+    assert.equal(f.calls.some(call=>call[0]==='coach'),false);
+  }
+});
+
+test('provider receipt and saved milestones wait for the actual provider and commit acknowledgements',async()=>{
+  let completeCoach,completeSave;
+  const coachWait=new Promise(resolve=>{completeCoach=resolve;}),saveWait=new Promise(resolve=>{completeSave=resolve;});
+  const f=fixture({coach:async()=>{await coachWait;return {thesis:{summary:'Tutoring.',clarity:'Clear.',evidence:['We should expand tutoring.']}};},
+    store:{finish:async()=>{await saveWait;}}});
+  const response=await f.call('/analyze-text',{...analyze,headers:streamHeaders}),reader=response.body.getReader();
+  const next=async()=>JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  assert.equal((await next()).stage,'accepted');assert.equal((await next()).stage,'coach_requested');
+  let arrived=false;const receipt=next().then(event=>{arrived=true;return event;});
+  await new Promise(setImmediate);assert.equal(arrived,false);
+  completeCoach();assert.equal((await receipt).stage,'feedback_received');assert.equal((await next()).stage,'feedback_validated');
+  let saved=false;const committed=next().then(event=>{saved=true;return event;});
+  await new Promise(setImmediate);assert.equal(saved,false);
+  completeSave();assert.equal((await committed).stage,'saved');assert.equal((await next()).type,'result');
+  assert.equal((await reader.read()).done,true);reader.releaseLock();
+});
+
+test('streamed provider failures are terminal, safe, and never claim receipt or saving',async()=>{
+  for(const [path,options,overrides,stage] of [
+    ['/analyze-text',analyze,{coach:async()=>{throw new Error('secret-provider-body');}},'coach_requested'],
+    ['/transcribe',transcribe,{fetchImpl:async()=>new Response('private-provider-body',{status:502})},'speech_requested'],
+  ]) {
+    const f=fixture(overrides),events=await frames(await f.call(path,{...options,headers:streamHeaders}));
+    assert.equal(events.at(-2).stage,stage);assert.equal(events.at(-1).type,'error');
+    assert.equal(events.at(-1).status,502);assert.equal(events.at(-1).jobState,'failed');
+    assert.equal(f.jobs.get(requestId).state,'failed');
+    assert.doesNotMatch(JSON.stringify(events),/secret-provider|private-provider/);
+    assert.equal(events.some(event=>['saved','feedback_received','transcript_received'].includes(event.stage)),false);
+  }
+});
+
+test('streaming retains request and audio concurrency guards through disconnected admitted work',async()=>{
+  for(const [path,options,limit] of [['/analyze-text',analyze,8],['/transcribe',transcribe,2]]) {
+    let releaseWork;const wait=new Promise(resolve=>{releaseWork=resolve;});let completed=0;
+    const f=fixture({store:{reserve:async()=>({state:'new'}),finish:async()=>{completed++;}},
+      coach:async()=>{await wait;return {thesis:{summary:'Tutoring.',clarity:'Clear.',evidence:['We should expand tutoring.']}};},
+      fetchImpl:async()=>{await wait;return Response.json({text:'Tutoring.',durationSeconds:1,model:'bark-3.0-plus'});}});
+    const streams=[];
+    for(let index=0;index<limit;index++) {
+      const response=await f.call(path,{...options,headers:streamHeaders});assert.equal(response.status,200);
+      streams.push(response);await response.body.cancel();
+    }
+    assert.equal((await f.call(path,{...options,headers:streamHeaders})).status,429);
+    releaseWork();await new Promise(setImmediate);
+    assert.equal(completed,limit);
+    const after=await f.call(path,{...options,headers:streamHeaders});assert.equal(after.status,200);await after.text();
+  }
+});
 
 test('all app routes enforce distributed admission before data access or paid calls',async()=>{
   const paths=[['/config','GET'],['/recordings','GET'],['/recordings','POST'],['/recordings/'+recording,'GET'],['/recordings/'+recording,'DELETE'],['/events','POST'],['/transcribe','POST'],['/analyze-text','POST'],['/live-sessions','POST'],['/live-sessions/'+recording,'GET'],['/live-sessions/'+recording,'DELETE'],['/live-sessions/'+recording+'/prepare','POST'],['/live-sessions/'+recording+'/chunks/0','POST'],['/live-sessions/'+recording+'/finish','POST']];
