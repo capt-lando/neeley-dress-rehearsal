@@ -2,7 +2,7 @@
   "name": "neeley-dress-rehearsal",
   "version": "1.0.0",
   "private": true,
-  "description": "Browser-local presentation practice for Neeley students",
+  "description": "Live presentation practice and private GPT coaching for Neeley students",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
@@ -12,15 +12,11 @@
     "dev": "vite --host 127.0.0.1 --port 4173 --strictPort",
     "build": "vite build",
     "test:db": "supabase test db",
-    "build:plugin": "node plugin/build.mjs",
-    "check:plugin": "node plugin/check-package.mjs",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.1",
     "@supabase/supabase-js": "2.118.0",
     "fflate": "0.8.3",
-    "onnxruntime-web": "1.31.0-dev.20260914-8d85527a0",
     "pdfjs-dist": "6.4.299"
   },
   "devDependencies": {

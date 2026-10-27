@@ -5,18 +5,6 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { INPUT_LIMITS, RehearsalStore } from './session-store.mjs';
 
-export const PANEL_URI = 'ui://neeley-dress-rehearsal/v5.html';
-export const PANEL_META = {
-  ui: {
-    permissions: { microphone: {} },
-    csp: {
-      connectDomains: ['https://huggingface.co', 'https://*.huggingface.co', 'https://*.xethub.hf.co', 'https://cdn.jsdelivr.net', 'https://cdn-lfs.hf.co', 'https://cdn-lfs-us-1.hf.co'],
-      resourceDomains: ['https://huggingface.co', 'https://*.huggingface.co', 'https://*.xethub.hf.co', 'https://cdn.jsdelivr.net', 'https://cdn-lfs.hf.co', 'https://cdn-lfs-us-1.hf.co'],
-    },
-  },
-  'openai/ui': { availableDisplayModes: ['fullscreen'] },
-};
-const OPEN_META = { ui: { resourceUri: PANEL_URI }, 'openai/ui': { entrypoints: [{ type: 'thread' }] } };
 const idSchema = z.string().uuid();
 const revisionSchema = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 const inputFields = Object.fromEntries(Object.entries(INPUT_LIMITS).map(([key, max]) => [key, key === 'text' ? z.string().min(1).max(max) : z.string().max(max).optional()]));
@@ -49,7 +37,7 @@ async function loadPolicy() {
   }
 }
 
-export async function createRehearsalServer({ policyText, panelPath = new URL('./panel.html', import.meta.url), panelHtml, store: providedStore } = {}) {
+export async function createRehearsalServer({ policyText, store: providedStore } = {}) {
   const store = providedStore || new RehearsalStore({ policyText: policyText ?? await loadPolicy() });
   let icon;
   try { icon = await readFile(new URL('./assets/icon.svg', import.meta.url)); }
@@ -59,17 +47,13 @@ export async function createRehearsalServer({ policyText, panelPath = new URL('.
   }, { maxToolInputElements: 100_000 });
   const annotations = (readOnlyHint, destructiveHint = false, idempotentHint = readOnlyHint) => ({ readOnlyHint, destructiveHint, idempotentHint, openWorldHint: false });
 
-  server.registerResource('rehearsal-panel', PANEL_URI, {
-    title: 'Neeley Dress Rehearsal', description: 'Record, transcribe, and review a presentation rehearsal.', mimeType: 'text/html;profile=mcp-app', _meta: PANEL_META,
-  }, async uri => ({ contents: [{ uri: uri.href, mimeType: 'text/html;profile=mcp-app', text: panelHtml ?? await readFile(panelPath, 'utf8'), _meta: PANEL_META }] }));
-
   server.registerTool('open_rehearsal', {
-    title: 'Open Dress Rehearsal', description: 'Open a new rehearsal panel with an isolated in-memory session. Use the panel to record or load audio and request Codex coaching.',
-    inputSchema: z.strictObject({}), annotations: annotations(false), _meta: OPEN_META,
-  }, handle(() => store.open(), data => `Opened rehearsal ${data.rehearsalId}. Record or load a rehearsal in the panel, then choose Analyze.`));
+    title: 'Start rehearsal coaching', description: 'Create an isolated in-memory coaching session for a transcript and presentation plan. Recording and transcription are available on the hosted Dress Rehearsal website.',
+    inputSchema: z.strictObject({}), annotations: annotations(false),
+  }, handle(() => store.open(), data => `Created rehearsal ${data.rehearsalId}. Supply its transcript and planning text with prepare_coaching.`));
 
   server.registerTool('prepare_coaching', {
-    title: 'Prepare rehearsal coaching', description: 'Save the exact current transcript and planning input for this rehearsal, replacing its previous request/report. Return the new revision. The panel then asks Codex to fetch that exact revision and coach it.',
+    title: 'Prepare rehearsal coaching', description: 'Save the exact current transcript and planning input for this rehearsal, replacing its previous request/report. Return the new revision for Codex to fetch and coach.',
     inputSchema: z.strictObject({ rehearsalId: idSchema, input: rehearsalInput }), annotations: annotations(false, true), _meta: { ui: { visibility: ['model', 'app'] } },
   }, handle(({ rehearsalId, input }) => store.prepare(rehearsalId, input), data => `Rehearsal ${data.rehearsalId}, revision ${data.revision}, is ready for coaching. Fetch it with get_coaching_request, then submit feedback for this exact revision.`));
 
@@ -81,10 +65,10 @@ export async function createRehearsalServer({ policyText, panelPath = new URL('.
   server.registerTool('submit_coaching', {
     title: 'Submit grounded rehearsal coaching', description: 'Validate and publish Codex coaching for the exact pending revision. feedback must follow get_coaching_request, include all five rated criteria with transcript evidence, and include annotations (possibly []). Invalid feedback returns a repairable error without publishing partial ratings.',
     inputSchema: z.strictObject({ rehearsalId: idSchema, revision: revisionSchema, feedback: z.record(z.string(), z.unknown()) }), annotations: annotations(false), _meta: { ui: { visibility: ['model'] } },
-  }, handle(({ rehearsalId, revision, feedback }) => store.submit(rehearsalId, revision, feedback), data => `Coaching is complete for rehearsal ${data.rehearsalId}, revision ${data.revision}. The existing panel can display the grounded report.`));
+  }, handle(({ rehearsalId, revision, feedback }) => store.submit(rehearsalId, revision, feedback), data => `Coaching is complete for rehearsal ${data.rehearsalId}, revision ${data.revision}. The grounded report is available through get_rehearsal.`));
 
   server.registerTool('get_rehearsal', {
-    title: 'Read rehearsal status', description: 'Read this rehearsal’s current revision, pending/completed status, and completed report. The existing panel polls this tool while Codex prepares coaching.',
+    title: 'Read rehearsal status', description: 'Read this rehearsal’s current revision, pending/completed status, and completed report.',
     inputSchema: z.strictObject({ rehearsalId: idSchema }), annotations: annotations(true), _meta: { ui: { visibility: ['model', 'app'] } },
   }, handle(({ rehearsalId }) => store.get(rehearsalId), data => `Rehearsal ${data.rehearsalId}: ${data.status}, revision ${data.revision}.`));
 
@@ -98,7 +82,7 @@ export async function createRehearsalServer({ policyText, panelPath = new URL('.
 
 export async function runStdioServer() {
   const { server, store } = await createRehearsalServer();
-  // Expiration runs even when a panel closes without making another tool call.
+  // Expiration runs even when the caller stops making tool calls.
   const timer = setInterval(() => store.prune(), 60_000);
   timer.unref();
   const transport = new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 3 * 1024 * 1024 });

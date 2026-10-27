@@ -65,12 +65,9 @@ export function installHostedAccount(service, actions) {
       configured = true;
       actions.configurationReady?.();
       liveTranscription = Boolean(config.liveTranscription);
-      // Opportunistic startup must never delay identity, recovery, or history.
-      // The service and server independently deduplicate refresh/token events.
-      if (user && config.speechConfigured) void service.prepareSpeech?.().catch(() => {});
       dialog.querySelector('.key-privacy-note p').textContent = (liveTranscription
-        ? 'While signed in, recording sends 10-second audio segments for cloud transcription. Stop saves the complete recording and transcript privately. Replay does not upload audio. '
-        : 'Cloud transcription sends audio to our speech service and saves your recording and transcript privately. When live transcription is enabled, audio is sent in chunks while you record. Replay does not upload audio. ')
+        ? 'While signed in, recording streams audio to OpenAI for live transcription. Stop saves the complete recording and transcript privately. Replay does not upload audio. '
+        : 'Transcription sends audio to OpenAI and saves your recording and transcript privately. Replay does not upload audio. ')
         + 'Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.';
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
       await actions.recoverPending?.();

@@ -15,7 +15,7 @@
   <header class="site-header">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-      <span><a class="brand-home" href="./" aria-label="Neeley Dress Rehearsal home"><strong>NEELEY DRESS REHEARSAL <span class="brand-version"><span class="brand-divider">-</span> <span class="brand-beta">beta</span></span></strong></a><span class="brand-powered">Powered by <a href="https://huggingface.co/ConwayResearch/Underdog-Bark-3.0" target="_blank" rel="noopener noreferrer">Bark 3</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer" aria-label="Bark model license: Creative Commons Attribution 4.0">CC BY 4.0</a></span></span>
+      <span><a class="brand-home" href="./" aria-label="Neeley Dress Rehearsal home"><strong>NEELEY DRESS REHEARSAL <span class="brand-version"><span class="brand-divider">-</span> <span class="brand-beta">beta</span></span></strong></a></span>
     </div>
     <nav class="header-actions" aria-label="App controls">
       <button class="connection-button" id="settings-open"><span class="status-dot" id="connection-dot"></span><span id="connection-label">Connect API</span><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button>
@@ -80,7 +80,7 @@
           <h2 id="record-title">The floor is yours.</h2>
           <div class="follow-transcript-panel" id="follow-transcript-panel" hidden>
             <div class="follow-transcript-heading"><span>YOUR TRANSCRIPT</span><span id="follow-transcript-status" role="status" aria-live="polite">Ready when you are</span></div>
-            <div id="follow-transcript" class="follow-transcript" role="region" aria-label="Rehearsal transcript" tabindex="0">Your words appear here in batches while you record.</div>
+            <div id="follow-transcript" class="follow-transcript" role="region" aria-label="Rehearsal transcript" tabindex="0">Your words appear here as you speak.</div>
             <button class="text-button" id="follow-transcript-connect" hidden>Create transcript <span aria-hidden="true">↗</span></button>
             <button type="button" class="text-button" id="live-transcription-cancel" hidden>Stop live transcript</button>
             <p id="follow-transcript-note" class="follow-transcript-note">Word highlighting uses approximate timing.</p>
@@ -207,7 +207,6 @@
   </main>
   <footer class="site-footer">
     <span class="creator-credit">Created by:<br><strong>Landon Moustirats</strong></span>
-    <p class="model-attribution">Speech recognition: <a href="https://huggingface.co/ConwayResearch/Underdog-Bark-3.0" target="_blank" rel="noopener noreferrer">Bark 3.0 by Conway Research</a>.<br>Based on <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3" target="_blank" rel="noopener noreferrer">NVIDIA Corporation’s parakeet-tdt-0.6b-v3</a> and <a href="https://huggingface.co/moondream/parakeet-ultra" target="_blank" rel="noopener noreferrer">Moondream’s parakeet-ultra</a>.<br>ONNX conversions: <a href="https://huggingface.co/ai-ecoverse/Underdog-Bark-3.0-ONNX" target="_blank" rel="noopener noreferrer">ai-ecoverse</a> &amp; <a href="https://huggingface.co/velddev/Underdog-Bark-3.0-Plus-sherpa-onnx" target="_blank" rel="noopener noreferrer">velddev</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a></p>
   </footer>
 
   <dialog id="cancel-restart-dialog" aria-labelledby="cancel-restart-title" aria-describedby="cancel-restart-description">
@@ -221,7 +220,7 @@
   </dialog>
   <dialog id="account-dialog" aria-labelledby="account-title">
     <div class="dialog-heading"><div><p class="eyebrow">YOUR REHEARSALS</p><h2 id="account-title">Sign in</h2></div><button class="icon-button" id="account-close" type="button" aria-label="Close account">×</button></div>
-    <p class="support-text">Sign in to save private rehearsals and receive cloud transcription and coaching. No personal AI key or speech-model download is needed.</p>
+    <p class="support-text">Sign in to save private rehearsals and receive live transcription and coaching.</p>
     <div id="oauth-options" class="oauth-options">
       <button id="sign-in-google" class="secondary-button" type="button">Continue with Google</button>
       <button id="sign-in-microsoft" class="secondary-button" type="button">Continue with Microsoft</button>
@@ -233,38 +232,8 @@
       <p class="field-note">Includes time actively spent in app sections, repeat visits, and completed or failed analyses. Never includes your recording, transcript, script, rubric, or keystrokes. Turn this off at any time; coaching still works.</p>
       <button id="account-signout" class="text-button" type="button">Sign out of this account</button>
     </section>
-    <aside class="key-privacy-note"><strong>Your recording history is private to your account.</strong><p>Cloud transcription sends audio to our speech service and saves your recording and transcript privately. Live transcription sends audio in chunks while you record. Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.</p><p>Pressing Send in chat shares your message, recent conversation, preparation text, and current transcript with our AI coach. Selecting text alone sends nothing. Chat history stays in this tab and clears when you refresh or sign out; we do not save it to your account or rehearsal. The current conversation can inform Analyze without being stored with the report.</p><p>Delete a saved rehearsal to remove its cloud audio, transcript, and feedback. Sign out on shared computers. Operational processing and account records are separate from optional usage analytics.</p></aside>
+    <aside class="key-privacy-note"><strong>Your recording history is private to your account.</strong><p>Live transcription streams audio while you speak. Stop saves your recording and transcript privately. Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.</p><p>Pressing Send in chat shares your message, recent conversation, preparation text, and current transcript with our AI coach. Selecting text alone sends nothing. Chat history stays in this tab and clears when you refresh or sign out; we do not save it to your account or rehearsal. The current conversation can inform Analyze without being stored with the report.</p><p>Delete a saved rehearsal to remove its cloud audio, transcript, and feedback. Sign out on shared computers. Operational processing and account records are separate from optional usage analytics.</p></aside>
     <p id="account-status" class="settings-status" role="status" aria-live="polite"></p>
-  </dialog>
-  <dialog id="settings-dialog" aria-labelledby="settings-title">
-    <form id="settings-form">
-      <div class="dialog-heading"><div><p class="eyebrow">QUICK SETUP</p><h2 id="settings-title">Connect your AI coach.</h2></div><button class="icon-button" id="settings-close" type="button" aria-label="Close settings">×</button></div>
-      <p class="support-text">Speech recognition runs on your device without an account. Connect your own AI key for coaching in this tab.</p>
-      <fieldset class="provider-picker"><legend><span class="setup-number">1</span> Choose your AI</legend><div class="provider-options">
-        <label><input type="radio" name="analysis-provider" value="openai" checked><span><strong>ChatGPT</strong><small>OpenAI API</small></span></label>
-        <label><input type="radio" name="analysis-provider" value="anthropic"><span><strong>Claude</strong><small>Anthropic API</small></span></label>
-        <label><input type="radio" name="analysis-provider" value="google"><span><strong>Gemini</strong><small>Google API</small></span></label>
-        <label><input type="radio" name="analysis-provider" value="deepseek"><span><strong>DeepSeek</strong><small>DeepSeek API</small></span></label>
-        <label><input type="radio" name="analysis-provider" value="meta"><span><strong>Meta Muse</strong><small>Muse Spark</small></span></label>
-      </div></fieldset>
-      <div class="setup-step"><h3><span class="setup-number">2</span> Sign in &amp; get a key</h3><p id="provider-instructions" class="setup-instructions">Sign in to your provider, create an API key, then paste it below.</p><a id="provider-key-link" class="secondary-button key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Sign in &amp; get a key <span aria-hidden="true">↗</span></a><p class="field-note">Signing in alone does not connect the app. API usage may require separate billing from a chat subscription.</p></div>
-      <div class="setup-step"><div class="setup-step-heading"><label for="analysis-api-key"><span class="setup-number">3</span><span>Paste your API key <small class="key-provider" id="analysis-key-provider">OpenAI (ChatGPT)</small></span></label><span class="key-state" id="analysis-key-state">No key in this tab</span></div><div class="key-input-wrap"><input id="analysis-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your API key" aria-describedby="analysis-key-help"><button class="key-visibility" id="analysis-key-toggle" type="button" aria-label="Show analysis API key" aria-pressed="false">Show</button></div><div class="key-help-row"><p class="field-note" id="analysis-key-help">Leave blank to keep the current provider’s key. Keys are checked when you run an analysis.</p><button class="text-button danger-text" id="disconnect-button" type="button" hidden>Remove key</button></div></div>
-      <aside class="key-privacy-note" aria-label="Your privacy"><strong>Recordings stay in this browser. Your key and text are not saved.</strong><p>Completed recordings are saved only in this browser. Clearing site data or private browsing can remove them. Download audio to keep your own copy. Your key, scripts, transcripts, and other preparation text stay only in this tab’s memory until you reload or close it. Model files can remain cached.</p><p>Analyze sends your transcript and preparation text directly to your chosen AI provider using your own API account. Audio and full rubric files stay on your device.</p></aside>
-      <section class="local-speech-settings" aria-labelledby="local-speech-title">
-        <div class="local-speech-heading"><h3 id="local-speech-title">Speech recognition</h3><span>ON YOUR DEVICE</span></div>
-        <label for="transcription-model">English speech model</label><select id="transcription-model" aria-describedby="speech-model-note"><option value="velddev/Underdog-Bark-3.0-Plus-sherpa-onnx">Bark 3.0 Plus · English verbatim</option></select>
-        <p id="speech-model-note" class="field-note" aria-live="polite">About 703 MB of model files. Designed to preserve fillers and repeated words.</p>
-        <p id="speech-download-note" class="field-note">Your chosen model downloads from Hugging Face and runs in your browser without a speech API key. Model files can remain cached. The first transcript takes longer while they download.</p>
-        <p class="model-attribution"><a href="https://huggingface.co/ConwayResearch/Underdog-Bark-3.0" target="_blank" rel="noopener noreferrer">Bark 3.0</a> was post-trained and compressed by Conway Research, based on <a href="https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3" target="_blank" rel="noopener noreferrer">NVIDIA Corporation’s parakeet-tdt-0.6b-v3</a> and <a href="https://huggingface.co/moondream/parakeet-ultra" target="_blank" rel="noopener noreferrer">Moondream’s parakeet-ultra</a>. ONNX conversion and quantization: <a href="https://huggingface.co/ai-ecoverse/Underdog-Bark-3.0-ONNX" target="_blank" rel="noopener noreferrer">ai-ecoverse</a> and velddev (<a href="https://huggingface.co/velddev/Underdog-Bark-3.0-Plus-sherpa-onnx" target="_blank" rel="noopener noreferrer">Plus</a>, <a href="https://huggingface.co/velddev/Underdog-Bark-3.0-Clean-sherpa-onnx" target="_blank" rel="noopener noreferrer">Clean</a>). <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>.</p>
-        <p id="local-model-status" class="field-note model-progress" role="status" aria-live="polite"></p>
-      </section>
-      <details class="advanced-settings"><summary>Advanced settings <span aria-hidden="true">+</span></summary>
-        <label for="analysis-model">Feedback model</label><input id="analysis-model" placeholder="Provider default" spellcheck="false"><p class="field-note">The recommended model is selected automatically. Change this only if you need a specific model.</p>
-      </details>
-      <div id="settings-status" class="settings-status" role="status"></div>
-      <div class="dialog-actions"><button class="primary-button" id="save-settings" type="submit">Apply <span aria-hidden="true">↗</span></button></div>
-      <p class="small-note">Only your chosen provider is used for coaching. Keys stay in this tab’s memory and clear when you reload or close it.</p>
-    </form>
   </dialog>
 </body>
 </html>

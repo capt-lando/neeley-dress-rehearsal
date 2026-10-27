@@ -1,6 +1,5 @@
 'use strict';
 
-import { BARK_MODEL_ID, BARK_MODELS } from '../lib/speech-models.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
 import { createRehearsalChat } from './rehearsal-chat.js';
@@ -8,11 +7,11 @@ import { renderDiscussableTranscript, selectedTranscriptQuote } from '../lib/tra
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  config: { hosted: Boolean(window.rehearsalService?.hosted), configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: BARK_MODEL_ID, analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
+  config: { hosted: Boolean(window.rehearsalService?.hosted), configured: false, speechConfigured: false, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: 'gpt-live-transcribe', analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
   stream: null, context: null, source: null, processor: null, silent: null, analyser: null,
   recording: false, recordingPaused: false, startingRecording: false, recordingSampleRate: 0, requestingMic: false, preparingAudio: false, samples: [], sampleCount: 0, timer: null, meterFrame: null,
   audioBlob: null, audioURL: null, audioDuration: 0, duration: 0, report: null, busy: false, requestController: null,
-  inputDevice: '', micGeneration: 0, inputListGeneration: 0, inputsNamed: false, analysisGeneration: 0, settingsProvider: 'openai', promptGeneration: 0,
+  inputDevice: '', micGeneration: 0, inputListGeneration: 0, inputsNamed: false, analysisGeneration: 0, promptGeneration: 0,
   audioGeneration: 0, transcriptText: '', transcriptGeneration: -1, transcriptModel: '', transcriptPromise: null, transcriptController: null,
   transcriptionAttempted: false, transcriptWords: [], activeWordIndex: -1, playbackFrame: null, scrubbing: false,
   liveTake: null, livePromise: null, liveFailure: '',
@@ -53,7 +52,7 @@ function renderSummaryDraft(text = '', live = false) {
   else container.textContent = 'Your words will appear here as you record.';
   $('annotation-title').textContent = 'Full transcript';
   $('annotation-status').textContent = live
-    ? 'Draft text arrives as each speech segment finishes. Annotations begin when you press Analyze.'
+    ? 'Draft words appear as you speak. Annotations begin when you press Analyze.'
     : hasText ? 'Click a sentence or highlight a passage to add it to chat. Press Analyze for annotations.'
       : 'Start a rehearsal to see your transcript. Press Analyze when you are ready for feedback.';
   $('annotation-legend').hidden = true; $('annotations-notes').replaceChildren();
@@ -80,14 +79,6 @@ function attachTranscriptSelection(event = {}) {
     }
   }
 }
-
-const PROVIDER_GUIDES = {
-  openai: { id: 'openai', label: 'ChatGPT (OpenAI)', keyUrl: 'https://platform.openai.com/api-keys', instructions: 'Sign in to the OpenAI API platform. Create an API key, then copy it here.' },
-  anthropic: { id: 'anthropic', label: 'Claude (Anthropic)', keyUrl: 'https://platform.claude.com/settings/keys', instructions: 'Sign in to the Claude developer platform. Choose “Create key,” name it, link your account, and select a single workspace. Then copy the key.' },
-  google: { id: 'google', label: 'Gemini (Google)', keyUrl: 'https://aistudio.google.com/apikey', instructions: 'Sign in to Google AI Studio. Choose “Create API key.” Select or import a Google Cloud project if prompted, then copy the key.' },
-  deepseek: { id: 'deepseek', label: 'DeepSeek', keyUrl: 'https://platform.deepseek.com/api_keys', defaultModel: 'deepseek-flash', instructions: 'Sign in to the DeepSeek API platform. Create an API key, then copy it here.' },
-  meta: { id: 'meta', label: 'Meta Muse', keyUrl: 'https://dev.meta.ai/api-keys', defaultModel: 'muse-spark-1.3', instructions: 'Sign in to Meta’s developer platform. Create an API key, then copy it here.' },
-};
 
 function setStatus(message, type = '') {
   $('app-status').textContent = message;
@@ -285,38 +276,16 @@ function updateConfig(config) {
   syncChat();
   const manualPanelTranscript = state.config.coachingViaHost && !state.audioBlob && !state.recording && !state.startingRecording;
   if (state.config.transcriptionModel !== previousSpeechModel && !manualPanelTranscript) resetTranscriptForModelChange();
-  state.settingsProvider = state.config.analysisProvider || 'openai';
-  const ready = state.config.analysisConfigured;
   $('cloud-recordings-details').hidden = !state.config.hosted;
   $('saved-recordings-details').hidden = Boolean(state.config.hosted);
-  if (state.config.hosted) {
-    $('connection-label').textContent = state.config.auth?.signedIn ? 'My account' : 'Sign in';
-    $('settings-open').setAttribute('aria-label', 'Account and privacy settings');
-    $('connection-dot').classList.toggle('connected', Boolean(state.config.auth?.signedIn));
-    document.querySelector('.timer-limit').textContent = `/ ${formatTime(state.config.maxDurationSeconds)}`;
-    if (state.report) renderCoachingState(state.report);
-    if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
-    return;
-  }
-  $('connection-label').textContent = state.config.coachingViaHost ? 'Codex coaching' : ready ? 'AI key in this tab' : 'Connect API';
-  $('settings-open').setAttribute('aria-label', state.config.coachingViaHost ? 'Rehearsal settings: coaching in this Codex conversation' : `Connection settings: ${ready ? 'AI key in this tab' : 'connect an AI provider'}`);
-  $('connection-dot').classList.toggle('connected', ready);
-  renderSpeechSettings();
+  $('connection-label').textContent = state.config.hosted
+    ? state.config.auth?.signedIn ? 'My account' : 'Sign in'
+    : state.config.coachingViaHost ? 'Codex coaching' : 'Connection unavailable';
+  $('settings-open').setAttribute('aria-label', state.config.hosted ? 'Account and privacy settings' : 'Coaching connection');
+  $('connection-dot').classList.toggle('connected', state.config.hosted ? Boolean(state.config.auth?.signedIn) : Boolean(state.config.analysisConfigured));
   document.querySelector('.timer-limit').textContent = `/ ${formatTime(state.config.maxDurationSeconds)}`;
-  renderProviderSettings();
   if (state.report) renderCoachingState(state.report);
   if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
-}
-function renderSpeechSettings() {
-  const unavailable = new Option('Bark 3.0 Pro · browser version unavailable', 'bark-pro-unavailable');
-  unavailable.disabled = true;
-  $('transcription-model').replaceChildren(...BARK_MODELS.map(model => new Option(model.label, model.id)), unavailable);
-  $('transcription-model').value = state.config.transcriptionModel;
-  updateSpeechModelNote();
-}
-function updateSpeechModelNote() {
-  const model = BARK_MODELS.find(item => item.id === $('transcription-model').value);
-  $('speech-model-note').textContent = model?.downloadNote || '';
 }
 function resetTranscriptForModelChange() {
   state.processing?.clear();
@@ -335,69 +304,20 @@ function resetTranscriptForModelChange() {
   $('report').hidden = true;
   state.chat?.selectQuote(''); renderSummaryDraft();
   markPromptStale();
-  if (wasLive) showLiveFallback('The speech model changed. Transcribe the complete recording after you stop.');
+  if (wasLive) showLiveFallback('The transcription service changed. Transcribe the complete recording after you stop.');
   if (analyzing) setBusy(false);
   else syncCancelControls();
 }
-function providerInfo(id = state.settingsProvider) {
-  if (id === 'codex' || state.config.coachingViaHost) return { id: 'codex', label: 'Codex', configured: true, model: 'Codex' };
-  const provider = (Array.isArray(state.config.providers) ? state.config.providers : []).find((item) => item.id === id) || {};
-  return { ...(PROVIDER_GUIDES[id] || PROVIDER_GUIDES.openai), ...provider };
+function providerInfo(id = state.config.analysisProvider) {
+  if (id === 'codex' || state.config.coachingViaHost) return { label: 'Codex' };
+  const provider = (Array.isArray(state.config.providers) ? state.config.providers : []).find(item => item.id === id);
+  return { label: provider?.label || ({ openai: 'OpenAI', hosted: 'AI coach', anthropic: 'Claude', google: 'Gemini' }[id]) || 'AI coach' };
 }
-function resetKeyVisibility(inputId, toggleId) {
-  $(inputId).type = 'password';
-  $(toggleId).textContent = 'Show';
-  $(toggleId).setAttribute('aria-pressed', 'false');
-  $(toggleId).setAttribute('aria-label', 'Show analysis API key');
-}
-function renderProviderSettings() {
-  if (state.config.coachingViaHost) return;
-  const provider = providerInfo();
-  $('analysis-key-provider').textContent = provider.label;
-  document.querySelectorAll('input[name="analysis-provider"]').forEach((input) => { input.checked = input.value === state.settingsProvider; });
-  $('provider-instructions').textContent = provider.instructions || PROVIDER_GUIDES[state.settingsProvider]?.instructions || 'Sign in, create an API key, then copy it.';
-  $('provider-key-link').href = provider.keyUrl || PROVIDER_GUIDES[state.settingsProvider]?.keyUrl;
-  $('provider-key-link').setAttribute('aria-label', `Sign in to ${provider.label} and get an API key (opens a new tab)`);
-  $('analysis-model').value = provider.model || (state.settingsProvider === state.config.analysisProvider ? state.config.analysisModel : '') || provider.defaultModel || '';
-  $('analysis-api-key').placeholder = provider.configured ? 'A key is in this tab · leave blank to keep it' : 'Paste your API key';
-  $('analysis-key-state').textContent = provider.configured ? 'Key in this tab' : 'No key in this tab';
-  $('analysis-key-state').classList.toggle('saved', Boolean(provider.configured));
-  $('disconnect-button').hidden = !provider.configured;
-  $('disconnect-button').setAttribute('aria-label', `Remove the ${provider.label} API key from this tab`);
-  $('analysis-key-help').textContent = 'Leave blank to keep the current provider’s key. Changing providers replaces the connection. Keys are checked when you analyze.';
-}
-function selectProvider(id) {
-  if (!PROVIDER_GUIDES[id]) return;
-  state.settingsProvider = id;
-  $('analysis-api-key').value = '';
-  resetKeyVisibility('analysis-api-key', 'analysis-key-toggle');
-  $('settings-status').textContent = '';
-  renderProviderSettings();
-}
-function clearKeyFields() {
-  $('analysis-api-key').value = '';
-  resetKeyVisibility('analysis-api-key', 'analysis-key-toggle');
-}
-function openSettings() { if (state.config.hosted) { window.rehearsalAccount?.open(); return; } $('settings-status').textContent = ''; state.settingsProvider = state.config.analysisProvider || 'openai'; renderProviderSettings(); renderSpeechSettings(); $('settings-dialog').showModal(); document.body.classList.add('no-scroll'); }
-function closeSettings() { clearKeyFields(); $('settings-dialog').close(); document.body.classList.remove('no-scroll'); }
-async function saveSettings(event) {
-  event.preventDefault();
-  const analysisApiKey = $('analysis-api-key').value.trim();
-  const analysisModel = $('analysis-model').value.trim();
-  const body = { transcriptionModel: $('transcription-model').value.trim() };
-  if (!state.config.coachingViaHost) {
-    body.analysisProvider = state.settingsProvider;
-    if (analysisApiKey) body.analysisApiKey = analysisApiKey;
-    if (analysisModel) body.analysisModel = analysisModel;
-  }
-  $('save-settings').disabled = true;
-  $('settings-status').textContent = 'Applying your settings to this tab…';
-  try {
-    updateConfig(await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
-    closeSettings();
-    setStatus(state.config.coachingViaHost ? 'Speech settings applied. Analyze requests coaching in this Codex conversation.' : state.config.analysisConfigured ? 'Settings applied to this tab. Replay transcribes on your device; Analyze adds AI coaching.' : 'Speech recognition is ready on your device. Connect an AI provider when you want coaching and a speech rating.');
-  } catch (error) { $('settings-status').textContent = errorMessage(error); }
-  finally { $('save-settings').disabled = false; }
+function openSettings() {
+  if (state.config.hosted) { window.rehearsalAccount?.open(); return; }
+  setStatus(state.config.coachingViaHost
+    ? 'Analyze sends your transcript and preparation text to this Codex conversation.'
+    : 'The rehearsal service is unavailable. Reload the published app to reconnect.', state.config.coachingViaHost ? '' : 'error');
 }
 
 async function enumerateInputs() {
@@ -617,7 +537,10 @@ function captureRecordingSamples(samples, sampleRate) {
     const captured = new Float32Array(samples.subarray(0, length));
     state.samples.push(captured);
     state.sampleCount += length;
-    try { if (!state.liveTake?.failed) state.liveTake?.session?.push(captured); }
+    try {
+      if (state.liveTake?.failed) state.liveTake.session?.captureRemaining?.(captured);
+      else state.liveTake?.session?.push(captured);
+    }
     catch (error) { if (state.liveTake) failLiveTranscription(state.liveTake, error); }
   }
   if (state.sampleCount >= Math.floor(sampleRate * state.config.maxDurationSeconds)) stopRecording(true);
@@ -650,6 +573,9 @@ function startLiveTranscription() {
   try {
     take.session = window.rehearsalLiveSpeech.startSession({
       model: take.model, sampleRate: state.recordingSampleRate, encodeAudio: makeWav,
+      onRecoveryWarning(message) {
+        if (state.liveTake === take && take.generation === state.audioGeneration) setStatus(message, 'error');
+      },
       onUpdate(snapshot) {
         if (state.liveTake !== take || take.generation !== state.audioGeneration || take.failed) return;
         if (snapshot.error) { failLiveTranscription(take, snapshot.error); return; }
@@ -660,7 +586,6 @@ function startLiveTranscription() {
       onProgress(message) {
         if (state.liveTake !== take || take.generation !== state.audioGeneration || take.failed || typeof message !== 'string') return;
         take.progress = message;
-        $('local-model-status').textContent = message;
         renderLiveProgress(take);
       },
     });
@@ -675,17 +600,16 @@ function renderLiveProgress(take) {
   }
   const snapshot = take.snapshot;
   const text = String(snapshot.text || '');
-  const completed = Number(snapshot.completedSeconds) || 0;
   const captured = Number(snapshot.audioSeconds) || 0;
-  const prefix = take.finishing ? 'Finishing transcript' : state.recordingPaused ? 'Paused · transcription continues' : snapshot.preparing ? 'Preparing speech model' : snapshot.catchingUp ? 'Catching up' : take.hosted ? '10-second segments' : '30-second windows';
-  const progress = !completed && take.progress ? ` · ${take.progress}` : '';
-  const message = `${prefix} · ${formatTime(completed)} of ${formatTime(captured)} transcribed${progress}`;
+  const prefix = take.finishing ? 'Saving transcript' : state.recordingPaused ? 'Paused' : snapshot.preparing ? 'Connecting live transcription' : snapshot.catchingUp ? 'Transcription is catching up' : 'Live transcript';
+  const progress = snapshot.preparing && take.progress ? ` · ${take.progress}` : '';
+  const message = `${prefix} · ${formatTime(captured)} recorded${progress}`;
   if (take.text === text && take.status === message) return;
   take.status = message;
   const container = $('follow-transcript');
   if (take.text !== text) {
     take.text = text;
-    container.textContent = text || 'Your words will appear here as each batch is transcribed.';
+    container.textContent = text || 'Your words will appear here as you speak.';
     container.scrollTop = container.scrollHeight;
     renderSummaryDraft(text, true);
   }
@@ -694,9 +618,7 @@ function renderLiveProgress(take) {
   $('follow-transcript-connect').hidden = true;
   $('live-transcription-cancel').hidden = take.finishing;
   $('follow-transcript-note').hidden = false;
-  $('follow-transcript-note').textContent = take.hosted
-    ? 'Draft transcript · 10-second audio segments are sent to the cloud. Stop processes the remaining audio and saves the complete recording privately. Text may arrive later and can contain recognition errors.'
-    : 'Draft transcript · 30-second audio windows with a brief overlap. Stopping processes the remaining audio. Text may appear later and can contain recognition errors.';
+  $('follow-transcript-note').textContent = 'Live draft · words may be corrected as you speak. Stop saves your recording and transcript privately.';
 }
 function cancelLiveSession() {
   const take = state.liveTake;
@@ -1192,7 +1114,7 @@ async function togglePlayback() {
 function showTranscriptReadyState() {
   if (!state.audioBlob || state.transcriptText || state.transcriptPromise || state.liveTake) return;
   if (state.liveFailure) { showLiveFallback(state.liveFailure); return; }
-  $('follow-transcript-status').textContent = state.config.hosted ? 'Create transcript saves this recording privately and transcribes it in the cloud. Replay stays on this device.' : 'Replay to transcribe English speech on your device. The first run downloads the speech model.';
+  $('follow-transcript-status').textContent = 'Create transcript saves and transcribes this recording privately. Replay does not process it again.';
   $('follow-transcript-connect').textContent = 'Create transcript';
   $('follow-transcript-connect').hidden = false;
 }
@@ -1227,7 +1149,7 @@ function ensureTranscript(progress = null) {
   progress ||= beginProcessing({ signal: controller.signal });
   state.transcriptController = controller;
   state.transcriptionAttempted = true;
-  $('follow-transcript-status').textContent = state.config.hosted ? 'Saving and transcribing this recording in the cloud… You can keep listening.' : 'Preparing speech recognition on your device… You can keep listening.';
+  $('follow-transcript-status').textContent = 'Preparing your transcript… You can keep listening.';
   if (state.config.hosted) $('audio-save-status').textContent = state.cloudRecordingId ? 'Saved privately to your account. Preparing your transcript…' : 'Saving this recording privately to your account…';
   $('follow-transcript-connect').hidden = true;
   syncCancelControls();
@@ -1376,7 +1298,7 @@ async function loadPromptPreview() {
     if (generation !== state.promptGeneration) return '';
     if (typeof result.prompt !== 'string') throw new Error('The prompt preview was unavailable. Please try again.');
     $('coaching-prompt').value = result.prompt;
-    $('prompt-status').textContent = state.config.coachingViaHost ? 'Ready. This preview contains the coaching policy, your transcript, and your preparation text.' : 'Ready. This preview contains your transcript and targets; it contains no API keys.';
+    $('prompt-status').textContent = state.config.coachingViaHost ? 'Ready. This preview contains the coaching policy, your transcript, and your preparation text.' : 'Ready. This preview contains your transcript and practice notes.';
     return result.prompt;
   } catch (error) { $('prompt-status').textContent = errorMessage(error); return ''; }
   finally { $('refresh-prompt').disabled = false; }
@@ -1470,22 +1392,12 @@ function renderCoachingState(report) {
   $('coaching-notice').hidden = complete;
   $('speech-analysis-content').hidden = !complete;
   $('analysis-disclaimer').hidden = !complete;
-  if (state.config.hosted) {
-    $('coaching-title').textContent = failed ? 'Coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Sign in for coaching.';
-    $('coaching-description').textContent = 'Cloud coaching reviews your transcript and preparation text. Your recordings, transcripts, and feedback are saved privately to your account.';
-    $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Sign in';
-    $('coaching-settings').hidden = true;
-    return;
-  }
-  $('coaching-title').textContent = failed ? 'AI coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Connect an AI coach.';
+  $('coaching-title').textContent = failed ? 'AI coaching could not finish.' : ready ? 'Ready for your AI coach.' : 'Sign in for coaching.';
   $('coaching-description').textContent = state.config.coachingViaHost
-    ? 'Your transcript and word stats are ready. Analyze sends your current text to this Codex conversation for a speech rating and color annotations.'
-    : failed
-    ? 'Your transcript and word stats are ready. Check the connection message above, then retry for a speech rating and color annotations.'
-    : ready ? 'Your key is in this tab. Analyze this transcript for a speech rating and color annotations.'
-      : 'Transcription and word stats work without a key. A speech rating and color annotations require an API key from your chosen AI provider. Keys clear when you refresh or close this tab.';
-  $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Connect AI coach';
-  $('coaching-settings').hidden = !ready || Boolean(state.config.coachingViaHost);
+    ? 'Analyze sends your current transcript and preparation text to this Codex conversation for feedback and annotations.'
+    : 'Analyze reviews your transcript and preparation text. Your recordings, transcripts, and feedback are saved privately to your account.';
+  $('coaching-action').textContent = ready ? (failed ? 'Retry AI coaching' : 'Analyze with AI') : 'Sign in';
+  $('coaching-settings').hidden = true;
 }
 function renderReport() {
   const report = state.report;
@@ -1781,27 +1693,6 @@ $('cancel-restart-dialog').addEventListener('pointermove', event => {
 $('cancel-restart-dialog').addEventListener('cancel', event => { if (state.cancelRestartPending) event.preventDefault(); else state.cancelConfirmation = null; });
 $('coaching-action').addEventListener('click', () => state.config.analysisConfigured ? runAnalysis({ corrected: true }) : openSettings());
 $('coaching-settings').addEventListener('click', openSettings);
-$('settings-close').addEventListener('click', closeSettings);
-$('settings-dialog').addEventListener('close', () => { clearKeyFields(); document.body.classList.remove('no-scroll'); });
-$('settings-dialog').addEventListener('click', (event) => { if (event.target === $('settings-dialog')) { const rect = event.target.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) closeSettings(); } });
-$('settings-form').addEventListener('submit', saveSettings);
-$('disconnect-button').addEventListener('click', async () => {
-  $('disconnect-button').disabled = true;
-  try { const label = providerInfo().label; updateConfig(await api('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ analysisProvider: state.settingsProvider, clearAnalysisKey: true }) })); $('analysis-api-key').value = ''; $('settings-status').textContent = `The ${label} key was removed from this tab. Local speech recognition still works.`; }
-  catch (error) { $('settings-status').textContent = errorMessage(error); }
-  finally { $('disconnect-button').disabled = false; }
-});
-document.querySelectorAll('input[name="analysis-provider"]').forEach((input) => input.addEventListener('change', () => selectProvider(input.value)));
-$('transcription-model').addEventListener('change', updateSpeechModelNote);
-for (const [inputId, toggleId, label] of [['analysis-api-key', 'analysis-key-toggle', 'analysis']]) {
-  $(toggleId).addEventListener('click', () => {
-    const show = $(inputId).type === 'password';
-    $(inputId).type = show ? 'text' : 'password';
-    $(toggleId).textContent = show ? 'Hide' : 'Show';
-    $(toggleId).setAttribute('aria-pressed', String(show));
-    $(toggleId).setAttribute('aria-label', `${show ? 'Hide' : 'Show'} ${label} API key`);
-  });
-}
 $('prompt-details').addEventListener('toggle', () => { if ($('prompt-details').open) loadPromptPreview(); });
 $('refresh-prompt').addEventListener('click', loadPromptPreview);
 $('copy-prompt').addEventListener('click', copyPrompt);
@@ -1900,7 +1791,6 @@ updatePlaybackUI();
 if (state.config.hosted) updateConfig(state.config);
 window.rehearsalService?.setProgressHandler?.((message) => {
   if (typeof message !== 'string' || !message) return;
-  $('local-model-status').textContent = message;
   if (state.transcriptController) $('follow-transcript-status').textContent = message;
   if (state.busy) setStatus(message, 'busy');
 });

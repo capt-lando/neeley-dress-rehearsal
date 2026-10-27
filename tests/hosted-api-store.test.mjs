@@ -75,11 +75,19 @@ test('batch cancel and atomic completion use restricted owner-scoped RPCs',async
   await assert.rejects(cancelled.completeRequest('owner','request',{}),error=>error.status===409&&error.jobState==='cancelled');
 });
 
-test('speech startup reserves and acknowledges only the server-derived owner and operation',async()=>{
+test('streaming claims and completions bind the server-derived owner and exact segment',async()=>{
   const calls=[]; const store=createSupabaseStore({async rpc(name,args){calls.push({name,args});return {data:{state:'new',ready:false}};}});
-  await store.speechWarmupReserve('owner','server-operation',75000); await store.speechWarmupFinish('owner','server-operation',true);
-  assert.deepEqual(calls,[{name:'rehearsal_speech_warmup_reserve',args:{p_user:'owner',p_request:'server-operation',p_cost:75000}},
-    {name:'rehearsal_speech_warmup_finish',args:{p_user:'owner',p_request:'server-operation',p_ready:true}}]);
+  await store.liveStreamClaim('owner','recording','request',0); await store.liveStreamFinish('owner','recording','request',0,'Hello.',24000);
+  await store.liveStreamFail('owner','recording','request',0);
+  assert.deepEqual(calls,[{name:'rehearsal_stream_claim',args:{p_user:'owner',p_recording:'recording',p_request:'request',p_sequence:0}},
+    {name:'rehearsal_stream_finish',args:{p_user:'owner',p_recording:'recording',p_request:'request',p_sequence:0,p_text:'Hello.',p_samples:24000}},
+    {name:'rehearsal_stream_fail',args:{p_user:'owner',p_recording:'recording',p_request:'request',p_sequence:0}}]);
+});
+
+test('draft key recovery uses the restricted RPC with verified owner and original request',async()=>{
+  let sent;const store=createSupabaseStore({async rpc(name,args){sent={name,args};return {data:{draft_key:'key'}};}});
+  assert.deepEqual(await store.liveDraftKey('owner','recording','request'),{draft_key:'key'});
+  assert.deepEqual(sent,{name:'rehearsal_live_draft_key',args:{p_user:'owner',p_recording:'recording',p_request:'request'}});
 });
 
 test('only definite reservation refusals prove a request was not started',async()=>{

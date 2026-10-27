@@ -11,7 +11,7 @@ const directives = policy => Object.fromEntries(policy.split('; ').map(item => {
 
 test('hosted policy permits only its exact backend and required browser assets', () => {
   const policy = directives(webContentSecurityPolicy(hosted));
-  assert.deepEqual(policy['connect-src'], ["'self'", 'https://pilot.supabase.co']);
+  assert.deepEqual(policy['connect-src'], ["'self'", 'https://pilot.supabase.co', 'wss://pilot.supabase.co']);
   assert.deepEqual(policy['script-src'], ["'self'", "'wasm-unsafe-eval'"]);
   assert.deepEqual(policy['worker-src'], ["'self'", 'blob:']);
   assert.deepEqual(policy['media-src'], ["'self'", 'blob:']);
@@ -20,13 +20,10 @@ test('hosted policy permits only its exact backend and required browser assets',
   assert.ok(!policy['frame-ancestors'], 'frame-ancestors is ineffective in a meta tag');
 });
 
-test('local policy allows existing APIs and pinned speech resources without arbitrary remote scripts', () => {
+test('unconfigured preview cannot reach remote providers or load remote scripts', () => {
   const policy = directives(webContentSecurityPolicy());
-  for (const origin of ['https://api.openai.com', 'https://api.anthropic.com', 'https://generativelanguage.googleapis.com', 'https://api.deepseek.com', 'https://api.meta.ai', 'https://huggingface.co', 'https://us.aws.cdn.hf.co']) assert.ok(policy['connect-src'].includes(origin));
-  const runtime = policy['script-src'].find(value => value.startsWith('https:'));
-  assert.match(runtime, /^https:\/\/cdn\.jsdelivr\.net\/npm\/onnxruntime-web@1\.31\.0-dev\.20260914-8d85527a0\/dist\/$/);
-  assert.ok(policy['connect-src'].includes(runtime));
-  assert.equal(policy['script-src'].filter(value => value.startsWith('https:')).length, 1);
+  assert.deepEqual(policy['connect-src'], ["'self'"]);
+  assert.deepEqual(policy['script-src'], ["'self'", "'wasm-unsafe-eval'"]);
   assert.ok(!policy['script-src'].includes("'unsafe-eval'") && !policy['script-src'].includes("'unsafe-inline'"));
   assert.ok(!Object.values(policy).flat().some(value => value === '*' || value === 'https:'));
 });

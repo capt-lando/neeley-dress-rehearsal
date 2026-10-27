@@ -9,7 +9,7 @@ const user='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-822
 const recording='33333333-3333-4333-8333-333333333333', requestId='44444444-4444-4444-8444-444444444444';
 const origin='https://capt-lando.github.io';
 function token({sub=user,method='oauth',aal='aal1'}={}) { return 'header.'+Buffer.from(JSON.stringify({sub,amr:[{method}],aal})).toString('base64url')+'.signature'; }
-const env={ALLOWED_ORIGINS:origin,BARK_WORKER_URL:'https://speech.example/transcribe',BARK_WORKER_ALLOWED_HOSTS:'speech.example',BARK_WORKER_TOKEN:'private-worker-token',BARK_RESERVE_MICROUSD:'250000',COACHING_PROVIDER:'google',COACHING_API_KEY:'private-coach-key',COACHING_RESERVE_MICROUSD:'500000'};
+const env={ALLOWED_ORIGINS:origin,COACHING_PROVIDER:'openai',COACHING_API_KEY:'private-coach-key',COACHING_RESERVE_MICROUSD:'500000'};
 function wav(seconds=1) {
   const bytes=Buffer.alloc(44+seconds*32000); bytes.write('RIFF');bytes.writeUInt32LE(bytes.length-8,4);bytes.write('WAVEfmt ',8);bytes.writeUInt32LE(16,16);
   bytes.writeUInt16LE(1,20);bytes.writeUInt16LE(1,22);bytes.writeUInt32LE(16000,24);bytes.writeUInt32LE(32000,28);bytes.writeUInt16LE(2,32);bytes.writeUInt16LE(16,34);bytes.write('data',36);bytes.writeUInt32LE(bytes.length-44,40);
@@ -62,7 +62,7 @@ function fixture(overrides={}) {
     ...overrides.store,
   };
   const app=createHostedApi({store,env:{...env,...overrides.env},policyText,
-    fetchImpl:async(url,options)=>{calls.push(['fetch',url,options]);return Response.json(url.endsWith('/cancel')?{cancelled:true}:{text:'Um, we should expand tutoring.',durationSeconds:1,model:'bark-3.0-plus',chunks:[]});},
+    fetchImpl:async(url,options)=>{calls.push(['fetch',url,options]);return Response.json({text:'Um, we should expand tutoring.'});},
     coach:async options=>{calls.push(['coach',options]);return {thesis:{summary:'Expand tutoring.',clarity:'An explicit claim.',evidence:['We should expand tutoring.']}};},...overrides,store,env:{...env,...overrides.env}});
   async function call(path,{method='GET',body,auth=token(),headers={}}={}) {
     return app(new Request('https://project.supabase.co/functions/v1/rehearsal-api'+path,{method,headers:{Origin:origin,...(auth?{Authorization:`Bearer ${auth}`} : {}),...(body===undefined?{}:{'Content-Type':'application/json'}),...headers},body:body===undefined?undefined:JSON.stringify(body)}));
@@ -78,7 +78,7 @@ test('refresh polling recovers a disconnected batch request without a second pai
   for (const kind of ['transcribe','coach']) {
     let release;const wait=new Promise(resolve=>{release=resolve;});
     const f=fixture(kind==='transcribe'
-      ? {fetchImpl:async()=>{await wait;return Response.json({text:'Recovered transcript.',durationSeconds:1,model:'bark-3.0-plus'});}}
+      ? {fetchImpl:async()=>{await wait;return Response.json({text:'Recovered transcript.'});}}
       : {coach:async()=>{await wait;return {thesis:{summary:'Tutoring.',clarity:'Clear.',evidence:['We should expand tutoring.']}};}});
     const response=await f.call(kind==='transcribe'?'/transcribe':'/analyze-text',{...(kind==='transcribe'?transcribe:analyze),headers:streamHeaders});
     assert.equal(response.status,200);await response.body.cancel();
@@ -89,7 +89,7 @@ test('refresh polling recovers a disconnected batch request without a second pai
     assert.equal(finished.state,'completed');assert.deepEqual(finished.result,JSON.parse(JSON.stringify(f.jobs.get(requestId).response)));
     assert.equal(f.debits,1);assert.equal(f.calls.filter(call=>call[0]==='reserve').length,1);
     assert.equal(f.calls.filter(call=>call[0]==='requestStatus').length,3);
-    assert.doesNotMatch(JSON.stringify(finished),/private-worker|private-coach|input_hash|reserved_microusd/);
+    assert.doesNotMatch(JSON.stringify(finished),/private-coach|input_hash|reserved_microusd/);
   }
 });
 
@@ -115,7 +115,7 @@ test('explicit cancellation aborts running speech and coaching and preserves the
     const f=fixture({cancellationPollMs:5,
       fetchImpl:async(url,options)=>{
         if(url.endsWith('/cancel')){assert.deepEqual(JSON.parse(options.body),{requestId:`${user}:${requestId}`});return Response.json({cancelled:true});}
-        assert.equal(options.headers['X-Rehearsal-Request'],`${user}:${requestId}`);return waitForAbort(options.signal);
+        assert.equal(options.headers.Authorization,'Bearer private-coach-key');return waitForAbort(options.signal);
       },coach:async options=>waitForAbort(options.signal)});
     const before=JSON.stringify(f.rows.get(recording));
     const response=await f.call(kind==='transcribe'?'/transcribe':'/analyze-text',{...(kind==='transcribe'?transcribe:analyze),headers:streamHeaders});
@@ -156,12 +156,12 @@ test('cancelling an already completed request retains its exact result and saved
   assert.deepEqual((await(await f.call('/requests/'+requestId)).json()).result,result);assert.equal(f.debits,1);
 });
 
-test('unconfirmed speech cancellation is retryable without reviving or recharging the request',async()=>{
-  let attempts=0;const f=fixture({fetchImpl:async(url)=>{assert.ok(url.endsWith('/cancel'));return ++attempts===1?Response.json({error:'private failure'},{status:503}):Response.json({cancelled:true});}});
+test('cancel-before-start never wakes a compute service and cannot recharge the request',async()=>{
+  let attempts=0;const f=fixture({fetchImpl:async()=>{attempts++;throw new Error('Unexpected compute');}});
   const path=`/requests/${requestId}/cancel`,options={method:'POST',body:{recordingId:recording}};
-  const first=await f.call(path,options);assert.equal(first.status,503);assert.match((await first.json()).error,/not confirmed stopping/);
+  const first=await f.call(path,options);assert.equal(first.status,200);
   assert.equal((await f.call('/transcribe',transcribe)).status,409);assert.equal(f.debits,0);
-  assert.equal((await f.call(path,options)).status,200);assert.equal(attempts,2);assert.equal(f.debits,0);
+  assert.equal((await f.call(path,options)).status,200);assert.equal(attempts,0);assert.equal(f.debits,0);
 });
 
 test('failed and expired recovery expose no stale result or private job fields',async()=>{
@@ -190,7 +190,7 @@ test('progress streams report real checkpoints and cached retries invoke no extr
     const replay=await frames(await f.call(path,{...options,headers:streamHeaders}));
     assert.deepEqual(replay,[{type:'progress',stage:'cached_result'},events.at(-1)]);
     assert.equal(f.debits,1);assert.equal(f.calls.filter(call=>call[0]===(path==='/transcribe'?'fetch':'coach')).length,1);
-    assert.doesNotMatch(JSON.stringify(events),/private-worker|private-coach|Bearer|Modal-Secret/);
+    assert.doesNotMatch(JSON.stringify(events),/private-coach|Bearer|COACHING_API_KEY/);
   }
 });
 
@@ -243,7 +243,7 @@ test('streaming retains request and audio concurrency guards through disconnecte
     let releaseWork;const wait=new Promise(resolve=>{releaseWork=resolve;});let completed=0;
     const f=fixture({store:{reserve:async()=>({state:'new'}),finish:async()=>{completed++;}},
       coach:async()=>{await wait;return {thesis:{summary:'Tutoring.',clarity:'Clear.',evidence:['We should expand tutoring.']}};},
-      fetchImpl:async()=>{await wait;return Response.json({text:'Tutoring.',durationSeconds:1,model:'bark-3.0-plus'});}});
+      fetchImpl:async()=>{await wait;return Response.json({text:'Tutoring.'});}});
     const streams=[];
     for(let index=0;index<limit;index++) {
       const response=await f.call(path,{...options,headers:streamHeaders});assert.equal(response.status,200);
@@ -317,7 +317,8 @@ test('packaged server prompt exactly matches the canonical coaching prompt',asyn
 });
 test('public config has no user content, credentials, or administrative authority',async()=>{
   const f=fixture(),response=await f.call('/config',{auth:null}),config=await response.json();
-  assert.equal(response.status,200);assert.equal(config.hosted,true);assert.deepEqual(config.auth,{signedIn:false});assert.equal(config.liveTranscription,false);
+  assert.equal(response.status,200);assert.equal(config.hosted,true);assert.deepEqual(config.auth,{signedIn:false});assert.equal(config.liveTranscription,true);
+  assert.equal(config.liveTransport,'websocket');assert.equal(config.transcriptionModel,'gpt-transcribe');
   assert.deepEqual(f.calls,[['admit',undefined]]);assert.doesNotMatch(JSON.stringify(config),/private-|admin|storage_path|service_role/);
 });
 test('CORS rejects foreign and missing origins before authentication or data access',async()=>{
@@ -347,14 +348,18 @@ test('client cannot select provider keys, models, paths, or arbitrary metadata f
   assert.equal(f.debits,0);
 });
 test('transcription reserves before upstream, sends only server credentials, and persists validated output',async()=>{
-  const f=fixture({env:{BARK_WORKER_MODAL_KEY:'modal-private',BARK_WORKER_MODAL_SECRET:'modal-secret'}});
+  const f=fixture();
   const response=await f.call('/transcribe',transcribe),result=await response.json();assert.equal(response.status,200);assert.equal(result.text,'Um, we should expand tutoring.');assert.equal(f.rows.get(recording).status,'transcribed');
-  const network=f.calls.find(c=>c[0]==='fetch');assert.equal(network[1],env.BARK_WORKER_URL);assert.equal(network[2].redirect,'error');assert.equal(network[2].headers.Authorization,'Bearer private-worker-token');assert.equal(network[2].headers['Modal-Secret'],'modal-secret');
-  assert.ok(f.calls.findIndex(c=>c[0]==='reserve')<f.calls.findIndex(c=>c[0]==='fetch'));assert.doesNotMatch(JSON.stringify(result),/private-|modal-secret/);
+  const network=f.calls.find(c=>c[0]==='fetch');assert.equal(network[1],'https://api.openai.com/v1/audio/transcriptions');assert.equal(network[2].redirect,'error');assert.deepEqual(network[2].headers,{Authorization:'Bearer private-coach-key'});
+  assert.equal(network[2].body.get('model'),'gpt-transcribe');assert.equal(network[2].body.get('file').size,32044);assert.match(network[2].body.get('prompt'),/fillers|filler words/);
+  assert.equal(result.model,'gpt-transcribe');assert.equal(result.durationSeconds,1);assert.equal(f.calls.find(c=>c[0]==='reserve').at(-1),75000);
+  assert.ok(f.calls.findIndex(c=>c[0]==='reserve')<f.calls.findIndex(c=>c[0]==='fetch'));assert.doesNotMatch(JSON.stringify(result),/private-|COACHING_API_KEY/);
   assert.deepEqual(await(await f.call('/transcribe',transcribe)).json(),result);assert.equal(f.debits,1);assert.equal(f.calls.filter(c=>c[0]==='fetch').length,1);
 });
-test('worker destinations and incomplete Modal configuration fail closed',()=>{
-  for(const change of [{BARK_WORKER_URL:'http://speech.example/'},{BARK_WORKER_ALLOWED_HOSTS:'other.example'},{BARK_WORKER_URL:'https://speech.example/?token=x'},{BARK_WORKER_MODAL_KEY:'key'}])assert.throws(()=>fixture({env:change}),/configuration|credentials/);
+test('speech never sends a non-OpenAI coaching key to OpenAI',async()=>{
+  for(const change of [{COACHING_PROVIDER:'google'},{COACHING_API_KEY:''}]) {
+    const f=fixture({env:change});assert.equal((await f.call('/transcribe',transcribe)).status,503);assert.equal(f.debits,0);assert.equal(f.calls.some(c=>c[0]==='fetch'),false);
+  }
 });
 test('WAV validation derives duration and rejects forged size, formats, and over-limit audio',async()=>{
   const bytes=wav(),buffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);assert.equal(inspectHostedWav(buffer),1);
@@ -370,7 +375,7 @@ test('failed or uncertain upstream requests remain debited and are not silently 
   assert.equal((await f.call('/transcribe',transcribe)).status,409);assert.equal(f.debits,1);assert.equal(sent,1);assert.equal(f.jobs.get(requestId).state,'failed');
 });
 
-test('a busy worker reports a persisted terminal failure and the same ID cannot start new compute',async()=>{
+test('a busy provider reports a persisted terminal failure and the same ID cannot start new compute',async()=>{
   let sent=0;
   const f=fixture({fetchImpl:async()=>{sent++;return Response.json({error:'busy'}, {status:429});}});
   const first=await f.call('/transcribe',transcribe);
@@ -411,7 +416,7 @@ test('known pre-admission refusals clear recovery state while uncertain failures
 });
 test('concurrent duplicate requests cannot trigger a second upstream operation',async()=>{
   let release;const wait=new Promise(r=>{release=r;});let started;
-  const begin=new Promise(r=>{started=r;});const f=fixture({fetchImpl:async()=>{started();await wait;return Response.json({text:'Hello there.',durationSeconds:1,model:'bark-3.0-plus'});}});
+  const begin=new Promise(r=>{started=r;});const f=fixture({fetchImpl:async()=>{started();await wait;return Response.json({text:'Hello there.'});}});
   const first=f.call('/transcribe',transcribe);await begin;const retry=await f.call('/transcribe',transcribe);assert.equal(retry.status,409);assert.equal((await retry.json()).jobState,undefined);release();assert.equal((await first).status,200);assert.equal(f.debits,1);
 });
 test('coaching uses saved duration, retains all preparation inputs, and returns the existing report schema',async()=>{

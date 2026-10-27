@@ -1,20 +1,11 @@
 // MCP Apps 2026-01-26: https://github.com/modelcontextprotocol/ext-apps/blob/main/src/spec.types.ts
 export const MCP_APPS_VERSION = '2026-01-26';
 const PANEL_TOOLS = new Set(['prepare_coaching', 'get_rehearsal']);
-const INPUT_FIELDS = ['text', 'targetScript', 'targetTalkingPoints', 'plannedIntroduction', 'plannedTransitions', 'instructorRubric', 'rubricFileName', 'targetMode', 'speakerName', 'durationSeconds', 'useAI'];
 
 function failure(message, status = 400) { return Object.assign(new Error(message), { status }); }
 function aborted() { return Object.assign(new Error('The operation was canceled.'), { name: 'AbortError' }); }
 function checkSignal(signal) { if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : aborted(); }
 function object(value) { return value && typeof value === 'object' && !Array.isArray(value); }
-function bodyObject(value) {
-  if (typeof value === 'string') {
-    if (value.length > 512 * 1024) throw failure('The request is too large.', 413);
-    try { value = JSON.parse(value); } catch { throw failure('The request was not valid JSON.'); }
-  }
-  if (!object(value)) throw failure('Send a JSON object.');
-  return value;
-}
 function toolData(result) {
   if (result?.isError) throw failure(result.content?.find(item => item.type === 'text')?.text || 'The rehearsal tool could not complete this action.');
   if (!object(result?.structuredContent)) throw failure('The rehearsal tool returned an unreadable result.', 502);
@@ -22,15 +13,6 @@ function toolData(result) {
 }
 function validId(value) { return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
 function validRevision(value) { return Number.isSafeInteger(value) && value >= 0; }
-function pause(ms, signal) {
-  checkSignal(signal);
-  return new Promise((resolve, reject) => {
-    const finish = error => { clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(); };
-    const abort = () => finish(signal.reason instanceof Error ? signal.reason : aborted());
-    const timer = setTimeout(() => finish(), ms);
-    signal?.addEventListener('abort', abort, { once: true });
-  });
-}
 function withSignal(promise, signal) {
   checkSignal(signal);
   if (!signal) return promise;
@@ -173,78 +155,4 @@ export function createPanelBridge({ windowImpl = globalThis.window, requestTimeo
     settleInitial(aborted());
   }
   return { initialize, waitForRehearsal, callTool, requestCoaching, download, dispose, get hostInfo() { return hostInfo; } };
-}
-
-/** Preserve local speech/settings/preview while routing analysis through this conversation. */
-export function createPanelService({ browserService, bridge, pollIntervalMs = 1_000, coachingTimeoutMs = 180_000 } = {}) {
-  if (!browserService?.request || !bridge?.callTool) throw new TypeError('Provide the local browser service and panel bridge.');
-  let disposed = false;
-  let progressHandler;
-  let activeAnalysis;
-  const codexConfig = config => ({ ...config, coachingViaHost: true, analysisConfigured: true,
-    analysisProvider: 'codex', analysisProviderLabel: 'Codex', analysisModel: 'Codex', workspaceId: '',
-    providers: [{ id: 'codex', label: 'Codex', configured: true, model: 'Codex' }] });
-  async function analyze(body, options) {
-    const raw = bodyObject(body);
-    // Validate with the same rules used by prompt preview, without sending it anywhere.
-    const input = Object.fromEntries(INPUT_FIELDS.filter(key => Object.hasOwn(raw, key)).map(key => [key, raw[key]]));
-    for (const [key, value] of Object.entries(input)) {
-      const valid = key === 'durationSeconds' ? value === null || (typeof value === 'number' && Number.isFinite(value))
-        : key === 'useAI' ? typeof value === 'boolean' : typeof value === 'string';
-      if (!valid) throw failure('Coaching accepts transcript and preparation text only.');
-    }
-    await browserService.request('/api/prompt-preview', { method: 'POST', body: JSON.stringify(input), signal: options.signal });
-    checkSignal(options.signal);
-    if (input.useAI === false) {
-      const report = await browserService.request('/api/analyze-text', { ...options, body: JSON.stringify(input) });
-      return { ...report, meta: { ...report.meta, analysisProvider: 'codex', analysisProviderLabel: 'Codex', analysisModel: 'Codex' } };
-    }
-    activeAnalysis?.abort();
-    const controller = new AbortController();
-    activeAnalysis = controller;
-    const abort = () => controller.abort();
-    options.signal?.addEventListener('abort', abort, { once: true });
-    const timeout = setTimeout(() => controller.abort(failure('Codex has not returned coaching yet. Check this conversation, then choose Update feedback to try again. Your transcript is still here.', 504)), coachingTimeoutMs);
-    try {
-      const signal = controller.signal;
-      checkSignal(signal);
-      const initial = await bridge.waitForRehearsal({ signal });
-      const rehearsalId = initial.rehearsalId;
-      const prepared = await bridge.callTool('prepare_coaching', { rehearsalId, input }, { signal });
-      if (prepared.rehearsalId !== rehearsalId || !validRevision(prepared.revision)) throw failure('Codex returned a different rehearsal. Reopen Dress Rehearsal before trying again.', 409);
-      const revision = prepared.revision;
-      await bridge.requestCoaching(rehearsalId, revision, { signal });
-      while (true) {
-        checkSignal(signal);
-        const current = await bridge.callTool('get_rehearsal', { rehearsalId }, { signal });
-        checkSignal(signal);
-        if (current.rehearsalId !== rehearsalId || current.revision !== revision) throw failure('This rehearsal changed while coaching was being prepared. Choose Update feedback to analyze your current transcript.', 409);
-        if (current.status === 'complete' && object(current.report)) return current.report;
-        if (current.status !== 'pending') throw failure('This coaching request is no longer pending. Choose Update feedback to try again.', 409);
-        await pause(pollIntervalMs, signal);
-      }
-    } finally {
-      clearTimeout(timeout); options.signal?.removeEventListener('abort', abort);
-      if (activeAnalysis === controller) activeAnalysis = null;
-    }
-  }
-  async function request(path, options = {}) {
-    if (disposed) throw failure('This panel is closed. Reopen Dress Rehearsal.', 410);
-    checkSignal(options.signal);
-    const method = String(options.method || 'GET').toUpperCase();
-    if (method === 'GET' && path === '/api/config') return codexConfig(await browserService.request(path, options));
-    if (method === 'POST' && path === '/api/settings') {
-      const body = bodyObject(options.body);
-      if (Object.keys(body).some(key => key !== 'transcriptionModel')) throw failure('Coaching uses this Codex conversation. Only the local speech model can be changed here.');
-      return codexConfig(await browserService.request(path, { ...options, body: JSON.stringify(body) }));
-    }
-    if (method === 'POST' && path === '/api/analyze-text') return analyze(options.body, options);
-    if (method === 'POST' && ['/api/transcribe', '/api/prompt-preview'].includes(path)) return browserService.request(path, options);
-    throw failure('This panel action does not exist.', 404);
-  }
-  return {
-    request,
-    setProgressHandler(handler) { progressHandler = typeof handler === 'function' ? handler : null; browserService.setProgressHandler?.(progressHandler); },
-    dispose() { if (disposed) return; disposed = true; activeAnalysis?.abort(); browserService.dispose(); bridge.dispose(); progressHandler = null; },
-  };
 }

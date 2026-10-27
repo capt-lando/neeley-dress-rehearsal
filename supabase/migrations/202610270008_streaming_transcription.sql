@@ -1,0 +1,127 @@
+-- Server-owned streaming transcript segments. Provider credentials and results
+-- never depend on client supplied transcript text or a browser-chosen model.
+alter table rehearsal_private.live_sessions
+  add column transport text not null default 'legacy' check(transport in ('legacy','openai-stream')),
+  add column stream_segments jsonb not null default '[]'::jsonb check(jsonb_typeof(stream_segments)='array' and jsonb_array_length(stream_segments)<=12),
+  add column stream_samples integer not null default 0 check(stream_samples between 0 and 14400000),
+  add column stream_reserved_samples integer not null default 0 check(stream_reserved_samples between 0 and 2640000),
+  add constraint live_stream_audio_bound check(stream_samples+stream_reserved_samples<=14400000);
+
+create function public.rehearsal_stream_start(p_user uuid,p_recording uuid,p_request uuid,p_title text,p_hash text,p_cost bigint)
+returns jsonb language plpgsql security definer set search_path='' as $$
+declare result jsonb; previous rehearsal_private.live_sessions;
+begin
+  perform 1 from rehearsal_private.limits where singleton for update;
+  select * into previous from rehearsal_private.live_sessions where recording_id=p_recording;
+  if found and previous.transport<>'openai-stream' then raise exception 'request_conflict'; end if;
+  result:=public.rehearsal_live_start(p_user,p_recording,p_request,p_title,p_hash,p_cost);
+  update rehearsal_private.live_sessions set transport='openai-stream',prepare_state='completed'
+    where recording_id=p_recording and user_id=p_user;
+  return result||jsonb_build_object('transport','openai-stream','prepare_state','completed');
+end $$;
+
+create function public.rehearsal_stream_claim(p_user uuid,p_recording uuid,p_request uuid,p_sequence integer)
+returns jsonb language plpgsql security definer set search_path='' as $$
+declare session rehearsal_private.live_sessions; previous jsonb; cap integer;
+begin
+  if p_user is null or p_recording is null or p_request is null or p_sequence is null or p_sequence not between 0 and 11 then raise exception 'invalid_request'; end if;
+  select * into session from rehearsal_private.live_sessions where recording_id=p_recording and user_id=p_user for update;
+  if not found then raise exception 'not_found'; end if;
+  if session.request_id<>p_request or session.transport<>'openai-stream' then raise exception 'request_conflict'; end if;
+  if session.status<>'active' or session.expires_at<=clock_timestamp() then raise exception 'live_closed'; end if;
+  previous:=session.stream_segments->p_sequence;
+  if previous is not null then
+    return previous||jsonb_build_object('maxSamples',(previous->>'cap')::integer,'consumedSamples',session.stream_samples,
+      'transcript',session.transcript,'nextSequence',session.next_sequence);
+  end if;
+  if session.stream_reserved_samples<>0 or session.next_sequence<>p_sequence or jsonb_array_length(session.stream_segments)<>p_sequence then raise exception 'live_order'; end if;
+  cap:=least(2640000,14400000-session.stream_samples);
+  if cap<=0 then raise exception 'live_duration'; end if;
+  -- Charge the entire possible segment before opening a provider connection.
+  -- Only a confirmed completion settles to actual samples. Failure keeps debit.
+  update rehearsal_private.live_sessions set stream_reserved_samples=cap,
+    stream_segments=stream_segments||jsonb_build_array(jsonb_build_object('state','reserved','cap',cap,'expiresAt',clock_timestamp()+interval '125 seconds')) where recording_id=p_recording;
+  return jsonb_build_object('state','new','maxSamples',cap,'consumedSamples',session.stream_samples,'transcript',session.transcript,'nextSequence',p_sequence);
+end $$;
+
+create function public.rehearsal_stream_finish(p_user uuid,p_recording uuid,p_request uuid,p_sequence integer,p_text text,p_samples integer)
+returns jsonb language plpgsql security definer set search_path='' as $$
+declare session rehearsal_private.live_sessions; previous jsonb; combined text; result jsonb;
+begin
+  if p_user is null or p_recording is null or p_request is null or p_sequence is null or p_sequence not between 0 and 11 or p_text is null or char_length(p_text)>60000
+    or p_samples is null or p_samples not between 0 and 2640000 or (p_samples=0 and btrim(p_text)<>'') then raise exception 'invalid_request'; end if;
+  select * into session from rehearsal_private.live_sessions where recording_id=p_recording and user_id=p_user for update;
+  if not found then raise exception 'not_found'; end if;
+  if session.request_id<>p_request or session.transport<>'openai-stream' then raise exception 'request_conflict'; end if;
+  previous:=session.stream_segments->p_sequence;
+  if session.status<>'active' or session.expires_at<=clock_timestamp() then raise exception 'live_closed'; end if;
+  if previous->>'state'='completed' then
+    if previous->>'text'<>btrim(p_text) or (previous->>'samples')::integer<>p_samples then raise exception 'request_conflict'; end if;
+    return previous||jsonb_build_object('transcript',session.transcript,'nextSequence',session.next_sequence,'consumedSamples',session.stream_samples);
+  end if;
+  if previous->>'state' is distinct from 'reserved' or session.next_sequence<>p_sequence
+    or p_samples>(previous->>'cap')::integer then raise exception 'live_order'; end if;
+  combined:=concat_ws(' ',nullif(session.transcript,''),nullif(btrim(p_text),''));
+  if char_length(combined)>60000 or session.stream_samples+p_samples>14400000 then raise exception 'invalid_request'; end if;
+  result:=previous||jsonb_build_object('state','completed','text',btrim(p_text),'samples',p_samples);
+  update rehearsal_private.live_sessions set stream_reserved_samples=0,stream_samples=stream_samples+p_samples,
+    next_sequence=next_sequence+1,transcript=combined,stream_segments=jsonb_set(stream_segments,array[p_sequence::text],result) where recording_id=p_recording;
+  return result||jsonb_build_object('transcript',combined,'nextSequence',p_sequence+1,'consumedSamples',session.stream_samples+p_samples);
+end $$;
+
+create function public.rehearsal_stream_fail(p_user uuid,p_recording uuid,p_request uuid,p_sequence integer)
+returns void language plpgsql security definer set search_path='' as $$
+declare session rehearsal_private.live_sessions;
+begin
+  if p_user is null or p_recording is null or p_request is null then raise exception 'invalid_request'; end if;
+  select * into session from rehearsal_private.live_sessions where recording_id=p_recording and user_id=p_user for update;
+  if not found then raise exception 'not_found'; end if;
+  if session.request_id<>p_request or session.transport<>'openai-stream' then raise exception 'request_conflict'; end if;
+  if p_sequence is null or p_sequence not between 0 and 11 then raise exception 'invalid_request'; end if;
+  if session.stream_segments->p_sequence->>'state'='reserved' then
+    update rehearsal_private.live_sessions set stream_segments=jsonb_set(stream_segments,array[p_sequence::text,'state'],
+      to_jsonb(case when session.status='active' then 'failed'::text else 'cancelled'::text end)) where recording_id=p_recording;
+    if session.status='active' then perform public.rehearsal_live_close(p_user,p_recording,false); end if;
+  end if;
+end $$;
+
+create function public.rehearsal_stream_finalize(p_user uuid,p_recording uuid,p_duration double precision,p_size integer)
+returns jsonb language plpgsql security definer set search_path='' as $$
+declare session rehearsal_private.live_sessions; recording public.rehearsal_recordings; complete boolean; output jsonb;
+begin
+  -- Same outer lock as cancellation and admission: late socket results cannot
+  -- publish after cancellation wins, and saved audio is never deleted here.
+  perform 1 from rehearsal_private.limits where singleton for update;
+  select * into session from rehearsal_private.live_sessions where recording_id=p_recording and user_id=p_user for update;
+  if not found then raise exception 'not_found'; end if;
+  if session.transport<>'openai-stream' then raise exception 'request_conflict'; end if;
+  select * into recording from public.rehearsal_recordings where id=p_recording and user_id=p_user for update;
+  if recording.status='deleting' then raise exception 'live_closed'; end if;
+  if p_duration is null or p_duration not between 0.5 and 600 or p_size is null or p_size<>44+(p_duration*32000)::integer then raise exception 'invalid_request'; end if;
+  if session.audio_finalized then
+    if recording.size_bytes<>p_size or abs(recording.duration_seconds-p_duration)>0.0001 then raise exception 'request_conflict'; end if;
+    return jsonb_build_object('complete',session.status='completed','text',case when session.status='completed' then session.transcript else '' end);
+  end if;
+  if session.status='active' and session.stream_reserved_samples>0 then raise exception 'request_busy'; end if;
+  complete:=session.status='active' and session.expires_at>clock_timestamp() and session.next_sequence>0
+    and abs(session.stream_samples/24000.0-p_duration)<=0.1;
+  if session.status='active' and not complete then raise exception 'live_duration'; end if;
+  if not complete and recording.status in ('transcribed','analyzed') then
+    -- An old failed-stream response cannot erase a later successful batch retry.
+    update rehearsal_private.live_sessions set audio_finalized=true where recording_id=p_recording;
+    return jsonb_build_object('complete',false,'text','');
+  end if;
+  update public.rehearsal_recordings set duration_seconds=p_duration,size_bytes=p_size,status=case when complete then 'transcribed' else 'pending' end,
+    transcript=case when complete then session.transcript else null end,report=null,updated_at=now() where id=p_recording;
+  update rehearsal_private.live_sessions set status=case when complete then 'completed' else status end,audio_finalized=true where recording_id=p_recording;
+  output:=jsonb_build_object('complete',complete,'text',case when complete then session.transcript else '' end);
+  perform public.rehearsal_finish(p_user,session.request_id,complete,output);
+  return output;
+end $$;
+
+revoke all on function public.rehearsal_stream_start(uuid,uuid,uuid,text,text,bigint),public.rehearsal_stream_claim(uuid,uuid,uuid,integer),
+  public.rehearsal_stream_finish(uuid,uuid,uuid,integer,text,integer),public.rehearsal_stream_fail(uuid,uuid,uuid,integer),
+  public.rehearsal_stream_finalize(uuid,uuid,double precision,integer) from public,anon,authenticated;
+grant execute on function public.rehearsal_stream_start(uuid,uuid,uuid,text,text,bigint),public.rehearsal_stream_claim(uuid,uuid,uuid,integer),
+  public.rehearsal_stream_finish(uuid,uuid,uuid,integer,text,integer),public.rehearsal_stream_fail(uuid,uuid,uuid,integer),
+  public.rehearsal_stream_finalize(uuid,uuid,double precision,integer) to service_role;

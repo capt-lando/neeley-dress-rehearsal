@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { createHostedService, readHostedConfig } from '../lib/hosted-service.mjs';
+import { createRealtimeSocketFixture } from './fixtures/realtime-socket.mjs';
 
 const policyText = await readFile(new URL('../lib/coaching-prompt.md', import.meta.url), 'utf8');
 const url = 'https://pilot.supabase.co', publishableKey = 'sb_publishable_test';
@@ -24,7 +25,7 @@ function wav(seconds = 1) {
   bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40);
   return new Blob([bytes], { type: 'audio/wav' });
 }
-function fixture({ signedIn = true, handle, recoveryStorage } = {}) {
+function fixture({ signedIn = true, handle, recoveryStorage, draftStoreFactory } = {}) {
   const calls = [], uploads = [], oauth = [];
   if (!recoveryStorage) { const saved = new Map(); recoveryStorage = { getItem: key => saved.get(key) || null, setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) }; }
   let session = signedIn ? { access_token: 'private-session-token', user: { id: userId } } : null;
@@ -45,7 +46,7 @@ function fixture({ signedIn = true, handle, recoveryStorage } = {}) {
     if (handle) { const handled = await handle(call); if (handled) return handled; }
     if (call.path === '/recordings' && options.method === 'POST') return response({ id: call.body.id, storagePath: `${userId}/${call.body.id}/audio.wav`, bucket: 'recordings' });
     if (/^\/recordings\/[0-9a-f-]+\/audio$/.test(call.path)) return response({ id: call.path.split('/')[2], stored: true, durationSeconds: (call.body.size - 44) / 32000, sizeBytes: call.body.size });
-    if (call.path === '/transcribe') return response({ text: 'Um, practice helps.', durationSeconds: 1, chunks: [], model: 'bark-3.0-plus', localSpeech: false, recordingId: call.body.recordingId });
+    if (call.path === '/transcribe') return response({ text: 'Um, practice helps.', durationSeconds: 1, chunks: [], model: 'gpt-transcribe', localSpeech: false, recordingId: call.body.recordingId });
     if (call.path === '/analyze-text') return response({ analysis: { method: 'ai' } });
     if (call.path === '/config') return response({ auth: { signedIn: true }, analysisConfigured: true });
     if (call.path.startsWith('/requests/') && call.path.endsWith('/cancel')) return response({ recordingId: call.body.recordingId, requestId: call.path.split('/')[2], cancelled: true, state: 'cancelled' });
@@ -53,8 +54,42 @@ function fixture({ signedIn = true, handle, recoveryStorage } = {}) {
     if (call.method === 'DELETE') return response({ deleted: true });
     throw new Error('Unexpected request');
   };
-  const service = createHostedService({ client, url, publishableKey, policyText, fetchImpl, uuid: randomUUID, recoveryStorage });
+  const service = createHostedService({ client, url, publishableKey, policyText, fetchImpl, uuid: randomUUID, recoveryStorage, draftStoreFactory });
   return { service, client, calls, uploads, oauth, recoveryStorage, authChange(value) { session = value; authHandler?.('SIGNED_IN', session); } };
+}
+
+const draftKey = Buffer.alloc(32, 19).toString('base64url');
+function draftHarness({ beginning, loading, removing, audio = wav(), durationSeconds = 1 } = {}) {
+  const stores = [], removed = [], entered = deferred(); let row = null, loads = 0;
+  const same = (a, b) => a?.ownerId === b.ownerId && a.recordingId === b.recordingId && a.requestId === b.requestId;
+  const factory = options => {
+    const store = {
+      options, closed: false, key: null,
+      async begin(id, key) { store.key = key; entered.resolve(); await beginning; row = { ...id }; },
+      append() { if (store.closed) throw new Error('Closed writer'); }, async flush() {},
+      async load(id, key) { loads++; assert.equal(key, draftKey); store.key = key; await loading; return { blob: audio, durationSeconds, ...id }; },
+      async remove(id) { removed.push(id); await removing?.(removed.length, id); if (same(row, id)) row = null; },
+      async clearOwner(ownerId) { if (row?.ownerId === ownerId) row = null; },
+      close() { store.closed = true; store.key = null; },
+    };
+    stores.push(store); return store;
+  };
+  return { factory, stores, removed, entered: entered.promise, get row() { return row; }, get loads() { return loads; } };
+}
+function interruptedDraft({ drafts = draftHarness(), failStage } = {}) {
+  const marker = { userId, recordingId: randomUUID(), requestId: randomUUID(), kind: 'live', createdAt: Date.now(), phase: 'active' };
+  const audioUrl = `${url}/storage/v1/object/sign/recordings/${userId}/${marker.recordingId}/audio.wav`;
+  const f = fixture({ draftStoreFactory: drafts.factory, handle: call => {
+    if (call.path.includes('/draft-key/')) return failStage === 'key' ? response({ error: 'Not found.' }, 404)
+      : response({ recordingId: marker.recordingId, requestId: marker.requestId, draftKey });
+    if (call.path.endsWith('/finish')) return failStage === 'finish' ? response({ error: 'Not found.' }, 404)
+      : response({ recordingId: marker.recordingId, complete: false, text: '' });
+    if (call.path === `/recordings/${marker.recordingId}`) return failStage === 'recording' ? response({ error: 'Not found.' }, 404)
+      : response({ audioUrl, recording: { id: marker.recordingId, transcript: '', report: null } });
+    if (call.path === audioUrl) return new Response(wav());
+  } });
+  f.recoveryStorage.setItem(`neeley-pending:${url}:${userId}`, JSON.stringify(marker));
+  return { ...f, marker, drafts };
 }
 
 test('hosted configuration is off only when absent and rejects partial or secret configuration', () => {
@@ -69,42 +104,14 @@ test('hosted configuration is off only when absent and rejects partial or secret
   ]) assert.throws(() => readHostedConfig(env));
 });
 
-test('sign-in speech startup deduplicates simultaneous callers and same-account auth events', async () => {
-  const pending = deferred();
-  const f = fixture({ handle: call => call.path === '/speech/prepare' ? pending.promise : undefined });
+test('authentication refresh does not start paid speech compute', async () => {
+  const f = fixture();
   f.service.onAuthChange(() => {});
-  const calls = Array.from({ length: 100 }, () => f.service.prepareSpeech());
+  f.authChange(firstSession);
+  f.authChange(secondSession);
   await new Promise(setImmediate);
-  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].path, '/speech/prepare');
-  assert.equal(f.calls[0].method, 'POST'); assert.equal(f.calls[0].body, undefined);
-  assert.equal(f.calls[0].headers.Authorization, 'Bearer private-session-token');
-  pending.resolve(response({ ready: true, state: 'ready' })); await Promise.all(calls);
-  f.authChange(firstSession); await f.service.prepareSpeech(); assert.equal(f.calls.length, 1);
-  assert.equal(await f.service.getPendingRequest(), null, 'warmup creates no recoverable recording job');
-});
-
-test('speech startup failure is not retried by token refresh and signed-out startup is inert', async () => {
-  const f = fixture({ handle: call => call.path === '/speech/prepare' ? response({ error: 'Unavailable' }, 503) : undefined });
-  f.service.onAuthChange(() => {});
-  await assert.rejects(f.service.prepareSpeech(), /Unavailable/);
-  f.authChange(firstSession); await assert.rejects(f.service.prepareSpeech(), /Unavailable/);
-  assert.equal(f.calls.length, 1);
-  const signedOut = fixture({ signedIn: false });
-  assert.deepEqual(await signedOut.service.prepareSpeech(), { ready: false, state: 'skipped' });
-  assert.equal(signedOut.calls.length, 0);
-});
-
-test('account changes abort old warmup without adopting its result', async () => {
-  const pending = deferred();
-  const f = fixture({ handle: call => call.path === '/speech/prepare' ? pending.promise.then(() => response({ ready: true, state: 'ready' })) : undefined });
-  f.service.onAuthChange(() => {});
-  const old = f.service.prepareSpeech(); await new Promise(setImmediate);
-  const rejection = assert.rejects(old, error => error.name === 'AbortError' || error.status === 401);
-  f.authChange(secondSession); assert.equal(f.calls[0].signal.aborted, true);
-  const next = f.service.prepareSpeech(); await new Promise(setImmediate);
-  assert.equal(f.calls.length, 2); assert.equal(f.calls[1].headers.Authorization, 'Bearer second-token');
-  pending.resolve(response({ ready: true, state: 'ready' }));
-  await rejection; await next;
+  assert.equal(f.service.prepareSpeech, undefined);
+  assert.equal(f.calls.length, 0);
 });
 
 test('opt-in progress delivers ordered server milestones and the unchanged final result', async () => {
@@ -209,10 +216,11 @@ test('live speech uses the authenticated gateway, saves once, and reuses its rec
     if (call.path.includes('/chunks/')) return response({ recordingId: id, sequence: 0, nextSequence: 1, text: 'Um, practice helps.' });
     if (call.path.endsWith('/finish')) return response({ recordingId: id, complete: true, text: 'Um, practice helps.' });
   } });
+  const stream = createRealtimeSocketFixture();
   let saved;
   service.setRecordingSavedHandler((blob, recordingId) => { saved = { blob, recordingId }; });
   const audio = wav();
-  const live = service.startLiveSession({ sampleRate: 16000, encodeAudio: () => audio });
+  const live = service.startLiveSession({ sampleRate: 16000, encodeAudio: () => audio, WebSocketImpl: stream.WebSocketImpl });
   live.push(new Float32Array(16000));
   const result = await live.finish(audio);
   assert.equal(result.complete, true); assert.equal(result.recordingId, id);
@@ -224,11 +232,12 @@ test('live speech uses the authenticated gateway, saves once, and reuses its rec
   assert.equal(uploads[0].headers['Content-Type'], 'audio/wav');
   assert.equal(uploads[0].body, audio);
   assert.equal(calls.filter(call => call.path === '/recordings').length, 0);
-  const chunk = calls.find(call => call.path.includes('/chunks/'));
-  assert.equal(chunk.headers['Content-Type'], 'audio/wav');
-  assert.equal(chunk.headers.Authorization, 'Bearer private-session-token');
-  assert.equal(chunk.headers['X-Rehearsal-Final'], 'true');
-  assert.equal(chunk.body, audio);
+  assert.equal(calls.some(call => call.path.includes('/chunks/') || call.path.endsWith('/prepare')), false);
+  assert.equal(stream.sockets[0].url, 'wss://pilot.supabase.co/functions/v1/rehearsal-api/live-stream');
+  const auth = stream.sockets[0].messages.find(message => message.type === 'start');
+  assert.equal(auth.token, 'private-session-token');
+  assert.equal(auth.recordingId, id);
+  assert.equal(stream.consumedSamples, 24000);
   await service.request('/api/analyze-text', { body: { recordingId: id, text: result.text } });
   assert.equal(calls.at(-1).body.recordingId, id);
 });
@@ -243,6 +252,32 @@ test('signed-out startup sends nothing; transcription requires OAuth and unsuppo
   await assert.rejects(service.request('https://evil.example/steal'), { status: 404 });
   await assert.rejects(service.request('/api/settings', { body: { analysisApiKey: 'never-send' } }), { status: 404 });
   assert.equal(calls.length, 0); assert.equal(uploads.length, 0);
+});
+
+test('sign-out, account changes and disposal close a live socket before more private audio can leave', async () => {
+  for (const action of ['signout', 'account', 'dispose']) {
+    let id;
+    const f = fixture({ handle: call => {
+      if (call.path === '/live-sessions') {
+        id = call.body.recordingId;
+        return response({ recordingId: id, bucket: 'recordings', storagePath: `${userId}/${id}/audio.wav` });
+      }
+    } });
+    f.service.onAuthChange(() => {});
+    const stream = createRealtimeSocketFixture();
+    const live = f.service.startLiveSession({ sampleRate: 16000, WebSocketImpl: stream.WebSocketImpl });
+    live.push(new Float32Array(1600));
+    await new Promise(setImmediate);
+    assert.equal(stream.sockets[0].readyState, 1);
+    if (action === 'dispose') f.service.dispose();
+    else f.authChange(action === 'account' ? secondSession : null);
+    assert.equal(stream.sockets[0].readyState, 3);
+    const count = stream.sockets[0].frames.length;
+    assert.throws(() => live.push(new Float32Array(1600)), { name: 'AbortError' });
+    assert.equal(stream.sockets[0].frames.length, count);
+    await assert.rejects(live.finish(wav()), { name: 'AbortError' });
+    assert.equal(f.uploads.length, 0);
+  }
 });
 
 test('Google and Microsoft are the only sign-in choices and Azure includes email scope', async () => {
@@ -276,7 +311,7 @@ test('one explicit transcription saves a private WAV, sends a job ID, and reuses
 
 test('definite failed jobs require a new request ID on the next explicit retry; changed coaching gets a new ID', async () => {
   let fail = true;
-  const { service, calls } = fixture({ handle: call => { if (call.path === '/transcribe' && fail) { fail = false; return response({ error: 'Speech worker failed.', jobState: 'failed' }, 502); } } });
+  const { service, calls } = fixture({ handle: call => { if (call.path === '/transcribe' && fail) { fail = false; return response({ error: 'Speech provider failed.', jobState: 'failed' }, 502); } } });
   const audio = wav();
   await assert.rejects(service.request('/api/transcribe', { body: audio }), { status: 502 });
   const result = await service.request('/api/transcribe', { body: audio });
@@ -290,7 +325,7 @@ test('definite failed jobs require a new request ID on the next explicit retry; 
   assert.notEqual(coaching[1].body.requestId, coaching[2].body.requestId);
 });
 
-test('explicit retries rotate IDs only for confirmed terminal failures, including a busy speech worker', async () => {
+test('explicit retries rotate IDs only for confirmed terminal failures, including a busy speech provider', async () => {
   for (const path of ['/transcribe', '/analyze-text']) {
     for (const [status, jobState] of [[429, 'failed'], [409, 'failed'], [429, undefined], [409, undefined], [502, undefined], [504, undefined]]) {
       let reject = true;
@@ -442,7 +477,7 @@ test('failed live saving never finalizes a report and explicit cancelled-session
     if(call.path.endsWith('/audio')&&rejectUpload){rejectUpload=false;return response({error:'Storage unavailable.'},503);}
   }});
   const audio=wav();let saved=0;f.service.setRecordingSavedHandler(()=>saved++);
-  const live=f.service.startLiveSession({sampleRate:16000,encodeAudio:()=>audio});live.push(new Float32Array(16000));
+  const live=f.service.startLiveSession({sampleRate:16000,encodeAudio:()=>audio,WebSocketImpl:createRealtimeSocketFixture().WebSocketImpl});live.push(new Float32Array(16000));
   await assert.rejects(live.finish(audio),{status:503});await assert.rejects(live.finish(audio),{status:503});
   assert.equal(f.uploads.length,1);assert.equal(saved,0);assert.equal(f.calls.some(call=>call.path.endsWith('/finish')),false);
   live.cancel();await new Promise(setImmediate);
@@ -450,6 +485,118 @@ test('failed live saving never finalizes a report and explicit cancelled-session
   assert.equal(result.recordingId,id);assert.equal(saved,1);
   assert.equal(f.calls.filter(call=>call.path==='/recordings').length,0);
   assert.equal(f.uploads.length,2);assert.equal(f.uploads[0].path,f.uploads[1].path);
+});
+
+test('refresh decrypts only the verified owner draft, saves the same recording, and never starts coaching', async () => {
+  const f = interruptedDraft();
+  const result = await f.service.recoverPending(f.marker);
+  assert.equal(result.record.id, f.marker.recordingId); assert.equal(result.record.transcript, '');
+  assert.equal(f.drafts.loads, 1); assert.equal(f.uploads.length, 1);
+  assert.equal(f.uploads[0].path, `/recordings/${f.marker.recordingId}/audio`);
+  assert.deepEqual(f.calls.filter(call => call.path.includes('/draft-key/')).map(call => call.path), [`/live-sessions/${f.marker.recordingId}/draft-key/${f.marker.requestId}`]);
+  assert.equal(f.calls.some(call => ['/recordings', '/transcribe', '/analyze-text'].includes(call.path)), false);
+  assert.equal(await f.service.getPendingRequest(), null);
+  assert.ok(f.drafts.stores.every(store => store.closed && store.key === null));
+  const other = interruptedDraft(); other.service.onAuthChange(() => {}); other.authChange(firstSession); other.authChange(secondSession);
+  await assert.rejects(other.service.recoverPending(other.marker), { status: 401 });
+  assert.equal(other.calls.length, 0); assert.equal(other.drafts.loads, 0);
+});
+
+test('only missing draft keys end recovery quietly; later save or reopen404 retains the recovery marker', async () => {
+  const missing = interruptedDraft({ failStage: 'key' });
+  assert.equal((await missing.service.recoverPending(missing.marker)).record, null);
+  assert.equal(missing.drafts.loads, 0); assert.equal(await missing.service.getPendingRequest(), null);
+  for (const failStage of ['finish', 'recording']) {
+    const f = interruptedDraft({ failStage });
+    await assert.rejects(f.service.recoverPending(f.marker), { status: 404 });
+    assert.deepEqual(await f.service.getPendingRequest(), f.marker);
+    assert.equal(f.drafts.removed.length, 0);
+  }
+});
+
+test('verified drafts shorter than half a second are discarded without attempting an invalid upload', async () => {
+  const f = interruptedDraft({ drafts: draftHarness({ audio: wav(0.25), durationSeconds: 0.25 }) });
+  const result = await f.service.recoverPending(f.marker);
+  assert.equal(result.record, null); assert.equal(f.uploads.length, 0);
+  assert.equal(await f.service.getPendingRequest(), null);
+  assert.ok(f.drafts.removed.some(id => id.recordingId === f.marker.recordingId && id.ownerId === userId));
+});
+
+test('account changes during draft decryption close the key and cannot save or disclose prior audio', async () => {
+  const reading = deferred(), drafts = draftHarness({ loading: reading.promise });
+  const f = interruptedDraft({ drafts }); f.service.onAuthChange(() => {}); f.authChange(firstSession);
+  const recovery = f.service.recoverPending(f.marker); await new Promise(setImmediate);
+  assert.equal(drafts.loads, 1);
+  f.authChange(secondSession);
+  assert.ok(drafts.stores.every(store => store.closed && store.key === null));
+  reading.resolve(); await assert.rejects(recovery, error => error.status === 401 || error.name === 'AbortError');
+  assert.equal(f.uploads.length, 0);
+  assert.ok(f.recoveryStorage.getItem(`neeley-pending:${url}:${userId}`));
+});
+
+test('explicit cancel during draft decryption prevents a late recovery upload', async () => {
+  const reading = deferred(), drafts = draftHarness({ loading: reading.promise });
+  const f = interruptedDraft({ drafts });
+  const recovery = f.service.recoverPending(f.marker); await new Promise(setImmediate);
+  assert.equal(drafts.loads, 1);
+  await f.service.cancelCurrentRequest();
+  reading.resolve(); await assert.rejects(recovery, { name: 'AbortError' });
+  assert.equal(f.uploads.length, 0); assert.equal(await f.service.getPendingRequest(), null);
+  assert.ok(drafts.stores.every(store => store.closed && store.key === null));
+});
+
+test('cancel or account change during either draft cleanup cannot return a stale recovered recording', async () => {
+  for (const cleanup of [1, 2]) for (const action of ['cancel', 'account']) {
+    const entered = deferred(), removed = deferred();
+    const drafts = draftHarness({ removing: async count => { if (count === cleanup) { entered.resolve(); await removed.promise; } } });
+    const f = interruptedDraft({ drafts }); f.service.onAuthChange(() => {}); f.authChange(firstSession);
+    const recovery = f.service.recoverPending(f.marker);
+    await entered.promise;
+    if (action === 'cancel') await f.service.cancelCurrentRequest(); else f.authChange(secondSession);
+    removed.resolve();
+    await assert.rejects(recovery, error => error.name === 'AbortError' || error.status === 401);
+    assert.ok(drafts.stores.every(store => store.closed && store.key === null));
+  }
+});
+
+test('explicit cancel and account changes immediately close active draft writers and keys', async () => {
+  for (const mode of ['cancel', 'account']) {
+    const drafts = draftHarness();
+    const f = fixture({ draftStoreFactory: drafts.factory, handle: call => call.path === '/live-sessions'
+      ? response({ recordingId: call.body.recordingId, bucket: 'recordings', storagePath: `${userId}/${call.body.recordingId}/audio.wav`, draftKey }) : undefined });
+    f.service.onAuthChange(() => {}); f.authChange(firstSession);
+    const live = f.service.startLiveSession({ sampleRate: 16000, WebSocketImpl: createRealtimeSocketFixture().WebSocketImpl });
+    live.push(new Float32Array(1600)); await new Promise(setImmediate);
+    assert.equal(drafts.stores[0].key, draftKey);
+    if (mode === 'cancel') await f.service.cancelCurrentRequest(); else f.authChange(secondSession);
+    assert.ok(drafts.stores.every(store => store.closed && store.key === null));
+    assert.throws(() => live.push(new Float32Array(1)), { name: 'AbortError' });
+    if (mode === 'cancel') { assert.equal(drafts.row, null); assert.equal(await f.service.getPendingRequest(), null); }
+    else assert.equal(drafts.row.ownerId, userId, 'account switch preserves encrypted prior-owner recovery data');
+  }
+});
+
+test('cancel during draft creation waits for the old creation and removes its late manifest', async () => {
+  const gate = deferred(), drafts = draftHarness({ beginning: gate.promise });
+  const f = fixture({ draftStoreFactory: drafts.factory, handle: call => call.path === '/live-sessions'
+    ? response({ recordingId: call.body.recordingId, bucket: 'recordings', storagePath: `${userId}/${call.body.recordingId}/audio.wav`, draftKey }) : undefined });
+  f.service.startLiveSession({ sampleRate: 16000, WebSocketImpl: createRealtimeSocketFixture().WebSocketImpl });
+  await drafts.entered;
+  let done = false; const cancelling = f.service.cancelCurrentRequest().then(value => { done = true; return value; });
+  await new Promise(setImmediate);
+  assert.equal(drafts.stores[0].closed, true); assert.equal(done, false);
+  gate.resolve(); await cancelling; await new Promise(setImmediate);
+  assert.equal(drafts.row, null); assert.ok(drafts.stores.every(store => store.key === null));
+  assert.equal(await f.service.getPendingRequest(), null); assert.equal(f.uploads.length, 0);
+});
+
+test('asynchronous checkpoint storage warnings reach the recording UI', async () => {
+  const drafts = draftHarness(), warnings = [];
+  const f = fixture({ draftStoreFactory: drafts.factory, handle: call => call.path === '/live-sessions'
+    ? response({ recordingId: call.body.recordingId, bucket: 'recordings', storagePath: `${userId}/${call.body.recordingId}/audio.wav`, draftKey }) : undefined });
+  f.service.startLiveSession({ sampleRate: 16000, WebSocketImpl: createRealtimeSocketFixture().WebSocketImpl, onRecoveryWarning: message => warnings.push(message) });
+  await new Promise(setImmediate); drafts.stores[0].options.onWarning(new Error('Quota exceeded'));
+  assert.equal(warnings.length, 1); assert.match(warnings[0], /Refresh recovery is unavailable/); f.service.dispose();
 });
 
 test('paid requests persist only account-scoped IDs before sending and survive refresh without resubmitting', async () => {
@@ -512,17 +659,17 @@ test('unconfirmed cancellation keeps its recovery marker and can be safely retri
   assert.equal(await f.service.getPendingRequest(), null);
 });
 
-test('refresh retries unconfirmed cancellation instead of trusting a cancelled job before the worker stops', async () => {
+test('refresh retries unconfirmed cancellation instead of trusting a cancelled job before the connection stops', async () => {
   const original = fixture({ handle: call => {
     if (call.path === '/analyze-text') throw new TypeError('Response lost');
-    if (call.path.endsWith('/cancel')) return response({ error: 'Worker has not confirmed stopping' }, 503);
+    if (call.path.endsWith('/cancel')) return response({ error: 'Connection has not confirmed stopping' }, 503);
   } });
   await assert.rejects(original.service.request('/api/analyze-text', { body: { recordingId: randomUUID(), text: 'Words' } }));
   await assert.rejects(original.service.cancelCurrentRequest(), { status: 503 });
   let stopped = false;
   const refreshed = fixture({ recoveryStorage: original.recoveryStorage, handle: call => {
     assert.ok(call.path.endsWith('/cancel'), 'cancellation recovery must not poll the already cancelled job or reopen audio');
-    if (!stopped) return response({ error: 'Worker has not confirmed stopping' }, 503);
+    if (!stopped) return response({ error: 'Connection has not confirmed stopping' }, 503);
   } });
   const marker = await refreshed.service.getPendingRequest(); assert.equal(marker.phase, 'cancelling');
   await assert.rejects(refreshed.service.recoverPending(marker), { status: 503 });

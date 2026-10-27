@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildAnalysisPrompt } from '../lib/analysis-core.mjs';
 import { INPUT_LIMITS, RehearsalStore } from '../plugin/session-store.mjs';
-import { createRehearsalServer, PANEL_URI } from '../plugin/server.mjs';
+import { createRehearsalServer } from '../plugin/server.mjs';
 
 const policyText = await readFile(new URL('../lib/coaching-prompt.md', import.meta.url), 'utf8');
 const criteria = ['claim', 'evidence', 'structure', 'audience', 'conclusion'];
@@ -35,7 +35,7 @@ function pending(store = new RehearsalStore({ policyText }), data = input) {
   return { store, rehearsalId, revision };
 }
 async function connection(t) {
-  const { server, store } = await createRehearsalServer({ policyText, panelHtml: '<!doctype html><title>Rehearsal test panel</title>' });
+  const { server, store } = await createRehearsalServer({ policyText });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'rehearsal-tests', version: '1.0.0' });
   await server.connect(serverTransport);
@@ -203,13 +203,13 @@ test('bounded memory rejection is atomic and invalid JSON never becomes saved fe
   assert.equal(store.get(rehearsalId).report, null);
 });
 
-test('MCP tools expose a single panel entrypoint and honest local mutation annotations', async t => {
+test('MCP tools retain text coaching and honest mutation annotations without a recording panel', async t => {
   const { client } = await connection(t);
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map(tool => tool.name).sort(), ['clear_rehearsal', 'get_coaching_request', 'get_rehearsal', 'open_rehearsal', 'prepare_coaching', 'submit_coaching']);
   const open = tools.find(tool => tool.name === 'open_rehearsal');
-  assert.equal(open._meta.ui.resourceUri, PANEL_URI);
-  assert.deepEqual(open._meta['openai/ui'].entrypoints, [{ type: 'thread' }]);
+  assert.equal(open._meta, undefined);
+  assert.equal(client.getServerCapabilities().resources, undefined);
   for (const tool of tools) {
     assert.equal(tool.annotations.openWorldHint, false);
     if (tool.name !== 'open_rehearsal') assert.equal(tool._meta?.ui?.resourceUri, undefined);
@@ -220,13 +220,6 @@ test('MCP tools expose a single panel entrypoint and honest local mutation annot
   for (const name of ['prepare_coaching', 'get_rehearsal', 'clear_rehearsal']) {
     assert.deepEqual(tools.find(tool => tool.name === name)._meta.ui.visibility, ['model', 'app']);
   }
-  const resource = await client.readResource({ uri: PANEL_URI });
-  assert.match(resource.contents[0].text, /Rehearsal test panel/);
-  assert.equal(resource.contents[0].mimeType, 'text/html;profile=mcp-app');
-  assert.deepEqual(resource.contents[0]._meta.ui.permissions.microphone, {});
-  assert.deepEqual(resource.contents[0]._meta['openai/ui'].availableDisplayModes, ['fullscreen']);
-  assert.ok(resource.contents[0]._meta.ui.csp.connectDomains.includes('https://huggingface.co'));
-  assert.ok(!resource.contents[0]._meta.ui.csp.connectDomains.some(domain => /openai|anthropic|googleapis/.test(domain)));
 });
 
 test('MCP round trip publishes complete coaching and returns actionable stale/invalid errors', async t => {

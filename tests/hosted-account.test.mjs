@@ -218,9 +218,9 @@ test('signed-in speech startup runs without blocking recovery or history', async
   const h = accountHarness({ getConfig: async () => ({ speechConfigured: true }),
     prepareSpeech: () => { events.push('warmup'); return warmup.promise; }, recoverPending: async () => events.push('recovery') });
   await turn();
-  assert.deepEqual(events, ['warmup', 'recovery']);
+  assert.deepEqual(events, ['recovery']);
   assert.equal(h.histories.length, 1, 'history appears while startup is still pending');
-  h.histories[0].resolve({ recordings: [] }); warmup.reject(new Error('GPU is unavailable')); await turn();
+  h.histories[0].resolve({ recordings: [] }); warmup.resolve(); await turn();
   assert.equal(h.get('account-status').textContent, '', 'optional startup failure does not masquerade as sign-in failure');
 });
 

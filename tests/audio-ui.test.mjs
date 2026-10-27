@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { createLiveTranscription } from '../lib/live-transcription.mjs';
 import { createHostedLiveSession } from '../lib/hosted-live.mjs';
+import { createRealtimeSocketFixture } from './fixtures/realtime-socket.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
 import { renderDiscussableTranscript, selectedTranscriptQuote } from '../lib/transcript-discussion.mjs';
 import { createRehearsalChat } from '../public/rehearsal-chat.js';
 import { analyzeSpeech, sanitizeAiFeedback } from '../lib/analysis-core.mjs';
-import { BARK_MODEL_ID, BARK_MODEL_LABEL, BARK_MODELS, BARK_CLEAN_ID } from '../lib/speech-models.mjs';
+const TEST_MODEL_ID = 'gpt-live-transcribe';
 
 function inspectWav(wav) {
   assert.equal(wav.toString('ascii', 0, 4), 'RIFF');
@@ -106,7 +106,7 @@ function deferred() {
 
 function response(value) { return value; }
 
-function harness(requestImpl = async () => { throw new Error('Unexpected browser-service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
+function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
   const elements = new Map();
   const missingIds = [];
   let ownerDocument;
@@ -146,7 +146,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
-    BARK_MODEL_ID, BARK_MODELS, createProcessingProgress, validateAudioUploadHeader: validateUploadHeader,
+    createProcessingProgress, validateAudioUploadHeader: validateUploadHeader,
     document: {
       getElementById: id => {
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
@@ -192,7 +192,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
   vm.createContext(context);
   vm.runInContext(`${startup ? executableAppSource : declarations}
 globalThis.audioTest = {
-  state, updateConfig, saveSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
+  state, updateConfig, openSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession, openCancelRestart, confirmCancelRestart, closeCancelRestart,
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript, renderSummaryDraft, attachTranscriptSelection, getChatContext,
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
@@ -255,50 +255,33 @@ test('paragraph selection survives the click after pointerup and excludes annota
 });
 const inputDevice = (deviceId, label = '') => ({ kind: 'audioinput', deviceId, label });
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
-const hostedConfig = { hosted: true, localSpeech: false, liveTranscription: false, transcriptionModel: 'bark-3.0-plus', analysisProvider: 'hosted', providers: [], auth: { signedIn: true }, analysisConfigured: true };
+const hostedConfig = { hosted: true, localSpeech: false, liveTranscription: false, transcriptionModel: TEST_MODEL_ID, analysisProvider: 'hosted', providers: [], auth: { signedIn: true }, analysisConfigured: true };
 const elementText = element => String(element.textContent || '') + element.children.map(elementText).join('');
 const settleAudioSaves = async h => { await Promise.all([...h.state.pendingAudioSaves]); await nextTurn(); };
 const savedTake = (id, caption = id) => ({ id, blob: new Blob([`audio-${id}`], { type: 'audio/wav' }), duration: 4, caption, createdAt: 1_760_000_000_000 });
 const clickedDownloads = h => h.createdElements.filter(element => element.tagName === 'A' && element.clicked);
 const libraryAction = (h, caption, action) => h.get('saved-recordings-list').querySelectorAll('button').find(button => button.getAttribute('aria-label')?.startsWith(`${action} ${caption},`));
-function liveSpeech(h, recognize) {
-  const sessions = [];
-  h.window.rehearsalLiveSpeech = { startSession(options) {
-    const calls = [];
-    const session = createLiveTranscription({ sampleRate: options.sampleRate, onUpdate: options.onUpdate,
-      transcribe: async (samples, metadata) => { calls.push({ samples, metadata }); return recognize(samples, metadata, sessions.length - 1); },
-    });
-    sessions.push({ session, options, calls });
-    return session;
-  } };
-  return sessions;
-}
-
-function cloudLiveSpeech(h, { recognize = async (_audio, index) => ['Um, practice helps.', 'Next point.'][index], prepare = async () => {}, complete = true } = {}) {
-  const calls = [], uploads = [], texts = [];
+function cloudLiveSpeech(h, { onAudio = () => 'Um, practice helps.', onFinish, complete = true } = {}) {
+  const calls = [], uploads = [];
+  const transport = createRealtimeSocketFixture({ onAudio, onFinish });
   const id = '12345678-1234-4123-8123-123456789012';
   let session;
   h.window.rehearsalLiveSpeech = { startSession(options) {
     session = createHostedLiveSession({ ...options, recordingId: id, requestId: 'request', validateStart() {},
+      WebSocketImpl: transport.WebSocketImpl,
+      async getConnection() { return { url: 'wss://example.test/live-stream', token: 'test-token' }; },
       async request(path, settings) {
         calls.push({ path, ...settings });
         if (path === '/live-sessions') return { recordingId: id };
         if (path.endsWith('/cancel')) return { recordingId: id, cancelled: true };
-        if (path.endsWith('/prepare')) { await prepare(); return { ready: true }; }
-        if (path.includes('/chunks/')) {
-          const sequence = Number(path.split('/').at(-1));
-          const text = await recognize(settings.body, sequence);
-          texts.push(text);
-          return { recordingId: id, sequence, nextSequence: sequence + 1, text };
-        }
         assert.ok(path.endsWith('/finish'));
-        return { recordingId: id, complete, text: texts.join(' '), durationSeconds: settings.body.durationSeconds };
+        return { recordingId: id, complete, text: transport.transcript, durationSeconds: settings.body.durationSeconds };
       },
       async saveAudio(blob) { uploads.push(blob); return { durationSeconds: (blob.size - 44) / 32000, sizeBytes: blob.size }; },
     });
     return session;
   } };
-  return { calls, uploads, id, get session() { return session; } };
+  return { calls, uploads, id, sockets: transport.sockets, get session() { return session; } };
 }
 
 test('hosted recording and replay never run local inference, upload audio, or save anonymous browser copies', async () => {
@@ -317,19 +300,17 @@ test('hosted recording and replay never run local inference, upload audio, or sa
   assert.equal(h.get('cloud-recordings-details').hidden, false);
 });
 
-test('hosted live recording uses ten-second cloud segments, excludes pauses, and saves the exact complete WAV before coaching', async () => {
+test('hosted live recording shows words immediately, excludes pauses, and saves the exact complete WAV before coaching', async () => {
   const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true });
   const pending = deferred();
-  const cloud = cloudLiveSpeech(h, { recognize: async (_audio, index) => index ? pending.promise : 'Um, practice helps.' });
+  const cloud = cloudLiveSpeech(h, { onFinish: () => pending.promise });
   let historyRefreshes = 0;
   h.window.rehearsalAccount = { track() {}, refreshHistory() { historyRefreshes++; } };
   await h.enableMic(); h.state.context.sampleRate = 48000;
   await h.startRecording();
-  h.captureRecordingSamples(new Float32Array(48000 * 9).fill(0.25), 48000);
+  h.captureRecordingSamples(new Float32Array(4800).fill(0.25), 48000);
   await nextTurn();
-  assert.equal(cloud.calls.filter(call => call.path.includes('/chunks/')).length, 0);
-  h.toggleRecordingPause(); h.captureRecordingSamples(new Float32Array(48000).fill(0.9), 48000); h.toggleRecordingPause();
-  h.captureRecordingSamples(new Float32Array(48000).fill(0.25), 48000); await nextTurn();
+  assert.equal(cloud.sockets[0].frames.length, 1, 'The first 100 ms is streamed without waiting for ten seconds');
   assert.equal(h.get('follow-transcript').textContent, 'Um, practice helps.');
   assert.equal(elementText(h.get('annotated-transcript')), 'Um, practice helps.');
   assert.equal(h.get('speech-analysis-content').hidden, true, 'live text does not invent analysis');
@@ -337,17 +318,22 @@ test('hosted live recording uses ten-second cloud segments, excludes pauses, and
   assert.equal(h.get('transcript-details').hidden, true, 'draft text is not editable mid-take');
   assert.equal(h.getChatContext().context.text, 'Um, practice helps.');
   assert.equal(h.state.transcriptText, '', 'draft segments cannot be used for coaching');
-  assert.match(h.get('follow-transcript-status').textContent, /10-second/);
+  assert.match(h.get('follow-transcript-status').textContent, /Live transcript/);
+  assert.doesNotMatch(h.get('follow-transcript-status').textContent, /transcribed| of |%/, 'Audio acknowledgements are not transcript completion');
+  h.toggleRecordingPause(); h.captureRecordingSamples(new Float32Array(48000).fill(0.9), 48000);
+  assert.equal(cloud.sockets[0].frames.length, 1, 'Paused audio never reaches the live stream');
+  h.toggleRecordingPause();
+  h.captureRecordingSamples(new Float32Array(48000 * 9.9).fill(0.25), 48000); await nextTurn();
   h.captureRecordingSamples(new Float32Array(4800).fill(-0.25), 48000);
   h.stopRecording(); const finishing = h.state.livePromise;
   await nextTurn();
   assert.equal(h.window.rehearsalHostedActions.canReplaceAudio(), false);
   assert.equal(h.get('analyze-button').disabled, true);
   assert.equal(cloud.uploads.length, 0, 'the complete WAV waits for the final transcript segment');
-  const segments = cloud.calls.filter(call => call.path.includes('/chunks/'));
-  assert.deepEqual(segments.map(call => call.body.size), [320044, 3244], 'no overlapping audio is sent');
-  assert.equal(segments[1].headers['X-Rehearsal-Final'], 'true');
-  pending.resolve('Next point.');
+  assert.ok(cloud.sockets[0].frames.every(frame => frame.byteLength <= 9600), 'Every PCM frame is at most 200 ms');
+  assert.equal(cloud.sockets[0].samples, 242400, 'All 10.1 seconds are sent exactly once at 24 kHz');
+  assert.ok(!cloud.calls.some(call => call.path.includes('/chunks/') || call.path.endsWith('/prepare')));
+  pending.resolve('Um, practice helps. Next point.');
   assert.equal(await finishing, 'Um, practice helps. Next point.');
   assert.deepEqual(cloud.uploads, [h.state.audioBlob]);
   assert.equal(inspectWav(Buffer.from(await cloud.uploads[0].arrayBuffer())).durationSeconds, 10.1);
@@ -361,8 +347,10 @@ test('hosted live recording uses ten-second cloud segments, excludes pauses, and
 
 test('failed cloud segments keep capturing and save complete audio on Stop without caching the partial preview', async () => {
   const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true });
-  const cloud = cloudLiveSpeech(h, { complete: false, recognize: async (_audio, index) => {
-    if (index) throw new Error('Cloud connection interrupted');
+  let samples = 0;
+  const cloud = cloudLiveSpeech(h, { complete: false, onAudio: frame => {
+    samples += frame.byteLength / 2;
+    if (samples > 240000) throw new Error('Cloud connection interrupted');
     return 'Partial preview.';
   } });
   await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000 * 10), 16000); await nextTurn();
@@ -378,6 +366,18 @@ test('failed cloud segments keep capturing and save complete audio on Stop witho
   assert.equal(h.state.liveTake, null); assert.equal(h.get('follow-transcript-connect').hidden, false);
   assert.match(h.get('follow-transcript-note').textContent, /incomplete preview/);
   assert.match(h.get('audio-save-status').textContent, /Saved privately/);
+});
+
+test('silent microphone input never stops a hosted recording or starts coaching', async () => {
+  const h = harness(() => { throw new Error('Silence must not trigger coaching'); });
+  h.updateConfig({ ...hostedConfig, liveTranscription: true });
+  const cloud = cloudLiveSpeech(h, { onAudio: () => '' });
+  await h.startRecording();
+  h.captureRecordingSamples(new Float32Array(16000 * 20), 16000); await nextTurn();
+  assert.equal(h.state.recording, true); assert.equal(h.state.audioBlob, null);
+  assert.equal(cloud.uploads.length, 0); assert.ok(!cloud.calls.some(call => call.path.endsWith('/finish')));
+  h.stopRecording(); await h.state.livePromise;
+  assert.equal(cloud.uploads.length, 1);
 });
 
 test('a failed cloud save leaves an explicit download/retry path and releases analysis controls', async () => {
@@ -402,6 +402,7 @@ test('hosted live recording requires sign-in and account changes cancel before S
   assert.ok(cloud.session);
   h.window.rehearsalHostedActions.accountChanged('second-user'); await nextTurn();
   assert.equal(cloud.session.getState().cancelled, true);
+  assert.equal(cloud.sockets[0].readyState, 3, 'Changing accounts closes the old authenticated stream');
   assert.equal(cloud.uploads.length, 0); assert.equal(cloud.calls.some(call => call.path.endsWith('/finish')), false);
   assert.equal(h.state.recording, false); assert.equal(h.state.audioBlob, null); assert.equal(h.state.liveTake, null);
 });
@@ -496,7 +497,6 @@ test('switching hosted accounts invalidates pending rubric extraction', async ()
 test('completed takes autosave only audio metadata once, and short takes are not saved', async () => {
   const h = harness();
   await h.enableMic(); await h.startRecording();
-  h.get('analysis-api-key').value = 'secret-api-key';
   h.get('transcript').value = 'Private transcript';
   h.get('target-script').value = 'Private script';
   h.get('target-talking-points').value = 'Private points';
@@ -1170,185 +1170,6 @@ test('recording caps saved audio at the maximum when the final input block cross
   assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 2);
 });
 
-test('30-second live windows exclude pauses, flush the final remainder, and reuse the completed transcript for replay and coaching', async () => {
-  const first = deferred(), second = deferred(), last = deferred(), requests = [];
-  const h = harness(async (url, options) => {
-    requests.push({ url, input: JSON.parse(options.body) });
-    assert.equal(url, '/api/analyze-text', 'the completed live transcript must avoid whole-take inference');
-    return { transcript: requests.at(-1).input.text, wordStats: {}, blunders: {}, analysis: {} };
-  });
-  const sessions = liveSpeech(h, (_samples, metadata) => [first, second, last][metadata.index].promise);
-  await h.startRecording();
-  sessions[0].options.onProgress('Downloading English speech model: 42%');
-  assert.match(h.get('follow-transcript-status').textContent, /Downloading.*42%/);
-  h.captureRecordingSamples(new Float32Array(16000 * 29).fill(0.25), 16000);
-  await nextTurn();
-  assert.equal(sessions[0].calls.length, 0, 'the first request waits for a complete 30-second window');
-  h.toggleRecordingPause();
-  h.captureRecordingSamples(new Float32Array(16000 * 6).fill(0.9), 16000);
-  await nextTurn();
-  assert.equal(sessions[0].calls.length, 0, 'paused microphone frames cannot complete a live window');
-  assert.equal(h.state.sampleCount, 16000 * 29);
-  assert.match(h.get('follow-transcript-status').textContent, /^Paused/);
-  h.toggleRecordingPause();
-  h.captureRecordingSamples(new Float32Array(16000).fill(0.25), 16000);
-  await nextTurn();
-  assert.equal(sessions[0].calls.length, 1);
-  assert.equal(h.state.sampleCount, 16000 * 30);
-  assert.equal(requests.length, 0, 'capture cannot make an AI request');
-  first.resolve({ text: 'Practice helps. We practice.' }); await nextTurn();
-  assert.equal(h.get('follow-transcript').textContent, 'Practice helps. We practice.');
-  h.get('follow-transcript').scrollTop = 17;
-  h.captureRecordingSamples(new Float32Array(16000 * 27).fill(-0.25), 16000);
-  await nextTurn();
-  assert.equal(sessions[0].calls.length, 1, 'the next window waits for 28 new seconds after the shared context');
-  assert.equal(h.get('follow-transcript').scrollTop, 17, 'unchanged text must not reset the reader while new audio arrives');
-  h.captureRecordingSamples(new Float32Array(16000).fill(-0.25), 16000);
-  await nextTurn();
-  assert.equal(sessions[0].calls.length, 2);
-  assert.equal(h.state.recording, true, 'pending inference cannot interrupt capture');
-  h.captureRecordingSamples(new Float32Array(16000 * 3.5).fill(0.5), 16000);
-  h.toggleRecordingPause();
-  h.captureRecordingSamples(new Float32Array(16000 * 3).fill(0.9), 16000);
-  assert.equal(h.state.sampleCount, 16000 * 61.5, 'paused samples enter neither the saved audio nor live queue');
-  assert.match(h.get('follow-transcript-status').textContent, /^Paused/);
-  h.stopRecording();
-  assert.equal(h.state.recording, false);
-  assert.equal(h.storageCalls.save.length, 1, 'saving starts without waiting for recognition');
-  assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 61.5);
-  assert.equal(h.state.transcriptText, '', 'the visible draft is not a complete cached transcript');
-  assert.equal(h.get('analyze-button').disabled, true);
-  assert.match(h.get('follow-transcript-status').textContent, /^Finishing/);
-  await h.runAnalysis(); assert.equal(requests.length, 0);
-  const replayTranscript = h.ensureTranscript();
-  h.get('target-talking-points').value = 'Latest preparation after recording';
-  second.resolve({ text: 'We practice. Everyone benefits.' }); await nextTurn();
-  assert.equal(sessions[0].calls.length, 3, 'stopping queues the remaining audio without waiting for another full window');
-  assert.deepEqual(sessions[0].calls.map(({ samples, metadata }) => ({
-    length: samples.length / 16000, start: metadata.startSeconds, end: metadata.endSeconds,
-    overlap: metadata.overlapSeconds, final: metadata.isFinal,
-  })), [
-    { length: 30, start: 0, end: 30, overlap: 0, final: false },
-    { length: 30, start: 28, end: 58, overlap: 2, final: false },
-    { length: 5.5, start: 56, end: 61.5, overlap: 2, final: true },
-  ]);
-  assert.ok(sessions[0].calls[0].samples.every(value => value === 0.25));
-  assert.ok(sessions[0].calls[1].samples.subarray(0, 16000 * 2).every(value => value === 0.25));
-  assert.ok(sessions[0].calls[1].samples.subarray(16000 * 2).every(value => value === -0.25));
-  assert.ok(sessions[0].calls[2].samples.subarray(0, 16000 * 2).every(value => value === -0.25));
-  assert.ok(sessions[0].calls[2].samples.subarray(16000 * 2).every(value => value === 0.5));
-  last.resolve({ text: 'Everyone benefits. Ready.' });
-  const completeText = 'Practice helps. We practice. Everyone benefits. Ready.';
-  assert.equal(await replayTranscript, completeText);
-  assert.equal(await h.ensureTranscript(), completeText, 'replay reuses the completed live transcript');
-  assert.equal(sessions[0].session.getState().pendingChunks, 0);
-  assert.equal(sessions[0].session.getState().completedSeconds, 61.5);
-  assert.equal(h.state.transcriptModel, h.state.config.transcriptionModel);
-  assert.equal(h.get('analyze-button').disabled, false);
-  await h.runAnalysis();
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].input.text, completeText);
-  assert.equal(requests[0].input.targetTalkingPoints, 'Latest preparation after recording');
-  assert.equal(sessions[0].calls.length, 3, 'replay and coaching cannot rerun local recognition');
-});
-
-test('canceling live transcription keeps recording and requires a complete retry instead of analyzing a partial draft', async () => {
-  const requests = [];
-  const h = harness(async (url, options) => {
-    if (url === '/api/config') return {};
-    requests.push(url);
-    if (url === '/api/transcribe') return { text: 'Complete recording transcript.', durationSeconds: 31 };
-    const input = JSON.parse(options.body);
-    assert.equal(input.text, 'Complete recording transcript.');
-    return { transcript: input.text, wordStats: {}, blunders: {}, analysis: {} };
-  }, { startup: true });
-  const sessions = liveSpeech(h, async () => ({ text: 'Partial draft.' }));
-  await h.startRecording();
-  h.captureRecordingSamples(new Float32Array(16000 * 30), 16000); await nextTurn();
-  assert.equal(h.get('follow-transcript').textContent, 'Partial draft.');
-  await h.get('live-transcription-cancel').click();
-  assert.equal(h.state.recording, true);
-  assert.equal(sessions[0].session.getState().cancelled, true);
-  h.captureRecordingSamples(new Float32Array(16000), 16000);
-  h.stopRecording();
-  assert.equal(h.state.audioDuration, 31);
-  assert.equal(h.state.transcriptText, '');
-  assert.equal(h.get('follow-transcript-connect').hidden, false);
-  await h.runAnalysis();
-  assert.deepEqual(requests, ['/api/transcribe', '/api/analyze-text']);
-});
-
-test('a failed live batch preserves audio and late results cannot replace a new take or its transcript', async () => {
-  const recognition = deferred();
-  const h = harness();
-  const sessions = liveSpeech(h, () => recognition.promise);
-  await h.startRecording();
-  h.captureRecordingSamples(new Float32Array(16000 * 30), 16000); await nextTurn();
-  assert.equal(sessions[0].calls.length, 1, 'the stale result must come from a dispatched production-size window');
-  h.stopRecording(); const finishing = h.state.livePromise.catch(() => 'cancelled');
-  await h.startRecording();
-  assert.equal(sessions[0].session.getState().cancelled, true);
-  recognition.resolve({ text: 'Old take must stay gone.' }); await finishing; await nextTurn();
-  assert.equal(h.state.recording, true);
-  assert.equal(h.state.transcriptText, '');
-  assert.doesNotMatch(h.get('follow-transcript').textContent, /Old take/);
-  h.captureRecordingSamples(new Float32Array(16000), 16000);
-  h.stopRecording(); await h.state.livePromise;
-  const saved = h.state.audioBlob;
-  await h.startRecording();
-  const failed = new Error('Model unavailable');
-  sessions[2].options.onUpdate({ error: failed });
-  assert.equal(h.state.recording, true);
-  h.captureRecordingSamples(new Float32Array(16000), 16000); h.stopRecording();
-  assert.notEqual(h.state.audioBlob, saved);
-  assert.equal(h.state.audioDuration, 1);
-  assert.equal(h.state.transcriptText, '');
-  assert.match(h.get('follow-transcript-status').textContent, /Model unavailable/);
-});
-
-test('changing models, clearing, and very short takes cancel live work without accepting partial text', async () => {
-  const h = harness();
-  h.state.config.transcriptionModel = 'legacy-speech-model';
-  const sessions = liveSpeech(h, async () => ({ text: 'Draft words.' }));
-  await h.startRecording();
-  h.captureRecordingSamples(new Float32Array(16000), 16000);
-  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
-  assert.equal(sessions[0].session.getState().cancelled, true);
-  assert.equal(h.state.recording, true);
-  h.stopRecording();
-  assert.equal(h.state.audioDuration, 1);
-  assert.equal(h.state.transcriptText, '');
-  assert.match(h.get('follow-transcript-status').textContent, /model changed/);
-  await h.startRecording(); h.captureRecordingSamples(new Float32Array(4000), 16000); h.stopRecording();
-  assert.equal(sessions[1].session.getState().cancelled, true);
-  assert.equal(h.state.audioBlob, null);
-  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000); h.stopRecording();
-  const finishing = h.state.livePromise.catch(() => 'cancelled');
-  h.discardAudio(); await finishing;
-  assert.equal(sessions[2].session.getState().cancelled, true);
-  assert.equal(h.state.audioBlob, null);
-  assert.equal(h.get('follow-transcript-panel').hidden, true);
-});
-
-test('uploading a replacement cancels pending live work before decoding and preserves old audio if decoding fails', async () => {
-  const recognition = deferred(), decode = deferred();
-  const h = harness(undefined, { decodeAudioData: () => decode.promise });
-  const sessions = liveSpeech(h, () => recognition.promise);
-  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000 * 30), 16000); await nextTurn();
-  assert.equal(sessions[0].calls.length, 1);
-  h.stopRecording();
-  const oldAudio = h.state.audioBlob;
-  const finishing = h.state.livePromise.catch(() => 'cancelled');
-  const upload = h.uploadAudio({ name: 'Broken.wav', size: 10, arrayBuffer: async () => new ArrayBuffer(10) });
-  assert.equal(sessions[0].session.getState().cancelled, true);
-  await nextTurn();
-  decode.reject(new Error('Invalid audio')); await upload; await finishing;
-  recognition.resolve({ text: 'Stale old draft.' }); await nextTurn();
-  assert.equal(h.state.audioBlob, oldAudio);
-  assert.equal(h.state.transcriptText, '');
-  assert.equal(h.get('follow-transcript-connect').hidden, false);
-});
-
 test('estimated transcript position handles empty text and boundaries without invalid word indices', () => {
   const { wordIndexAtTime } = harness();
   assert.equal(wordIndexAtTime(1, 0, 10), -1);
@@ -1374,7 +1195,7 @@ test('seeking clamps to the saved audio and updates the corresponding transcript
   assert.equal(h.state.activeWordIndex, 9);
 });
 
-test('concurrent replay transcription requests share one local service operation and cache the transcript', async () => {
+test('concurrent transcription requests share one service operation and cache the transcript', async () => {
   const pending = deferred();
   const calls = [];
   const h = harness(async (url, init) => {
@@ -1397,11 +1218,11 @@ test('concurrent replay transcription requests share one local service operation
   assert.equal(calls.length, 1);
 });
 
-test('migrating to Bark rebuilds the transcript while preserving audio and its browser save', async () => {
+test('changing the transcription service rebuilds the transcript while preserving audio and its browser save', async () => {
   let recognitions = 0;
   const h = harness(async path => {
     assert.equal(path, '/api/transcribe');
-    return { text: ++recognitions === 1 ? 'Previously recognized words.' : 'Bark recognized different words.', durationSeconds: 4 };
+    return { text: ++recognitions === 1 ? 'Previously recognized words.' : 'Current service recognized different words.', durationSeconds: 4 };
   });
   h.state.config.transcriptionModel = 'legacy-speech-model';
   const audio = new Blob(['recording'], { type: 'audio/wav' });
@@ -1410,7 +1231,7 @@ test('migrating to Bark rebuilds the transcript while preserving audio and its b
   await h.ensureTranscript();
   h.state.report = { transcript: h.state.transcriptText };
   h.seekPlayback(2);
-  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
+  h.updateConfig({ transcriptionModel: TEST_MODEL_ID });
   assert.equal(h.state.audioBlob, audio);
   assert.equal(h.state.audioURL, url);
   assert.equal(h.state.audioSave, saved);
@@ -1419,10 +1240,10 @@ test('migrating to Bark rebuilds the transcript while preserving audio and its b
   assert.equal(h.get('transcript').value, '');
   assert.equal(h.state.report, null);
   assert.equal(h.get('follow-transcript-connect').hidden, false);
-  assert.equal(await h.ensureTranscript(), 'Bark recognized different words.');
+  assert.equal(await h.ensureTranscript(), 'Current service recognized different words.');
   assert.equal(recognitions, 2);
   h.updateConfig({ analysisProvider: 'google', analysisConfigured: true });
-  assert.equal(await h.ensureTranscript(), 'Bark recognized different words.');
+  assert.equal(await h.ensureTranscript(), 'Current service recognized different words.');
   assert.equal(recognitions, 2, 'changing the coach must preserve the same speech-model transcript');
   assert.equal(h.storageCalls.save.length, 1, 'a model change must not create another saved recording');
   assert.ok(!h.revoked.includes(url));
@@ -1438,7 +1259,7 @@ test('changing a speech model aborts old recognition and ignores its late result
   h.setAudio(audio, 4, 'Original');
   const old = h.ensureTranscript();
   const rejected = assert.rejects(old, { name: 'AbortError' });
-  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
+  h.updateConfig({ transcriptionModel: TEST_MODEL_ID });
   assert.equal(requests[0].init.signal.aborted, true);
   const current = h.ensureTranscript();
   requests[0].pending.resolve({ text: 'Stale recognition result.', durationSeconds: 999 });
@@ -1446,9 +1267,9 @@ test('changing a speech model aborts old recognition and ignores its late result
   assert.equal(h.state.transcriptText, '');
   assert.equal(h.state.audioDuration, 4);
   assert.ok(h.state.transcriptPromise, 'the old result cannot clear the new model request');
-  requests[1].pending.resolve({ text: 'Current Bark result.', durationSeconds: 4 });
-  assert.equal(await current, 'Current Bark result.');
-  assert.equal(h.state.transcriptModel, BARK_MODEL_ID);
+  requests[1].pending.resolve({ text: 'Current service result.', durationSeconds: 4 });
+  assert.equal(await current, 'Current service result.');
+  assert.equal(h.state.transcriptModel, TEST_MODEL_ID);
 });
 
 test('changing a speech model aborts dependent coaching and restores controls without accepting its late report', async () => {
@@ -1462,7 +1283,7 @@ test('changing a speech model aborts dependent coaching and restores controls wi
   await h.ensureTranscript();
   const analyzing = h.runAnalysis(); await nextTurn();
   assert.equal(h.state.busy, true);
-  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
+  h.updateConfig({ transcriptionModel: TEST_MODEL_ID });
   assert.equal(coachingSignal.aborted, true);
   assert.equal(h.state.busy, false);
   assert.equal(h.get('analyze-button').disabled, false);
@@ -1484,7 +1305,7 @@ test('audio preparation hides unsupported cancellation and releases controls on 
   assert.equal(h.state.preparingAudio, true);
   assert.equal(h.state.busy, true);
   assert.equal(h.get('cancel-analysis').hidden, true, 'the app must not offer a cancel action that cannot stop decoding');
-  h.updateConfig({ transcriptionModel: BARK_MODEL_ID });
+  h.updateConfig({ transcriptionModel: TEST_MODEL_ID });
   assert.equal(h.state.busy, true, 'changing models must not unlock a separate audio preparation operation');
   decoded.reject(Object.assign(new Error('Invalid media'), { name: 'EncodingError' }));
   await upload;
@@ -1536,7 +1357,7 @@ test('discarding a recording aborts transcription and ignores a response arrivin
   assert.equal(h.state.transcriptPromise, null);
 });
 
-test('analysis and corrected feedback reuse the replay transcript without repeating local recognition', async () => {
+test('analysis and corrected feedback reuse the replay transcript without repeating recognition', async () => {
   const calls = [];
   const h = harness(async (url, init) => {
     calls.push({ url, init });
@@ -1668,8 +1489,9 @@ test('1,000 repeated Record and Stop actions admit one live session, one final u
   for (let index = 0; index < 1000; index++) h.stopRecording();
   await h.state.livePromise;
   assert.equal(live.calls.filter(call => call.path === '/live-sessions').length, 1);
-  assert.equal(live.calls.filter(call => call.path.endsWith('/prepare')).length, 1);
-  assert.equal(live.calls.filter(call => call.path.includes('/chunks/')).length, 1);
+  assert.equal(live.sockets.length, 1);
+  assert.equal(live.sockets[0].messages.filter(message => message.type === 'start').length, 1);
+  assert.equal(live.sockets[0].messages.filter(message => message.type === 'finish').length, 1);
   assert.equal(live.calls.filter(call => call.path.endsWith('/finish')).length, 1);
   assert.equal(live.uploads.length, 1);
 });
@@ -1786,7 +1608,7 @@ test('full browser startup binds existing HTML controls and never references a r
   const h = harness(async url => {
     calls.push(url);
     assert.equal(url, '/api/config', 'startup must not process audio or request AI coaching');
-    return response({ configured: false, speechConfigured: true, localSpeech: true, analysisConfigured: false, transcriptionModel: BARK_MODEL_ID });
+    return response({ configured: false, speechConfigured: true, analysisConfigured: false, transcriptionModel: TEST_MODEL_ID });
   }, { startup: true });
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(h.missingIds, []);
@@ -1799,7 +1621,7 @@ test('full browser startup binds existing HTML controls and never references a r
   assert.notEqual(h.get('app-status').className, 'app-status error', 'initial settings must render successfully');
 });
 
-test('local speech needs no coaching key and progress plus cancellation reach the browser service', async () => {
+test('transcription progress and cancellation reach the recording service', async () => {
   const pending = deferred();
   let transcriptionSignal;
   const h = harness(async (path, options) => {
@@ -1812,9 +1634,8 @@ test('local speech needs no coaching key and progress plus cancellation reach th
   assert.equal(h.state.config.analysisConfigured, false);
   h.setAudio(new Blob(['private recording']), 4, 'Local take');
   const result = h.ensureTranscript();
-  h.emitProgress('Downloading English speech model: 42%');
-  assert.equal(h.get('local-model-status').textContent, 'Downloading English speech model: 42%');
-  assert.equal(h.get('follow-transcript-status').textContent, 'Downloading English speech model: 42%');
+  h.emitProgress('Preparing the saved recording…');
+  assert.equal(h.get('follow-transcript-status').textContent, 'Preparing the saved recording…');
   assert.equal(h.get('cancel-analysis').hidden, false);
   h.get('cancel-analysis').listeners.get('click')[0]();
   assert.equal(transcriptionSignal.aborted, false, 'the first click only opens confirmation');
@@ -1863,42 +1684,15 @@ test('switching preparation views preserves both complete inputs in prompt previ
   assert.doesNotMatch(appHtml, /<[^>]*id="talking-points-field"[^>]*\bhidden\b/);
 });
 
-test('static entrypoint is subdirectory-safe and speech setup defaults to local English Bark Plus without credentials', () => {
+test('static entrypoint is subdirectory-safe and uses live transcription without model downloads', () => {
   assert.match(appHtml, /<script type="module" src="\.\/bootstrap\.js"><\/script>/);
   assert.match(appHtml, /href="\.\/styles\.css"/);
   assert.match(appHtml, /href="\.\/" aria-label="Neeley Dress Rehearsal home"/);
-  const speechOptions = appHtml.match(/<select id="transcription-model"[^>]*>([\s\S]*?)<\/select>/)[1];
-  assert.equal(speechOptions, `<option value="${BARK_MODEL_ID}">${BARK_MODEL_LABEL}</option>`);
+  assert.doesNotMatch(appHtml, /Bark|Hugging Face|703 MB|settings-dialog|analysis-api-key|transcription-model/);
+  assert.match(appHtml, /Your words appear here as you speak/);
   assert.doesNotMatch(appHtml, /whisper/i);
   assert.ok(!htmlIds.includes('api-token') && !htmlIds.includes('transcription-endpoint'));
   assert.doesNotMatch(appSource, /\b(?:localStorage|sessionStorage)\b/);
-});
-
-test('Bark choices default to Plus, explain Clean statistics, and only change the active model after Apply', async () => {
-  const settingsCalls = [];
-  const config = { transcriptionModel: BARK_MODEL_ID, speechConfigured: true };
-  const h = harness(async (path, options) => {
-    if (path === '/api/config') return config;
-    assert.equal(path, '/api/settings');
-    const body = JSON.parse(options.body); settingsCalls.push(body);
-    return { ...config, ...body };
-  }, { startup: true });
-  await nextTurn();
-  const select = h.get('transcription-model');
-  assert.equal(select.value, BARK_MODEL_ID);
-  assert.match(select.options[0].label, /Plus/);
-  assert.deepEqual(select.options.filter(option => !option.disabled).map(option => option.value), BARK_MODELS.map(model => model.id));
-  assert.match(select.options.at(-1).label, /Pro.*unavailable/);
-  assert.equal(select.options.at(-1).disabled, true);
-  assert.match(h.get('speech-model-note').textContent, /703 MB/);
-  select.value = BARK_CLEAN_ID;
-  for (const listener of select.listeners.get('change')) listener();
-  assert.match(h.get('speech-model-note').textContent, /Removes fillers.*undercount/);
-  assert.equal(h.state.config.transcriptionModel, BARK_MODEL_ID);
-  assert.equal(settingsCalls.length, 0);
-  await h.saveSettings({ preventDefault() {} });
-  assert.equal(settingsCalls[0].transcriptionModel, BARK_CLEAN_ID);
-  assert.equal(h.state.config.transcriptionModel, BARK_CLEAN_ID);
 });
 
 test('collapsed practice context is preserved exactly in analysis and prompt preview', async () => {
@@ -2031,45 +1825,30 @@ test('report context badges describe the analyzed snapshot rather than subsequen
   assert.equal(h.analysisInput('Next rehearsal.').instructorRubric, '');
 });
 
-test('missing coaching key shows setup and adding it analyzes existing corrected text without retranscription', async () => {
-  const requests = [];
-  let connected = false;
+test('account setup never sends transcript data and enabling coaching reuses corrected text', async () => {
+  const requests = []; let connected = false, accountOpened = 0;
   const h = harness(async (path, options) => {
-    if (path === '/api/config') return { analysisConfigured: false };
+    if (path === '/api/config') return { ...hostedConfig, analysisConfigured: false };
     requests.push(path);
-    if (path === '/api/transcribe') return { text: 'Practice improves clarity.', durationSeconds: 4 };
-    if (path === '/api/settings') { connected = true; return { analysisConfigured: true }; }
+    if (path === '/api/transcribe') return { text: 'Practice improves clarity.', durationSeconds: 4, recordingId: 'saved-id' };
     assert.equal(path, '/api/analyze-text');
     const input = JSON.parse(options.body);
-    assert.equal(input.useAI, true, 'analysis requests coaching even when the service must report a missing key');
     return { transcript: input.text, meta: { coachingStatus: connected ? 'complete' : 'not_connected' },
-      analysis: connected ? { method: 'ai', overallRating: 82, annotations: [annotation(input.text, input.text)] } : { method: 'rules', overallLabel: 'Provisional observations' } };
+      analysis: connected ? { method: 'ai', overallRating: 82, annotations: [annotation(input.text, input.text)] } : { method: 'rules' } };
   }, { startup: true });
+  h.window.rehearsalAccount = { open() { accountOpened++; }, track() {}, refreshHistory() {} };
   await nextTurn();
-  h.setAudio(new Blob(['audio']), 4, 'Existing take');
-  await h.runAnalysis();
-  assert.equal(h.get('coaching-notice').hidden, false);
-  assert.equal(h.get('speech-analysis-content').hidden, true, 'do not present an empty rating or heuristic thesis as AI coaching');
-  assert.equal(h.get('coaching-action').textContent, 'Connect AI coach');
-  assert.equal(h.get('annotation-title').textContent, 'Full transcript');
-  assert.equal(h.get('annotation-legend').hidden, true);
-  const beforeSettings = requests.length;
-  await h.get('coaching-action').click();
-  assert.equal(h.get('settings-dialog').open, true);
-  assert.equal(requests.length, beforeSettings, 'opening setup must not send transcript data');
-  h.get('analysis-api-key').value = 'fake-test-key';
-  await h.saveSettings({ preventDefault() {} });
-  assert.equal(h.get('coaching-action').textContent, 'Analyze with AI');
-  assert.equal(requests.filter(path => path === '/api/analyze-text').length, 1, 'saving a key does not start a paid request');
+  h.setAudio(new Blob(['audio']), 4, 'Existing take'); await h.runAnalysis();
+  assert.equal(h.get('speech-analysis-content').hidden, true);
+  const before = requests.length; await h.get('coaching-action').click();
+  assert.equal(accountOpened, 1); assert.equal(requests.length, before);
+  connected = true; h.updateConfig({ analysisConfigured: true });
   h.get('transcript').value = 'Corrected words about rehearsal.';
   await h.get('coaching-action').click();
   assert.equal(requests.filter(path => path === '/api/transcribe').length, 1);
   assert.equal(h.state.report.transcript, 'Corrected words about rehearsal.');
-  assert.equal(h.get('coaching-notice').hidden, true);
   assert.equal(h.get('speech-analysis-content').hidden, false);
   assert.equal(elementText(h.get('overall-rating')), '82 / 100');
-  assert.equal(h.get('annotation-legend').hidden, false);
-  assert.equal(h.get('annotation-title').textContent, 'Full annotated transcript');
 });
 
 test('failed coaching keeps the provider reason visible and offers retry instead of pretending the key is absent', () => {
@@ -2081,28 +1860,20 @@ test('failed coaching keeps the provider reason visible and offers retry instead
     h.renderReport();
     assert.equal(h.get('coaching-title').textContent, 'AI coaching could not finish.');
     assert.equal(h.get('coaching-action').textContent, 'Retry AI coaching');
-    assert.equal(h.get('coaching-settings').hidden, false);
+    assert.equal(h.get('coaching-settings').hidden, true);
     assert.match(elementText(h.get('report-warnings')), /Provider quota exhausted/);
     assert.equal(h.get('speech-analysis-content').hidden, true);
     assert.match(h.get('annotation-status').textContent, /did not finish/);
   }
 });
 
-test('Codex settings apply only the speech model and never show a provider-key message', async () => {
-  let saved;
-  const config = { coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', analysisProviderLabel: 'Codex', transcriptionModel: BARK_MODEL_ID };
-  const h = harness(async (path, options) => {
-    assert.equal(path, '/api/settings'); saved = JSON.parse(options.body); return { ...config, ...saved };
-  });
-  h.updateConfig(config);
+test('Codex coaching explains the conversation connection without provider-key controls', () => {
+  const h = harness(() => { throw new Error('Opening connection help must not send data'); });
+  h.updateConfig({ coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', transcriptionModel: TEST_MODEL_ID });
   assert.equal(h.get('connection-label').textContent, 'Codex coaching');
-  h.get('analysis-api-key').value = 'must-not-be-used';
-  h.get('analysis-model').value = 'must-not-be-used';
-  h.get('transcription-model').value = BARK_MODEL_ID;
-  await h.saveSettings({ preventDefault() {} });
-  assert.deepEqual(saved, { transcriptionModel: BARK_MODEL_ID });
+  h.openSettings();
   assert.match(h.get('app-status').textContent, /this Codex conversation/);
-  assert.equal(h.state.config.analysisProvider, 'codex');
+  assert.doesNotMatch(appHtml, /analysis-api-key|settings-dialog/);
 });
 
 test('a denied panel export retains audio and reports the host limitation', async () => {
@@ -2138,11 +1909,11 @@ test('changing a panel speech model preserves a manually pasted transcript and i
   h.state.transcriptText = 'Manually pasted rehearsal.';
   const report = { transcript: h.state.transcriptText, analysis: { method: 'ai' } };
   h.state.report = report;
-  h.updateConfig({ coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', transcriptionModel: BARK_MODEL_ID });
+  h.updateConfig({ coachingViaHost: true, analysisConfigured: true, analysisProvider: 'codex', transcriptionModel: TEST_MODEL_ID });
   assert.equal(h.get('transcript').value, 'Manually pasted rehearsal.');
   assert.equal(h.state.transcriptText, 'Manually pasted rehearsal.');
   assert.equal(h.state.report, report);
-  assert.equal(h.state.config.transcriptionModel, BARK_MODEL_ID);
+  assert.equal(h.state.config.transcriptionModel, TEST_MODEL_ID);
 });
 
 const timelineStates = h => h.get('processing-steps').children.map(step => step.dataset.state);
