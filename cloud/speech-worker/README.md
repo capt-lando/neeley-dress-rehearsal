@@ -6,9 +6,13 @@ This separate service runs **Bark 3.0 Plus** on a CUDA GPU. Students do not down
 
 `POST /transcribe` accepts a raw canonical RIFF WAV: mono, 16 kHz, PCM16, 0.5–600 seconds, at most 20 MiB. The app already produces this format. Send `Content-Type: audio/wav` and `Authorization: Bearer <BARK_WORKER_TOKEN>`. No multipart forms, URLs, compressed bodies, or user-selected models are accepted.
 
+For live rehearsal, the authenticated gateway first calls `POST /prepare` with an empty body. It returns `{ "ready": true, "model": "bark-3.0-plus" }` after loading the reusable model. Preparation is subject to the same gateway budget reservation and worker authorization as transcription; it is not a public keep-alive endpoint.
+
+The gateway then sends sequential `POST /transcribe-live` requests, each containing 1 sample to 10 seconds of the same canonical WAV format. A final tail shorter than 0.5 seconds is padded only inside the worker; the response reports its original duration. Live silence returns an empty `text` successfully so the session can advance. Malformed audio still fails, and an entirely silent batch request still returns 422. All three routes share one busy gate and the same process timeout/cancellation behavior.
+
 Success: `{ "text": "...", "durationSeconds": 123.4, "chunks": [], "model": "bark-3.0-plus" }`. Error statuses include 401 (authorization), 413 (size), 415 (type), 422 (audio/no speech), 429 (busy), 503 (unavailable), and 504 (timeout). The caller must check HTTP status; errors never contain upstream stack traces or transcript text.
 
-Thirty-second disjoint windows bound inference memory. Text is joined without filler removal or repetition deduplication. Plus can still miss audible fillers; it is not a perfect verbatim detector. The model is reused across requests, and the processor/config are loaded only from pinned local files. No remote code selection or runtime downloads are accepted. The reviewed publisher loader is SHA-256 checked; only its weight-decoding function is used.
+Thirty-second disjoint windows bound inference memory for batch requests. Text is joined without filler removal or repetition deduplication. Plus can still miss audible fillers; it is not a perfect verbatim detector. The model is reused across requests, and the processor/config are loaded only from pinned local files. No remote code selection or runtime downloads are accepted. The reviewed publisher loader is SHA-256 checked; only its weight-decoding function is used, once during image build. Decoded tensors are saved without changing their values, then memory-mapped with `weights_only=True` at startup. Unused random weight initialization and redundant CPU copies are skipped; CPU math uses two threads. GPU inference remains FP32.
 
 ## Deployment
 

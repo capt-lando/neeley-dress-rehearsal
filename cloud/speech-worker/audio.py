@@ -4,13 +4,18 @@ import struct
 MAX_BYTES = 20 * 1024 * 1024
 SAMPLE_RATE = 16_000
 WINDOW_SAMPLES = 30 * SAMPLE_RATE
+LIVE_MAX_BYTES = 44 + 10 * SAMPLE_RATE * 2
 
 
 class AudioError(ValueError):
     pass
 
 
-def decode_wav(payload: bytes):
+class NoSpeechError(AudioError):
+    pass
+
+
+def decode_wav(payload: bytes, *, live=False):
     if not 44 <= len(payload) <= MAX_BYTES:
         raise AudioError("Use a WAV recording no larger than 20 MiB.")
     expected = (b"RIFF", len(payload) - 8, b"WAVE", b"fmt ", 16,
@@ -18,8 +23,10 @@ def decode_wav(payload: bytes):
     if struct.unpack("<4sI4s4sIHHIIHH4sI", payload[:44]) != expected:
         raise AudioError("Upload a mono 16 kHz PCM16 WAV prepared by the app.")
     size = len(payload) - 44
-    if size % 2 or not SAMPLE_RATE <= size <= 600 * SAMPLE_RATE * 2:
-        raise AudioError("Recordings must be between half a second and 10 minutes.")
+    minimum, maximum = (2, LIVE_MAX_BYTES - 44) if live else (SAMPLE_RATE, 600 * SAMPLE_RATE * 2)
+    if size % 2 or not minimum <= size <= maximum:
+        raise AudioError("Live sections must contain audio and be at most 10 seconds." if live
+                         else "Recordings must be between half a second and 10 minutes.")
     return memoryview(payload)[44:], size / (SAMPLE_RATE * 2)
 
 

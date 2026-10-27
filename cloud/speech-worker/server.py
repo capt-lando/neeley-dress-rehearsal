@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from audio import AudioError, MAX_BYTES, decode_wav
+from audio import AudioError, LIVE_MAX_BYTES, MAX_BYTES, SAMPLE_RATE, decode_wav
 
 INFERENCE_SECONDS = 120
 UPLOAD_SECONDS = 20
@@ -75,17 +75,19 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS):
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
-    @app.post("/transcribe")
-    async def transcribe(request: Request):
+    async def handle(request: Request, *, live=False, prepare=False):
         supplied = request.headers.get("authorization", "")
         if len(supplied) > 256 or not hmac.compare_digest(supplied.encode(), ("Bearer " + secret).encode()):
             raise HTTPException(401, "Unauthorized.", headers={"WWW-Authenticate": "Bearer"})
         if request.query_params or request.headers.get("content-encoding", "identity") != "identity":
             raise HTTPException(400, "Send the WAV body without query parameters or compression.")
-        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() not in {"audio/wav", "audio/x-wav", "application/octet-stream"}:
+        if not prepare and request.headers.get("content-type", "").split(";", 1)[0].strip().lower() not in {"audio/wav", "audio/x-wav", "application/octet-stream"}:
             raise HTTPException(415, "Send a WAV audio body.")
+        limit = 0 if prepare else LIVE_MAX_BYTES if live else MAX_BYTES
         length = request.headers.get("content-length")
-        if length is not None and (not length.isdecimal() or len(length) > 9 or int(length) > MAX_BYTES):
+        if length is not None and (not length.isdecimal() or len(length) > 9 or int(length) > limit):
+            if prepare:
+                raise HTTPException(400, "Send an empty preparation request.")
             raise HTTPException(413, "The recording is too large.")
         if gate.locked():
             raise HTTPException(429, "Speech worker is busy. Try again shortly.", headers={"Retry-After": "5"})
@@ -94,16 +96,33 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS):
             try:
                 async with asyncio.timeout(upload_timeout):
                     async for piece in request.stream():
-                        if len(payload) + len(piece) > MAX_BYTES:
+                        if len(payload) + len(piece) > limit:
+                            if prepare:
+                                raise HTTPException(400, "Send an empty preparation request.")
                             raise HTTPException(413, "The recording is too large.")
                         payload.extend(piece)
-                decode_wav(payload)
+                duration = None if prepare else decode_wav(payload, live=live)[1]
+                if live and len(payload) < 44 + SAMPLE_RATE:
+                    # The model receives at least 0.5 seconds; keep the real tail duration below.
+                    payload.extend(b"\0" * (44 + SAMPLE_RATE - len(payload)))
+                    struct.pack_into("<I", payload, 4, len(payload) - 8)
+                    struct.pack_into("<I", payload, 40, len(payload) - 44)
                 message = await engine.run(bytes(payload))
                 if message.get("ok") is not True:
+                    if live and message.get("code") == "no_speech":
+                        return JSONResponse({"text": "", "durationSeconds": duration,
+                                             "chunks": [], "model": "bark-3.0-plus"})
                     status = 422 if message.get("status") == 422 else 503
                     detail = "No usable speech was detected. Try another recording." if status == 422 else "Speech recognition is temporarily unavailable."
                     raise HTTPException(status, detail)
-                return JSONResponse(message["result"])
+                result = message["result"]
+                if prepare:
+                    if result.get("ready") is not True:
+                        raise HTTPException(503, "Speech recognition is temporarily unavailable.")
+                    return JSONResponse({"ready": True, "model": "bark-3.0-plus"})
+                if live:
+                    result = result | {"durationSeconds": duration}
+                return JSONResponse(result)
             except AudioError as error:
                 raise HTTPException(422, str(error)) from None
             except TimeoutError:
@@ -114,5 +133,17 @@ def create_app(*, token=None, runner=None, upload_timeout=UPLOAD_SECONDS):
                 raise HTTPException(503, "Speech recognition is temporarily unavailable.") from None
             finally:
                 payload.clear()
+
+    @app.post("/prepare")
+    async def prepare(request: Request):
+        return await handle(request, prepare=True)
+
+    @app.post("/transcribe-live")
+    async def transcribe_live(request: Request):
+        return await handle(request, live=True)
+
+    @app.post("/transcribe")
+    async def transcribe(request: Request):
+        return await handle(request)
 
     return app

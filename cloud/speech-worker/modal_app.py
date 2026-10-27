@@ -7,7 +7,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install_from_requirements(str(ROOT / "requirements.txt"))
     .add_local_dir(str(ROOT), remote_path="/worker", copy=True,
-                   ignore=["models", "__pycache__", ".venv", "tests"])
+                   ignore=["models", "__pycache__", ".venv", "tests", "README.md", "modal_app.py"])
     .run_commands("cd /worker && python models.py")
     .env({"PYTHONPATH": "/worker", "HF_HUB_OFFLINE": "1",
           "TRANSFORMERS_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1"})

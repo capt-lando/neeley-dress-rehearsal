@@ -98,6 +98,24 @@ test('Claude Messages sends current bearer authentication, API version and optio
   await assert.rejects(requestCoaching(options('anthropic', { workspaceId: 'bad\r\nheader' })), /workspace ID/);
 });
 
+test('OpenAI token accounting keeps only numeric usage counters, including reasoning and cached input', async () => {
+  let usage;
+  const result = await requestCoaching(options('openai', {
+    onUsage: value => { usage = value; },
+    fetchImpl: async () => mockResponse({ ...fixtures.openai, usage: {
+      input_tokens: 1200, input_tokens_details: { cached_tokens: 1000, secret: key },
+      output_tokens: 800, output_tokens_details: { reasoning_tokens: 300 }, total_tokens: 2000,
+      private: prompt,
+    } }),
+  }));
+  assert.deepEqual(result, report);
+  assert.deepEqual(usage, { inputTokens: 1200, cachedInputTokens: 1000, outputTokens: 800, reasoningTokens: 300, totalTokens: 2000 });
+  await requestCoaching(options('openai', {
+    onUsage: () => assert.fail('Invalid counters must not be recorded'),
+    fetchImpl: async () => mockResponse({ ...fixtures.openai, usage: { input_tokens: key, output_tokens: -1, total_tokens: 1.5 } }),
+  }));
+});
+
 test('Gemini generateContent authenticates in a header, requests JSON and excludes thought parts', async () => {
   let request;
   const result = await requestCoaching(options('google', {

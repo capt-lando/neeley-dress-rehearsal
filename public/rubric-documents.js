@@ -15,8 +15,7 @@ export async function extractRubric(file) {
     }
     if (extension === 'pdf') {
       const [pdfjs, { default: workerUrl }] = await Promise.all([import('pdfjs-dist'), import('pdfjs-dist/build/pdf.worker.min.mjs?url')]);
-      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
-      text = await extractPdfText(bytes, pdfjs);
+      text = await extractPdfText(bytes, pdfjs, { workerUrl });
     }
   } catch (problem) {
     if (problem instanceof RubricDocumentError) throw problem;

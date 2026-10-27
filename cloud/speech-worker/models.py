@@ -1,5 +1,7 @@
 """Only image builds download model assets; serving is offline."""
 import hashlib
+import importlib.util
+import json
 from pathlib import Path
 
 BARK_REPO = "ConwayResearch/Underdog-Bark-3.0-Plus"
@@ -27,5 +29,20 @@ def download():
                                       "tokenizer.json", "tokenizer_config.json"])
 
 
+def expand_weights():
+    """Decode the pinned compressed weights once at build time, without changing values."""
+    import torch
+    torch.set_num_threads(2)
+    path = MODEL_ROOT / "bark" / "bark_loader.py"
+    verify_loader(path)
+    spec = importlib.util.spec_from_file_location("pinned_bark_loader", path)
+    loader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loader)
+    state, config = loader.load_state_dict(MODEL_ROOT / "bark" / "model.bark")
+    torch.save(state, MODEL_ROOT / "bark" / "model.pt")
+    (MODEL_ROOT / "bark" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
 if __name__ == "__main__":
     download()
+    expand_weights()

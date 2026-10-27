@@ -27,7 +27,7 @@ export async function beginHostedSignIn(service, provider, redirectTo, config = 
 export function installHostedAccount(service, actions) {
   const $ = id => document.getElementById(id);
   const dialog = $('account-dialog');
-  let user = null, generation = 0, busy = false, disposed = false, signingIn = false;
+  let user = null, generation = 0, busy = false, disposed = false, signingIn = false, signingOut = false, liveTranscription = false, historyRequest = null;
   const analytics = createUsageAnalytics({ send: (events, { signal }) => service.request('/api/events', { method: 'POST', body: { events }, signal }) });
   const consentKey = () => user ? `neeley-usage-consent:${user.id}` : '';
   const readConsent = () => { try { return localStorage.getItem(consentKey()) === 'yes'; } catch { return false; } };
@@ -57,14 +57,22 @@ export function installHostedAccount(service, actions) {
       const config = await service.request('/api/config');
       if (own !== generation || disposed) return;
       actions.updateConfig(config);
+      liveTranscription = Boolean(config.liveTranscription);
+      dialog.querySelector('.key-privacy-note p').textContent = (liveTranscription
+        ? 'While signed in, recording sends 10-second audio segments for cloud transcription. Stop saves the complete recording and transcript privately. Replay does not upload audio. '
+        : 'Create transcript or Analyze uploads and saves your recording, transcript, and resulting feedback privately. Recording and replay alone do not upload audio. ')
+        + 'Coaching also sends your transcript and preparation text to our configured AI provider. Raw rubric files stay on your device.';
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
       if (user) await refreshHistory(); else { $('cloud-recordings-list').replaceChildren(); $('cloud-recordings-status').textContent = 'Sign in to see recordings saved privately to your account.'; }
     } catch (error) { if (own === generation) status(error.message); }
   }
   async function refreshHistory() {
     const own = generation;
-    if (!user) return;
-    try {
+    if (!user || disposed) return;
+    if (historyRequest?.generation === own) return historyRequest.promise;
+    const request = { generation: own }; historyRequest = request;
+    $('cloud-history-refresh').disabled = true;
+    request.promise = (async () => { try {
       const { recordings } = await service.request('/api/recordings');
       if (own !== generation || disposed) return;
       const list = $('cloud-recordings-list');
@@ -100,8 +108,13 @@ export function installHostedAccount(service, actions) {
         }
         row.append(info, buttons); list.append(row);
       }
-      $('cloud-recordings-status').textContent = recordings?.length ? 'Private to your account. Open a take to revisit its transcript and feedback.' : 'No cloud recordings yet. Create transcript or Analyze saves the current take privately.';
+      $('cloud-recordings-status').textContent = recordings?.length ? 'Private to your account. Open a take to revisit its transcript and feedback.' : liveTranscription
+        ? 'No cloud recordings yet. Stop your recording to save the complete take privately.'
+        : 'No cloud recordings yet. Create transcript or Analyze saves the current take privately.';
     } catch (error) { if (own === generation) $('cloud-recordings-status').textContent = error.message; }
+    finally { if (historyRequest === request) { historyRequest = null; $('cloud-history-refresh').disabled = false; } }
+    })();
+    return request.promise;
   }
   for (const provider of ['google', 'azure']) $(provider === 'google' ? 'sign-in-google' : 'sign-in-microsoft').addEventListener('click', async () => {
     if (signingIn) return;
@@ -115,7 +128,10 @@ export function installHostedAccount(service, actions) {
     finally { signingIn = false; $('sign-in-google').disabled = $('sign-in-microsoft').disabled = false; }
   });
   $('account-signout').addEventListener('click', async () => {
+    if (signingOut) return;
+    signingOut = true; $('account-signout').disabled = true;
     try { await service.signOut(); status('Signed out.'); } catch (error) { status(error.message); }
+    finally { signingOut = false; $('account-signout').disabled = false; }
   });
   $('account-close').addEventListener('click', close);
   $('usage-consent').addEventListener('change', consent);

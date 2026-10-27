@@ -16,7 +16,7 @@ const state = {
   rubricLoading: false, rubricGeneration: 0, rubricFileName: '', rubricPendingName: '', targetView: 'points',
   audioSave: null, pendingAudioSaves: new Set(), unsavedRecordings: new Map(), savedRecordings: [], libraryGeneration: 0, libraryOpenGeneration: 0, libraryBusy: false, libraryFocus: null,
   cloudRecordingId: '', accountId: '',
-  audioPreparationGeneration: 0,
+  audioPreparationGeneration: 0, audioMetadataCancel: null,
 };
 
 const PROVIDER_GUIDES = {
@@ -156,7 +156,10 @@ function updateConfig(config) {
     $('settings-open').setAttribute('aria-label', 'Account and privacy settings');
     $('connection-dot').classList.toggle('connected', Boolean(state.config.auth?.signedIn));
     document.querySelector('.timer-limit').textContent = `/ ${formatTime(state.config.maxDurationSeconds)}`;
-    $('privacy-copy').textContent = 'Create transcript or Analyze saves your recording, transcript, and feedback privately to your account and processes them in the cloud. Recording and replay alone stay in this tab. Coaching sends your transcript and preparation text to our AI provider. Delete saved rehearsals from My saved rehearsals. Usage analytics is optional in My account.';
+    $('privacy-copy').textContent = (state.config.liveTranscription
+      ? 'While signed in, recording sends 10-second audio segments for cloud transcription. Stop saves the complete recording and transcript privately to your account. Replay does not upload audio. '
+      : 'Create transcript or Analyze saves your recording, transcript, and feedback privately to your account and processes them in the cloud. Recording and replay alone stay in this tab. ')
+      + 'Coaching sends your transcript and preparation text to our AI provider. Delete saved rehearsals from My saved rehearsals. Usage analytics is optional in My account.';
     if (state.report) renderCoachingState(state.report);
     if (state.audioBlob && !state.transcriptText && !state.transcriptPromise) showTranscriptReadyState();
     return;
@@ -484,7 +487,7 @@ function captureRecordingSamples(samples, sampleRate) {
     const captured = new Float32Array(samples.subarray(0, length));
     state.samples.push(captured);
     state.sampleCount += length;
-    try { state.liveTake?.session?.push(captured); }
+    try { if (!state.liveTake?.failed) state.liveTake?.session?.push(captured); }
     catch (error) { if (state.liveTake) failLiveTranscription(state.liveTake, error); }
   }
   if (state.sampleCount >= Math.floor(sampleRate * state.config.maxDurationSeconds)) stopRecording(true);
@@ -504,28 +507,28 @@ function toggleRecordingPause() {
 }
 
 function startLiveTranscription() {
-  if (state.config.hosted) return;
+  if (state.config.hosted && (!state.config.liveTranscription || !state.config.auth?.signedIn)) return;
   $('follow-transcript-panel').hidden = false;
   state.transcriptionAttempted = true;
   if (!window.rehearsalLiveSpeech?.startSession) {
     showLiveFallback('Live transcription is unavailable. You can transcribe the complete recording after you stop.');
     return;
   }
-  const take = { generation: state.audioGeneration, model: state.config.transcriptionModel, session: null, snapshot: {}, progress: '', text: null, finishing: false };
+  const take = { generation: state.audioGeneration, model: state.config.transcriptionModel, hosted: Boolean(state.config.hosted), session: null, snapshot: {}, progress: '', text: null, finishing: false, failed: false, error: '' };
   state.liveTake = take;
   renderLiveProgress(take);
   try {
     take.session = window.rehearsalLiveSpeech.startSession({
-      model: take.model, sampleRate: state.recordingSampleRate,
+      model: take.model, sampleRate: state.recordingSampleRate, encodeAudio: makeWav,
       onUpdate(snapshot) {
-        if (state.liveTake !== take || take.generation !== state.audioGeneration) return;
+        if (state.liveTake !== take || take.generation !== state.audioGeneration || take.failed) return;
         if (snapshot.error) { failLiveTranscription(take, snapshot.error); return; }
         if (snapshot.cancelled) { failLiveTranscription(take, new Error('Retry the complete recording when you are ready.')); return; }
         take.snapshot = snapshot;
         renderLiveProgress(take);
       },
       onProgress(message) {
-        if (state.liveTake !== take || take.generation !== state.audioGeneration || typeof message !== 'string') return;
+        if (state.liveTake !== take || take.generation !== state.audioGeneration || take.failed || typeof message !== 'string') return;
         take.progress = message;
         $('local-model-status').textContent = message;
         renderLiveProgress(take);
@@ -536,11 +539,15 @@ function startLiveTranscription() {
 }
 function renderLiveProgress(take) {
   if (state.liveTake !== take) return;
+  if (take.failed) {
+    if (take.finishing) $('follow-transcript-status').textContent = 'Saving your complete recording… You can retry transcription afterward.';
+    return;
+  }
   const snapshot = take.snapshot;
   const text = String(snapshot.text || '');
   const completed = Number(snapshot.completedSeconds) || 0;
   const captured = Number(snapshot.audioSeconds) || 0;
-  const prefix = take.finishing ? 'Finishing transcript' : state.recordingPaused ? 'Paused · transcription continues' : snapshot.preparing ? 'Preparing speech model' : snapshot.catchingUp ? 'Catching up' : '30-second windows';
+  const prefix = take.finishing ? 'Finishing transcript' : state.recordingPaused ? 'Paused · transcription continues' : snapshot.preparing ? 'Preparing speech model' : snapshot.catchingUp ? 'Catching up' : take.hosted ? '10-second segments' : '30-second windows';
   const progress = !completed && take.progress ? ` · ${take.progress}` : '';
   const message = `${prefix} · ${formatTime(completed)} of ${formatTime(captured)} transcribed${progress}`;
   if (take.text === text && take.status === message) return;
@@ -556,12 +563,15 @@ function renderLiveProgress(take) {
   $('follow-transcript-connect').hidden = true;
   $('live-transcription-cancel').hidden = take.finishing;
   $('follow-transcript-note').hidden = false;
-  $('follow-transcript-note').textContent = 'Draft transcript · 30-second audio windows with a brief overlap. Stopping processes the remaining audio. Text may appear later and can contain recognition errors.';
+  $('follow-transcript-note').textContent = take.hosted
+    ? 'Draft transcript · 10-second audio segments are sent to the cloud. Stop processes the remaining audio and saves the complete recording privately. Text may arrive later and can contain recognition errors.'
+    : 'Draft transcript · 30-second audio windows with a brief overlap. Stopping processes the remaining audio. Text may appear later and can contain recognition errors.';
 }
 function cancelLiveSession() {
   const take = state.liveTake;
   state.liveTake = null; state.livePromise = null;
-  take?.session?.cancel();
+  if (take?.session?.abandon) take.session.abandon();
+  else take?.session?.cancel();
   $('live-transcription-cancel').hidden = true;
   $('follow-transcript').classList.remove('is-live');
   syncAnalysisControls(); syncCancelControls();
@@ -572,11 +582,17 @@ function showLiveFallback(message) {
   $('follow-transcript-note').textContent = 'Any text shown is an incomplete preview. Retry transcription to use the complete recording.';
   $('follow-transcript-note').hidden = false;
   $('follow-transcript-connect').textContent = 'Transcribe complete recording';
-  $('follow-transcript-connect').hidden = state.recording || !state.audioBlob;
+  $('follow-transcript-connect').hidden = state.recording || !state.audioBlob || Boolean(state.liveTake);
 }
-function failLiveTranscription(take, error) {
+function failLiveTranscription(take, error, finished = false) {
   if (state.liveTake !== take) return;
-  cancelLiveSession();
+  if (take.hosted && take.session && !finished) {
+    // Keep the session until Stop can save the complete audio, even if its preview failed.
+    take.failed = true; take.error = errorMessage(error);
+    take.session.cancel();
+    $('live-transcription-cancel').hidden = true;
+    $('follow-transcript').classList.remove('is-live');
+  } else cancelLiveSession();
   showLiveFallback(`Live transcription stopped. ${errorMessage(error)}`);
 }
 function finishLiveTranscription() {
@@ -584,8 +600,15 @@ function finishLiveTranscription() {
   if (!take) return;
   take.finishing = true;
   renderLiveProgress(take);
-  const promise = Promise.resolve().then(() => take.session.finish()).then(result => {
+  const blob = state.audioBlob;
+  const promise = Promise.resolve().then(() => take.session.finish(take.hosted ? blob : undefined)).then(result => {
     if (state.liveTake !== take || take.generation !== state.audioGeneration || take.model !== state.config.transcriptionModel) throw supersededAudioError();
+    if (take.hosted) {
+      state.cloudRecordingId = result.recordingId;
+      $('audio-save-status').textContent = 'Saved privately to your account. Replay does not upload or reprocess this recording.';
+      window.rehearsalAccount?.refreshHistory();
+      if (result.complete !== true) throw new Error(take.error || 'Retry transcription to process the complete saved recording.');
+    }
     if (typeof result.text !== 'string' || !result.text.trim()) throw new Error('No speech was found. Check your microphone level or try another take.');
     state.liveTake = null; state.liveFailure = '';
     $('live-transcription-cancel').hidden = true;
@@ -594,7 +617,10 @@ function finishLiveTranscription() {
     updatePlaybackUI();
     return result.text;
   }).catch(error => {
-    if (state.liveTake === take) failLiveTranscription(take, error);
+    if (state.liveTake === take) {
+      failLiveTranscription(take, error, true);
+      if (take.hosted && !state.cloudRecordingId) $('audio-save-status').textContent = 'This recording is still in this tab. Download it or retry transcription to save it privately.';
+    }
     throw error;
   }).finally(() => {
     if (state.livePromise === promise) state.livePromise = null;
@@ -674,7 +700,9 @@ function setAudio(blob, duration, caption, { savedRecording = null, preserveCapt
   updatePlaybackUI();
   if (state.config.hosted) {
     state.audioSave = null;
-    $('audio-save-status').textContent = 'This take is in this tab. Create transcript or Analyze to save it privately to your account.';
+    $('audio-save-status').textContent = state.liveTake?.hosted
+      ? 'Saving your complete recording privately… Keep this tab open until saving finishes.'
+      : 'This take is in this tab. Create transcript or Analyze to save it privately to your account.';
     syncRecordingLibraryControls();
     return;
   }
@@ -904,7 +932,7 @@ async function deleteSavedRecording(id) {
   finally { state.libraryBusy = false; syncRecordingLibraryControls(); }
 }
 function warnBeforeLeaving(event) {
-  if (state.recording || state.pendingAudioSaves.size || state.unsavedRecordings.size || state.config.hosted && state.audioBlob && !state.cloudRecordingId) {
+  if (state.recording || state.livePromise || state.pendingAudioSaves.size || state.unsavedRecordings.size || state.config.hosted && state.audioBlob && !state.cloudRecordingId) {
     event.preventDefault();
     event.returnValue = '';
   }
@@ -1113,6 +1141,31 @@ function maybeTranscribeForPlayback() {
     ensureTranscript().catch(() => {});
   }
 }
+function readAudioDuration(file) {
+  return new Promise(resolve => {
+    const audio = document.createElement('audio');
+    let url, timer, settled = false;
+    const finish = duration => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      audio.removeEventListener('loadedmetadata', loaded);
+      audio.removeEventListener('error', cancel);
+      try { audio.pause(); audio.removeAttribute('src'); audio.load(); } catch {}
+      if (url) URL.revokeObjectURL(url);
+      if (state.audioMetadataCancel === cancel) state.audioMetadataCancel = null;
+      resolve(duration);
+    };
+    const loaded = () => finish(Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : NaN);
+    const cancel = () => finish(NaN);
+    state.audioMetadataCancel = cancel;
+    audio.addEventListener('loadedmetadata', loaded);
+    audio.addEventListener('error', cancel);
+    timer = setTimeout(cancel, 1500);
+    try { audio.preload = 'metadata'; url = URL.createObjectURL(file); audio.src = url; audio.load(); }
+    catch { cancel(); }
+  });
+}
 async function uploadAudio(file) {
   if (!file || state.busy || state.recording || state.startingRecording || state.requestingMic) return;
   if (file.size > 60 * 1024 * 1024) { setStatus('Please choose an audio file smaller than 60 MB and no longer than 10 minutes.', 'error'); return; }
@@ -1122,6 +1175,11 @@ async function uploadAudio(file) {
   setBusy(true, 'Opening your recording and preparing its audio…');
   let decodeContext;
   try {
+    const duration = await readAudioDuration(file);
+    if (generation !== state.audioPreparationGeneration) return;
+    if (duration > state.config.maxDurationSeconds) throw new Error('This recording is longer than 10 minutes. Trim it to a shorter rehearsal and upload it again.');
+    // Missing/untrusted metadata still needs the decoder check below. Native decoding
+    // has no cancellation or allocation limit; this preflight is not a memory sandbox.
     decodeContext = new (window.AudioContext || window.webkitAudioContext)();
     const bytes = await file.arrayBuffer();
     if (generation !== state.audioPreparationGeneration) return;
@@ -1450,12 +1508,14 @@ async function downloadReport() {
 
 window.rehearsalHostedActions = {
   updateConfig,
-  canReplaceAudio: () => !state.recording && !state.startingRecording && !state.busy && !state.requestingMic && !state.transcriptPromise,
+  canReplaceAudio: () => !state.recording && !state.startingRecording && !state.busy && !state.requestingMic && !state.transcriptPromise && !state.liveTake && !state.livePromise,
   accountChanged(id) {
     if (state.accountId === id) return;
     state.accountId = id;
     state.audioPreparationGeneration++;
+    state.audioMetadataCancel?.();
     state.preparingAudio = false;
+    cancelLiveSession();
     if (state.recording) stopRecording();
     cleanupMic(); discardAudio();
     for (const field of ['target-script', 'target-talking-points', 'planned-introduction', 'planned-transitions', 'instructor-rubric']) $(field).value = '';

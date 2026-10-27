@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as zip from 'fflate';
 import { extractRubric } from '../public/rubric-documents.js';
-import { RUBRIC_LIMITS, validateRubricFile, validateRubricText, decodeDocumentBytes, extractDocxParts, wordDocumentToText, docxPartsToText, createPdfTextCollector, extractPdfText } from '../lib/rubric-document.mjs';
+import { RUBRIC_LIMITS, validateRubricFile, validateRubricText, decodeDocumentBytes, extractDocxParts, wordDocumentToText, docxPartsToText, createPdfTextCollector, extractPdfText as parsePdfText } from '../lib/rubric-document.mjs';
 
 const utf8 = value => new TextEncoder().encode(value);
 const file = (name, content, type = '') => new File([content], name, { type });
@@ -14,7 +14,7 @@ const wordDocument = (...children) => ({ documentElement: element('document', [e
 const xml = text => `<?xml version="1.0"?><w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`;
 
 function pdfMock(pages, overrides = {}) {
-  const seen = { destroyed: 0, cleaned: 0, cancelled: 0, requested: [], options: null };
+  const seen = { destroyed: 0, cleaned: 0, cancelled: 0, terminated: 0, workerDestroyed: 0, requested: [], options: null };
   const document = {
     numPages: pages.length,
     async getPage(index) {
@@ -31,12 +31,23 @@ function pdfMock(pages, overrides = {}) {
     },
     ...overrides.document,
   };
-  const pdfjs = { getDocument(options) {
+  const pdfjs = {
+    WorkerImpl: class {
+      constructor(url, options) { seen.workerUrl = url; seen.workerOptions = options; seen.worker = this; this.listeners = new Map(); }
+      addEventListener(type, handler) { this.listeners.set(type, handler); }
+      terminate() { seen.terminated++; }
+    },
+    PDFWorker: class {
+      constructor({ port }) { this.port = port; }
+      destroy() { seen.workerDestroyed++; }
+    },
+    getDocument(options) {
     seen.options = options;
     return { promise: overrides.promise || Promise.resolve(document), destroy() { seen.destroyed++; return overrides.destroy?.() || Promise.resolve(); } };
   } };
   return { pdfjs, seen };
 }
+const extractPdfText = (bytes, pdfjs, options) => parsePdfText(bytes, pdfjs, { workerUrl: 'mock-pdf-worker.mjs', WorkerImpl: pdfjs.WorkerImpl, ...options });
 
 test('rubric files validate type and size before reading; browser MIME may be empty', () => {
   assert.deepEqual(validateRubricFile(file('Rubric.PDF', 'data')), { name: 'Rubric.PDF', extension: 'pdf' });
@@ -75,6 +86,9 @@ test('DOCX extracts text-bearing parts and skips a large compressed image', () =
     'word/header1.xml': utf8(`<w:hdr xmlns:w="${W}"/>`),
     'word/footnotes.xml': utf8(`<w:footnotes xmlns:w="${W}"/>`),
     'word/comments.xml': utf8('Comments are not rubric criteria'),
+    '../word/document.xml': utf8('Traversal is not a document part'),
+    'word/../../evil.js': utf8('alert(1)'),
+    'word/_rels/document.xml.rels': utf8('<Relationship Target="https://attacker.invalid/secret"/>'),
   });
   const parts = extractDocxParts(archive, zip);
   assert.equal(parts[0].name, 'word/document.xml');
@@ -172,10 +186,14 @@ test('PDF streams all pages locally and cleans up readers, pages and the worker'
   assert.equal(seen.options.data, bytes);
   assert.equal(seen.options.url, undefined);
   assert.equal(seen.options.useWorkerFetch, false);
+  assert.equal(seen.options.worker.port, seen.worker);
+  assert.deepEqual(seen.workerOptions, { type: 'module' });
   assert.deepEqual(seen.requested, [1, 2]);
   assert.equal(seen.destroyed, 1);
   assert.equal(seen.cleaned, 2);
   assert.equal(seen.cancelled, 2);
+  assert.equal(seen.terminated, 1);
+  assert.equal(seen.workerDestroyed, 1);
 });
 
 test('PDF page limit rejects before extracting any partial document', async () => {
@@ -218,4 +236,28 @@ test('PDF timeout destroys the worker and does not wait on hanging cleanup', asy
   const { pdfjs, seen } = pdfMock([], { promise: new Promise(() => {}), destroy: () => new Promise(() => {}) });
   await assert.rejects(extractPdfText(utf8('%PDF-test'), pdfjs, { timeoutMs: 5 }), { code: 'RUBRIC_TIMEOUT' });
   assert.equal(seen.destroyed, 1);
+  assert.equal(seen.terminated, 1, 'native worker termination must not wait for PDF.js transport cleanup');
+  assert.equal(seen.workerDestroyed, 1);
+});
+
+test('PDF worker failures abort immediately without falling back to main-thread parsing', async () => {
+  for (const event of ['error', 'messageerror']) {
+    const { pdfjs, seen } = pdfMock([], { promise: new Promise(() => {}), destroy: () => new Promise(() => {}) });
+    const reading = extractPdfText(utf8('%PDF-test'), pdfjs);
+    seen.worker.listeners.get(event)();
+    await assert.rejects(reading, { code: 'RUBRIC_READER' });
+    assert.equal(seen.terminated, 1);
+    assert.equal(seen.destroyed, 1);
+  }
+});
+
+test('PDF import requires an explicit native worker and cleans it up if PDF.js initialization fails', async () => {
+  const { pdfjs, seen } = pdfMock([]);
+  await assert.rejects(extractPdfText(utf8('%PDF-test'), pdfjs, { WorkerImpl: null }), { code: 'RUBRIC_BROWSER' });
+  await assert.rejects(extractPdfText(utf8('%PDF-test'), pdfjs, { workerUrl: undefined }), { code: 'RUBRIC_BROWSER' });
+  await assert.rejects(extractPdfText(utf8('%PDF-test'), pdfjs, { WorkerImpl: class { constructor() { throw new Error('CSP blocked'); } } }), { code: 'RUBRIC_BROWSER' });
+  assert.equal(seen.options, null, 'unsupported workers must not start PDF.js parsing');
+  pdfjs.PDFWorker = class { constructor() { throw new Error('Initialization failed'); } };
+  await assert.rejects(extractPdfText(utf8('%PDF-test'), pdfjs), { code: 'RUBRIC_CORRUPT' });
+  assert.equal(seen.terminated, 1);
 });

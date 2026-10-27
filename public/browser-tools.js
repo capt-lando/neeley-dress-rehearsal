@@ -9,7 +9,13 @@ export function installBrowserTools(service, { liveSpeech = true } = {}) {
   window.rehearsalDocuments = { extractRubric };
   window.rehearsalRecordings = createRecordingStore();
   let liveSession;
-  window.rehearsalLiveSpeech = liveSpeech ? {
+  window.rehearsalLiveSpeech = service.hosted ? {
+    startSession(options) {
+      liveSession?.cancel();
+      liveSession = service.startLiveSession(options);
+      return liveSession;
+    },
+  } : liveSpeech ? {
     startSession({ model, sampleRate, onUpdate, onProgress }) {
       liveSession?.cancel();
       liveSession = createLiveTranscription({

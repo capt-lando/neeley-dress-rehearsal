@@ -36,3 +36,26 @@ test('database budget denials preserve their safe status without disclosing data
     await assert.rejects(store.reserve('u','r','q','coach','hash',500000),error=>error.status===status&&expected.test(error.message)&&!error.message.includes('password'));
   }
 });
+
+test('distributed rate admission uses only server-derived identity and a safe retry delay',async()=>{
+  const calls=[];
+  const store=createSupabaseStore({async rpc(name,args){calls.push([name,args]);return {data:null};}});
+  await store.admitRequest();await store.admitRequest('verified-owner');
+  assert.deepEqual(calls,[['rehearsal_admit_request',{p_user:null}],['rehearsal_admit_request',{p_user:'verified-owner'}]]);
+  const limited=createSupabaseStore({async rpc(){return {error:{message:'rate_limited'}};}});
+  await assert.rejects(limited.admitRequest(),error=>error.safe&&error.status===429&&error.retryAfter===60);
+});
+
+test('gateway audio storage uses a fixed private bucket and never overwrites a prior take',async()=>{
+  const bytes=new Uint8Array([1,2,3]),calls=[];
+  const store=createSupabaseStore({storage:{from(bucket){return {async upload(path,payload,options){calls.push({bucket,path,payload,options});return {data:{path}};}};}}});
+  assert.deepEqual(await store.uploadAudio('verified-owner/reserved-id/audio.wav',bytes),{path:'verified-owner/reserved-id/audio.wav'});
+  assert.deepEqual(calls,[{bucket:'recordings',path:'verified-owner/reserved-id/audio.wav',payload:bytes,options:{contentType:'audio/wav',upsert:false}}]);
+});
+
+test('duplicate storage replies expose only a safe conflict for an identical-byte retry',async()=>{
+  for(const error of [{statusCode:'409',message:'private diagnostic'},{error:'Duplicate',message:'private diagnostic'}]) {
+    const store=createSupabaseStore({storage:{from(){return {async upload(){return {error};}};}}});
+    await assert.rejects(store.uploadAudio('owner/id/audio.wav',new Uint8Array()),error=>error.safe&&error.status===409&&!error.message.includes('private'));
+  }
+});

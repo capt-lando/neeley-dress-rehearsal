@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createHostedApi, inspectHostedWav, validateEvents, fail } from '../supabase/functions/rehearsal-api/api.mjs';
+import { createHostedApi, inspectHostedWav, validateEvents, fail, readLimited } from '../supabase/functions/rehearsal-api/api.mjs';
 
 const policyText=await readFile(new URL('../lib/coaching-prompt.md',import.meta.url),'utf8');
 const user='11111111-1111-4111-8111-111111111111', other='22222222-2222-4222-8222-222222222222';
@@ -18,6 +18,7 @@ function fixture(overrides={}) {
   const rows=new Map([[recording,{id:recording,user_id:user,title:'Practice',created_at:'2026-10-26T00:00:00Z',duration_seconds:1,size_bytes:wav().length,storage_path:`${user}/${recording}/audio.wav`,status:'transcribed',transcript:'We should expand tutoring.'}]]);
   const jobs=new Map(),calls=[]; let debits=0;
   const store={
+    async admitRequest(id) { calls.push(['admit',id]); },
     async verifyUser(value) { calls.push(['verify',value]); return value==='invalid'?null:{id:user,identities:[{provider:'google'}]}; },
     async profile(id) { calls.push(['profile',id]);return {user_id:id}; },
     async list(id) { calls.push(['list',id]);return [...rows.values()].filter(row=>row.user_id===id); },
@@ -48,6 +49,61 @@ function fixture(overrides={}) {
 const transcribe={method:'POST',body:{recordingId:recording,requestId}};
 const analyze={method:'POST',body:{recordingId:recording,requestId,text:'We should expand tutoring.',targetTalkingPoints:'Expand tutoring',durationSeconds:600}};
 
+test('all app routes enforce distributed admission before data access or paid calls',async()=>{
+  const paths=[['/config','GET'],['/recordings','GET'],['/recordings','POST'],['/recordings/'+recording,'GET'],['/recordings/'+recording,'DELETE'],['/events','POST'],['/transcribe','POST'],['/analyze-text','POST'],['/live-sessions','POST'],['/live-sessions/'+recording,'GET'],['/live-sessions/'+recording,'DELETE'],['/live-sessions/'+recording+'/prepare','POST'],['/live-sessions/'+recording+'/chunks/0','POST'],['/live-sessions/'+recording+'/finish','POST']];
+  for(const stage of ['global','user'])for(const [path,method] of paths) {
+    const admissions=[];
+    const f=fixture({store:{admitRequest:async id=>{admissions.push(id);if(stage==='global'||id)throw Object.assign(fail('Too many requests.',429),{retryAfter:60});}}});
+    const response=await f.call(path,{method,body:method==='POST'?{}:undefined});
+    assert.equal(response.status,429,path);assert.equal(response.headers.get('retry-after'),'60');
+    assert.equal(f.debits,0);assert.equal(f.calls.some(c=>['profile','list','owned','fetch','coach','events'].includes(c[0])),false);
+    assert.equal(admissions.length,stage==='global'?1:2);
+    if(stage==='global')assert.equal(f.calls.some(c=>c[0]==='verify'),false);
+  }
+});
+
+test('a global refusal is cached before SQL and failure of admission fails closed',async()=>{
+  let checks=0;
+  const f=fixture({now:()=>1000,store:{admitRequest:async()=>{checks++;throw Object.assign(fail('Too many requests.',429),{retryAfter:60});}}});
+  for(let i=0;i<2000;i++)assert.equal((await f.call('/analyze-text',analyze)).status,429);
+  assert.equal(checks,1);assert.equal(f.debits,0);assert.equal(f.calls.length,0);
+  const unavailable=fixture({store:{admitRequest:async()=>{throw new Error('private database detail');}}});
+  const response=await unavailable.call('/analyze-text',analyze);
+  assert.equal(response.status,503);assert.doesNotMatch(await response.text(),/private database/);assert.equal(unavailable.debits,0);
+});
+
+test('two thousand repeated analysis submissions cannot trigger repeat paid work',async()=>{
+  const f=fixture({now:()=>1000});
+  for(let i=0;i<2000;i++)assert.ok([200,429].includes((await f.call('/analyze-text',analyze)).status));
+  assert.equal(f.debits,1);assert.equal(f.calls.filter(c=>c[0]==='coach').length,1);
+});
+
+test('body reads cancel stalled streams without waiting for their cancellation',async()=>{
+  let cancelled=false;
+  const stream=new ReadableStream({cancel(){cancelled=true;return new Promise(()=>{});}});
+  await assert.rejects(readLimited(new Response(stream),100,20),error=>error.safe&&error.status===408);
+  assert.equal(cancelled,true);assert.equal(stream.locked,false);
+});
+
+test('body deadline covers the complete upload even when bytes keep arriving',async()=>{
+  let controller,cancelled=false;
+  const stream=new ReadableStream({start(value){controller=value;},cancel(){cancelled=true;}});
+  const interval=setInterval(()=>controller.enqueue(new Uint8Array([1])),5);
+  try { await assert.rejects(readLimited(new Response(stream),1000,30),error=>error.status===408); }
+  finally { clearInterval(interval); }
+  assert.equal(cancelled,true);
+});
+
+test('body limits cancel declared or streamed overflow and preserve valid bytes',async()=>{
+  for(const declared of [true,false]) {
+    let cancelled=false;
+    const response=new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(4));},cancel(){cancelled=true;}}),{headers:declared?{'content-length':'4'}:{}});
+    await assert.rejects(readLimited(response,3),error=>error.status===413);
+    assert.equal(cancelled,true);
+  }
+  assert.deepEqual(await readLimited(new Response(new Uint8Array([1,2,3])),3),new Uint8Array([1,2,3]));
+});
+
 test('packaged server prompt exactly matches the canonical coaching prompt',async()=>{
   const packaged=JSON.parse(await readFile(new URL('../supabase/functions/_shared/coaching-policy.json',import.meta.url),'utf8'));
   assert.equal(packaged.text,policyText);
@@ -55,7 +111,7 @@ test('packaged server prompt exactly matches the canonical coaching prompt',asyn
 test('public config has no user content, credentials, or administrative authority',async()=>{
   const f=fixture(),response=await f.call('/config',{auth:null}),config=await response.json();
   assert.equal(response.status,200);assert.equal(config.hosted,true);assert.deepEqual(config.auth,{signedIn:false});assert.equal(config.liveTranscription,false);
-  assert.deepEqual(f.calls,[]);assert.doesNotMatch(JSON.stringify(config),/private-|admin|storage_path|service_role/);
+  assert.deepEqual(f.calls,[['admit',undefined]]);assert.doesNotMatch(JSON.stringify(config),/private-|admin|storage_path|service_role/);
 });
 test('CORS rejects foreign and missing origins before authentication or data access',async()=>{
   const f=fixture();for(const value of ['https://evil.example','null',''])assert.equal((await f.call('/recordings',{headers:{Origin:value}})).status,403);

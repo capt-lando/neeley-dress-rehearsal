@@ -1,33 +1,37 @@
 """Persistent isolated GPU process. stdin/stdout are a bounded binary protocol."""
 import contextlib
-import importlib.util
 import json
 import os
 import struct
 import sys
 
-from audio import AudioError, MAX_BYTES, SAMPLE_RATE, decode_wav, windows
-from models import MODEL_ROOT, verify_loader
+from audio import AudioError, NoSpeechError, MAX_BYTES, SAMPLE_RATE, decode_wav, windows
+from models import MODEL_ROOT
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
 
 
 class Bark:
     def __init__(self):
         import torch
+        torch.set_num_threads(2)
+        if torch.get_num_interop_threads() != 1:
+            torch.set_num_interop_threads(1)
         from transformers import AutoProcessor, GenerationConfig, ParakeetForTDT, ParakeetTDTConfig
+        from transformers.initialization import no_init_weights
         if not torch.cuda.is_available():
             raise RuntimeError("A CUDA GPU is required.")
-        path = MODEL_ROOT / "bark" / "bark_loader.py"
-        verify_loader(path)
-        spec = importlib.util.spec_from_file_location("pinned_bark_loader", path)
-        loader = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(loader)
-        state, config = loader.load_state_dict(MODEL_ROOT / "bark" / "model.bark")
-        model = ParakeetForTDT(ParakeetTDTConfig.from_dict(config))
-        missing, unexpected = model.load_state_dict(state, strict=False)
+        state = torch.load(MODEL_ROOT / "bark" / "model.pt", map_location="cpu",
+                           weights_only=True, mmap=True)
+        config = json.loads((MODEL_ROOT / "bark" / "config.json").read_text(encoding="utf-8"))
+        with no_init_weights():
+            model = ParakeetForTDT(ParakeetTDTConfig.from_dict(config))
+        missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
         if unexpected or any("num_batches_tracked" not in key for key in missing):
             raise RuntimeError("The model weights do not match their architecture.")
         model.generation_config = GenerationConfig.from_pretrained(
@@ -59,7 +63,7 @@ class Bark:
                 texts.append(text)
         text = " ".join(texts)
         if not text:
-            raise AudioError("No speech was detected. Try another recording.")
+            raise NoSpeechError("No speech was detected. Try another recording.")
         if len(text) > 60_000:
             raise AudioError("The transcript exceeds the rehearsal limit.")
         return {"text": text, "durationSeconds": duration, "chunks": [], "model": "bark-3.0-plus"}
@@ -81,7 +85,7 @@ def main():
     while True:
         try:
             size = struct.unpack("!I", read_exact(source, 4))[0]
-            if not 44 <= size <= MAX_BYTES:
+            if size != 0 and not 44 <= size <= MAX_BYTES:
                 return
             payload = read_exact(source, size)
         except EOFError:
@@ -90,9 +94,11 @@ def main():
             # Vendor libraries cannot put messages or transcription into protocol output.
             with contextlib.redirect_stdout(sys.stderr):
                 model = model or Bark()
-                result = {"ok": True, "result": model.transcribe(payload)}
+                result = {"ok": True, "result": model.transcribe(payload) if payload
+                          else {"ready": True, "model": "bark-3.0-plus"}}
         except AudioError as error:
-            result = {"ok": False, "status": 422, "error": str(error)}
+            result = {"ok": False, "status": 422, "error": str(error),
+                      "code": "no_speech" if isinstance(error, NoSpeechError) else "invalid_audio"}
         except Exception:
             result = {"ok": False, "status": 503, "error": "Speech recognition is temporarily unavailable."}
         finally:

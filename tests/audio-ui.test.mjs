@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createLiveTranscription } from '../lib/live-transcription.mjs';
+import { createHostedLiveSession } from '../lib/hosted-live.mjs';
+import { analyzeSpeech, sanitizeAiFeedback } from '../lib/analysis-core.mjs';
 import { BARK_MODEL_ID, BARK_MODEL_LABEL, BARK_MODELS, BARK_CLEAN_ID } from '../lib/speech-models.mjs';
 
 function inspectWav(wav) {
@@ -46,6 +48,9 @@ class Element {
     };
   }
   get textContent() { return this._textContent || ''; }
+  set innerHTML(_) { throw new Error('Unsafe HTML sink'); }
+  set outerHTML(_) { throw new Error('Unsafe HTML sink'); }
+  insertAdjacentHTML() { throw new Error('Unsafe HTML insertion'); }
   set textContent(value) {
     if (this.ownerDocument && this.children?.some(child => child === this.ownerDocument.activeElement || child.contains?.(this.ownerDocument.activeElement))) this.ownerDocument.activeElement = this.ownerDocument.body;
     this._textContent = String(value); this.children = []; this.options = [];
@@ -66,6 +71,7 @@ class Element {
     const listeners = this.listeners.get(name) ?? [];
     listeners.push(handler); this.listeners.set(name, listeners);
   }
+  removeEventListener(name, handler) { this.listeners.set(name, (this.listeners.get(name) || []).filter(item => item !== handler)); }
   querySelectorAll(selector) {
     if (selector !== 'button') return this.children;
     return this.children.flatMap(child => [...(child.tagName === 'BUTTON' ? [child] : []), ...child.querySelectorAll(selector)]);
@@ -96,7 +102,7 @@ function deferred() {
 
 function response(value) { return value; }
 
-function harness(requestImpl = async () => { throw new Error('Unexpected browser-service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData } = {}) {
+function harness(requestImpl = async () => { throw new Error('Unexpected browser-service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
   const elements = new Map();
   const missingIds = [];
   let ownerDocument;
@@ -142,7 +148,11 @@ function harness(requestImpl = async () => { throw new Error('Unexpected browser
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
         return get(id);
       },
-      createElement: tag => { const element = Object.assign(new Element(), { tagName: tag.toUpperCase(), ownerDocument }); createdElements.push(element); return element; },
+      createElement: tag => {
+        const element = Object.assign(new Element(), { tagName: tag.toUpperCase(), ownerDocument });
+        if (tag === 'audio') element.load = () => { if (element.src) audioMetadata(element); };
+        createdElements.push(element); return element;
+      },
       createDocumentFragment: () => new Element(),
       createTextNode: text => Object.assign(new Element(), { textContent: text }),
       querySelector: selector => get(selector),
@@ -182,7 +192,7 @@ globalThis.audioTest = {
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript,
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
   analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, setBusy,
-  autosaveRecording, refreshSavedRecordings, openSavedRecording, deleteSavedRecording,
+  autosaveRecording, refreshSavedRecordings, renderSavedRecordings, openSavedRecording, deleteSavedRecording,
   downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving
 };`, context);
   const emit = async (target, type, event = {}) => Promise.all((target.listeners.get(type) || []).map(handler => handler({ type, ...event })));
@@ -219,6 +229,33 @@ function liveSpeech(h, recognize) {
   return sessions;
 }
 
+function cloudLiveSpeech(h, { recognize = async (_audio, index) => ['Um, practice helps.', 'Next point.'][index], prepare = async () => {}, complete = true } = {}) {
+  const calls = [], uploads = [], texts = [];
+  const id = '12345678-1234-4123-8123-123456789012';
+  let session;
+  h.window.rehearsalLiveSpeech = { startSession(options) {
+    session = createHostedLiveSession({ ...options, recordingId: id, requestId: 'request', validateStart() {},
+      async request(path, settings) {
+        calls.push({ path, ...settings });
+        if (path === '/live-sessions') return { recordingId: id };
+        if (settings.method === 'DELETE') return { recordingId: id, cancelled: true };
+        if (path.endsWith('/prepare')) { await prepare(); return { ready: true }; }
+        if (path.includes('/chunks/')) {
+          const sequence = Number(path.split('/').at(-1));
+          const text = await recognize(settings.body, sequence);
+          texts.push(text);
+          return { recordingId: id, sequence, nextSequence: sequence + 1, text };
+        }
+        assert.ok(path.endsWith('/finish'));
+        return { recordingId: id, complete, text: texts.join(' '), durationSeconds: settings.body.durationSeconds };
+      },
+      async saveAudio(blob) { uploads.push(blob); return { durationSeconds: (blob.size - 44) / 32000, sizeBytes: blob.size }; },
+    });
+    return session;
+  } };
+  return { calls, uploads, id, get session() { return session; } };
+}
+
 test('hosted recording and replay never run local inference, upload audio, or save anonymous browser copies', async () => {
   const requests = [];
   const h = harness(async path => { requests.push(path); if (path === '/api/config') return hostedConfig; throw new Error('Unexpected cloud upload'); }, { startup: true });
@@ -234,6 +271,91 @@ test('hosted recording and replay never run local inference, upload audio, or sa
   assert.match(h.get('privacy-copy').textContent, /saves your recording, transcript, and feedback privately/);
   assert.equal(h.get('saved-recordings-details').hidden, true);
   assert.equal(h.get('cloud-recordings-details').hidden, false);
+});
+
+test('hosted live recording uses ten-second cloud segments, excludes pauses, and saves the exact complete WAV before coaching', async () => {
+  const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true });
+  const pending = deferred();
+  const cloud = cloudLiveSpeech(h, { recognize: async (_audio, index) => index ? pending.promise : 'Um, practice helps.' });
+  let historyRefreshes = 0;
+  h.window.rehearsalAccount = { track() {}, refreshHistory() { historyRefreshes++; } };
+  await h.enableMic(); h.state.context.sampleRate = 48000;
+  await h.startRecording();
+  h.captureRecordingSamples(new Float32Array(48000 * 9).fill(0.25), 48000);
+  await nextTurn();
+  assert.equal(cloud.calls.filter(call => call.path.includes('/chunks/')).length, 0);
+  h.toggleRecordingPause(); h.captureRecordingSamples(new Float32Array(48000).fill(0.9), 48000); h.toggleRecordingPause();
+  h.captureRecordingSamples(new Float32Array(48000).fill(0.25), 48000); await nextTurn();
+  assert.equal(h.get('follow-transcript').textContent, 'Um, practice helps.');
+  assert.equal(h.state.transcriptText, '', 'draft segments cannot be used for coaching');
+  assert.match(h.get('follow-transcript-status').textContent, /10-second/);
+  assert.match(h.get('privacy-copy').textContent, /recording sends 10-second audio segments/);
+  h.captureRecordingSamples(new Float32Array(4800).fill(-0.25), 48000);
+  h.stopRecording(); const finishing = h.state.livePromise;
+  await nextTurn();
+  assert.equal(h.window.rehearsalHostedActions.canReplaceAudio(), false);
+  assert.equal(h.get('analyze-button').disabled, true);
+  assert.equal(cloud.uploads.length, 0, 'the complete WAV waits for the final transcript segment');
+  const segments = cloud.calls.filter(call => call.path.includes('/chunks/'));
+  assert.deepEqual(segments.map(call => call.body.size), [320044, 3244], 'no overlapping audio is sent');
+  assert.equal(segments[1].headers['X-Rehearsal-Final'], 'true');
+  pending.resolve('Next point.');
+  assert.equal(await finishing, 'Um, practice helps. Next point.');
+  assert.deepEqual(cloud.uploads, [h.state.audioBlob]);
+  assert.equal(inspectWav(Buffer.from(await cloud.uploads[0].arrayBuffer())).durationSeconds, 10.1);
+  assert.equal(h.storageCalls.save.length, 0, 'cloud recording does not create an anonymous browser copy');
+  assert.equal(h.state.cloudRecordingId, cloud.id);
+  assert.equal(h.analysisInput(h.state.transcriptText).recordingId, cloud.id);
+  assert.equal(await h.ensureTranscript(), 'Um, practice helps. Next point.');
+  assert.equal(cloud.uploads.length, 1); assert.equal(historyRefreshes, 1);
+  assert.equal(h.window.rehearsalHostedActions.canReplaceAudio(), true);
+});
+
+test('failed cloud segments keep capturing and save complete audio on Stop without caching the partial preview', async () => {
+  const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true });
+  const cloud = cloudLiveSpeech(h, { complete: false, recognize: async (_audio, index) => {
+    if (index) throw new Error('Cloud connection interrupted');
+    return 'Partial preview.';
+  } });
+  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000 * 10), 16000); await nextTurn();
+  h.captureRecordingSamples(new Float32Array(16000 * 10), 16000); await nextTurn();
+  assert.equal(h.state.recording, true); assert.ok(h.state.liveTake?.failed);
+  h.captureRecordingSamples(new Float32Array(16000), 16000);
+  h.stopRecording(); const finishing = h.state.livePromise;
+  await assert.rejects(finishing, /Cloud connection interrupted/);
+  assert.equal(cloud.uploads.length, 1); assert.equal(cloud.uploads[0], h.state.audioBlob);
+  assert.equal(inspectWav(Buffer.from(await cloud.uploads[0].arrayBuffer())).durationSeconds, 21);
+  assert.equal(h.state.cloudRecordingId, cloud.id);
+  assert.equal(h.state.transcriptText, ''); assert.equal(h.get('transcript').value, '');
+  assert.equal(h.state.liveTake, null); assert.equal(h.get('follow-transcript-connect').hidden, false);
+  assert.match(h.get('follow-transcript-note').textContent, /incomplete preview/);
+  assert.match(h.get('audio-save-status').textContent, /Saved privately/);
+});
+
+test('a failed cloud save leaves an explicit download/retry path and releases analysis controls', async () => {
+  const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true });
+  h.window.rehearsalLiveSpeech = { startSession: () => ({ push() {}, cancel() {}, async finish(blob) {
+    assert.equal(blob, h.state.audioBlob); throw new Error('Upload unavailable');
+  } }) };
+  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000); h.stopRecording();
+  await assert.rejects(h.state.livePromise, /Upload unavailable/);
+  assert.ok(h.state.audioBlob); assert.equal(h.state.liveTake, null); assert.equal(h.state.transcriptText, '');
+  assert.equal(h.get('analyze-button').disabled, false); assert.equal(h.get('follow-transcript-connect').hidden, false);
+  assert.match(h.get('audio-save-status').textContent, /Download it or retry transcription/);
+});
+
+test('hosted live recording requires sign-in and account changes cancel before Stop can upload private audio', async () => {
+  const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true, auth: { signedIn: false } });
+  const cloud = cloudLiveSpeech(h);
+  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000); h.stopRecording();
+  assert.equal(cloud.session, undefined); assert.equal(cloud.calls.length, 0);
+  h.window.rehearsalHostedActions.accountChanged('first-user');
+  await h.startRecording(); h.captureRecordingSamples(new Float32Array(16000), 16000); await nextTurn();
+  assert.ok(cloud.session);
+  h.window.rehearsalHostedActions.accountChanged('second-user'); await nextTurn();
+  assert.equal(cloud.session.getState().cancelled, true);
+  assert.equal(cloud.uploads.length, 0); assert.equal(cloud.calls.some(call => call.path.endsWith('/finish')), false);
+  assert.equal(h.state.recording, false); assert.equal(h.state.audioBlob, null); assert.equal(h.state.liveTake, null);
 });
 
 test('opening a private cloud take enables downloading its exact audio without another upload', async () => {
@@ -366,6 +488,87 @@ test('uploaded audio saves the prepared mono WAV rather than the original file',
   assert.equal(record.blob.type, 'audio/wav');
   assert.equal(inspectWav(Buffer.from(await record.blob.arrayBuffer())).durationSeconds, 1);
   assert.equal(record.blob, h.state.audioBlob);
+});
+
+test('cloud audio upload sends only newly encoded 16 kHz mono PCM, never the selected file or its metadata', async () => {
+  const metadata = 'ID3 private artist and embedded artwork <script>doNotSend()</script>';
+  const original = new File([metadata], 'original.mp3', { type: 'audio/mpeg' });
+  let sent;
+  const h = harness(async (path, options) => {
+    assert.equal(path, '/api/transcribe'); sent = options.body;
+    assert.equal(options.headers['Content-Type'], 'audio/wav');
+    return { text: 'Practice helps.', durationSeconds: 1, recordingId: 'owned' };
+  }, { decodeAudioData: async bytes => {
+    assert.equal(new TextDecoder().decode(bytes), metadata);
+    return { duration: 1, sampleRate: 48000, length: 48000, numberOfChannels: 2, getChannelData: channel => new Float32Array(48000).fill(channel ? 0.5 : 0.25) };
+  } });
+  h.updateConfig(hostedConfig); await h.uploadAudio(original); await h.ensureTranscript();
+  assert.notEqual(sent, original); assert.equal(sent, h.state.audioBlob); assert.equal(sent.type, 'audio/wav');
+  const bytes = Buffer.from(await sent.arrayBuffer());
+  assert.equal(inspectWav(bytes).durationSeconds, 1); assert.equal(bytes.length, 32044);
+  assert.equal(bytes.readInt16LE(44), Math.trunc(0.375 * 32767));
+  assert.ok(!bytes.includes(Buffer.from(metadata)), 'encoded source metadata cannot pass through to the cloud');
+});
+
+test('audio metadata rejects a known overlong file before reading or native decoding and releases its resources', async () => {
+  let reads = 0, decodes = 0;
+  const h = harness(undefined, {
+    audioMetadata: audio => { audio.duration = 601; audio.listeners.get('loadedmetadata')[0](); },
+    decodeAudioData: async () => { decodes++; throw new Error('Must not decode'); },
+  });
+  const original = new Blob(['previous recording']); h.setAudio(original, 2, 'Previous');
+  await h.uploadAudio({ name: 'long.mp3', size: 100, arrayBuffer() { reads++; throw new Error('Must not read'); } });
+  assert.equal(reads, 0); assert.equal(decodes, 0);
+  assert.equal(h.state.audioBlob, original);
+  assert.match(h.get('app-status').textContent, /longer than 10 minutes/);
+  const media = h.createdElements.find(node => node.tagName === 'AUDIO');
+  assert.equal(media.src, ''); assert.equal(media.paused, true);
+  assert.equal(media.listeners.get('loadedmetadata').length, 0); assert.equal(media.listeners.get('error').length, 0);
+  assert.equal(h.revoked.filter(url => h.objectUrls.get(url)?.name === 'long.mp3').length, 1);
+  assert.equal(h.state.audioMetadataCancel, null); assert.equal(h.state.busy, false);
+  h.flushTimers(); assert.equal(h.state.audioBlob, original);
+});
+
+test('unknown, unavailable or timed-out metadata preserves valid uploads and the decoded duration limit', async () => {
+  for (const metadata of ['infinite', 'missing', 'error', 'timeout', 'understated']) {
+    let decodes = 0;
+    const h = harness(undefined, {
+      audioMetadata: audio => {
+        if (metadata === 'timeout') return;
+        audio.duration = metadata === 'infinite' ? Infinity : metadata === 'understated' ? 1 : NaN;
+        audio.listeners.get(metadata === 'error' ? 'error' : 'loadedmetadata')[0]();
+      },
+      decodeAudioData: async () => { decodes++; return { duration: metadata === 'understated' ? 601 : 1, sampleRate: 16000, length: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) }; },
+    });
+    const opening = h.uploadAudio(new File(['valid audio'], 'recording.webm'));
+    if (metadata === 'timeout') h.flushTimers();
+    await opening;
+    assert.equal(decodes, 1, metadata);
+    if (metadata === 'understated') {
+      assert.equal(h.state.audioBlob, null); assert.match(h.get('app-status').textContent, /longer than 10 minutes/);
+    } else assert.equal(h.state.audioBlob.type, 'audio/wav', metadata);
+    assert.equal(h.state.audioMetadataCancel, null);
+    assert.equal(h.revoked.filter(url => h.objectUrls.get(url)?.name === 'recording.webm').length, 1);
+  }
+});
+
+test('changing accounts cancels metadata work before file read and ignores its late events', async () => {
+  let reads = 0, lateMetadata;
+  const h = harness(undefined, { audioMetadata: audio => { lateMetadata = audio.listeners.get('loadedmetadata')[0]; } });
+  h.updateConfig(hostedConfig); h.window.rehearsalHostedActions.accountChanged('first-user');
+  const opening = h.uploadAudio({ name: 'private.wav', size: 10, arrayBuffer() { reads++; throw new Error('Must not read'); } });
+  h.window.rehearsalHostedActions.accountChanged('second-user');
+  await opening; lateMetadata(); h.flushTimers();
+  assert.equal(reads, 0); assert.equal(h.state.audioBlob, null); assert.equal(h.state.busy, false);
+  assert.equal(h.state.audioMetadataCancel, null);
+  assert.equal(h.revoked.length, 1);
+});
+
+test('oversized audio is rejected before metadata loading or file reads', async () => {
+  const h = harness();
+  await h.uploadAudio({ name: 'oversized.mp3', size: 60 * 1024 * 1024 + 1, arrayBuffer() { throw new Error('Must not read'); } });
+  assert.equal(h.createdElements.filter(node => node.tagName === 'AUDIO').length, 0);
+  assert.equal(h.objectUrls.size, 0); assert.equal(h.state.busy, false);
 });
 
 test('an older pending save survives replacement without changing the newer take status', async () => {
@@ -680,6 +883,17 @@ test('the first dropdown gesture enables microphone names once without recording
   assert.match(h.get('mic-status').textContent, /USB Microphone/);
   await h.openInputSelector({ type: 'pointerdown', preventDefault() { throw new Error('Named list should open normally'); } });
   assert.equal(calls, 1);
+});
+
+test('recording and exact microphone selection always request audio only with no camera access', async () => {
+  const constraints = [], stream = microphone('Audio only'); stream.track.kind = 'audio';
+  const h = harness(undefined, { mediaDevices: { async getUserMedia(options) { constraints.push(options); return stream; } } });
+  await h.enableMic('usb-audio'); await h.startRecording();
+  h.captureRecordingSamples(new Float32Array(16000), 16000); h.stopRecording();
+  assert.equal(constraints.length, 1); assert.equal(constraints[0].video, false);
+  assert.equal(constraints[0].audio.channelCount, 1); assert.equal(constraints[0].audio.deviceId.exact, 'usb-audio');
+  assert.equal(h.state.audioBlob.type, 'audio/wav');
+  assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 1);
 });
 
 test('a denied microphone detection recovers on a later permitted gesture', async () => {
@@ -1078,6 +1292,7 @@ test('uploading a replacement cancels pending live work before decoding and pres
   const finishing = h.state.livePromise.catch(() => 'cancelled');
   const upload = h.uploadAudio({ name: 'Broken.wav', size: 10, arrayBuffer: async () => new ArrayBuffer(10) });
   assert.equal(sessions[0].session.getState().cancelled, true);
+  await nextTurn();
   decode.reject(new Error('Invalid audio')); await upload; await finishing;
   recognition.resolve({ text: 'Stale old draft.' }); await nextTurn();
   assert.equal(h.state.audioBlob, oldAudio);
@@ -1315,6 +1530,100 @@ function exportedTranscript(document) {
     .replace(/<a class="annotation-ref"[^>]*>\[\d+\]<\/a>/g, '')
     .replace(/<\/?mark\b[^>]*>/g, ''));
 }
+
+test('hostile report fields, rubric names and saved captions never reach HTML sinks', async () => {
+  const h = harness();
+  const hostile = '<img src=x onerror="alert(1)"><svg/onload=alert(1)></style><script>alert(1)</script>';
+  const transcript = `Hello. ${hostile} Thank you.`;
+  const report = analyzeSpeech({ text: transcript, durationSeconds: 20, targetTalkingPoints: hostile, aiFeedback: {
+    thesis: { summary: hostile, clarity: hostile, evidence: [transcript] },
+    strengths: [{ text: hostile, evidence: [transcript] }], improvements: [hostile],
+    rhetoric: [{ text: hostile, evidence: [transcript] }],
+    annotations: [{ quote: hostile, category: 'clarity', comment: hostile }],
+    rubric: [{ criterion: 'claim', score: 3, reason: hostile, evidence: [transcript] }],
+  } });
+  h.window.rehearsalHostedActions.restoreRecording({ ...savedTake('safe-id'), durationSeconds: 4, title: hostile,
+    transcript, report: { ...report, transcript, warnings: [hostile], meta: { analysisProviderLabel: hostile }, input: { instructorRubric: hostile, rubricFileName: hostile } } });
+  assert.ok(elementText(h.get('annotated-transcript')).includes(hostile));
+  assert.ok(elementText(h.get('annotations-notes')).includes(hostile));
+  assert.ok(elementText(h.get('report-warnings')).includes(hostile));
+  assert.equal(h.get('rubric-file-name').textContent, hostile);
+  const record = savedTake('safe-id', '../../' + hostile + '\\evil.html');
+  h.state.savedRecordings = [record];
+  h.renderSavedRecordings();
+  assert.ok(elementText(h.get('saved-recordings-list')).includes(record.caption));
+  h.state.audioBlob = record.blob; h.state.audioSave = record;
+  await h.downloadCurrentAudio();
+  const [link] = clickedDownloads(h);
+  assert.match(link.href, /^blob:/); assert.match(link.download, /\.wav$/);
+  assert.doesNotMatch(link.download, /[<>:"/\\|?*\u0000-\u001f]/);
+  assert.ok(h.createdElements.every(node => !['SCRIPT', 'IMG', 'IFRAME', 'SVG', 'OBJECT', 'EMBED', 'LINK', 'BASE'].includes(node.tagName)));
+  for (const node of h.createdElements) assert.ok([...node.attributes.keys()].every(key => !/^on/i.test(key)));
+});
+
+test('prototype-shaped provider data cannot alter normalized feedback or browser settings', () => {
+  const hostile = JSON.parse('{"__proto__":{"auditPolluted":true},"constructor":{"prototype":{"auditPolluted":true}},"thesis":{"summary":"Meaning","evidence":["My speech."]},"annotations":[{"quote":"My speech.","category":"__proto__","comment":"Danger"}]}');
+  const clean = sanitizeAiFeedback(hostile, { text: 'My speech.' });
+  assert.equal(clean.thesis.summary, 'Meaning'); assert.equal(clean.annotations.length, 0);
+  assert.equal(Object.hasOwn(clean, '__proto__'), false);
+  const h = harness(); h.updateConfig(hostile);
+  assert.equal(h.state.config.auditPolluted, undefined);
+  assert.equal(Object.prototype.auditPolluted, undefined);
+});
+
+test('SQL quotes, comments and commands in every text input remain exact strings in coaching data and rendered transcript', async () => {
+  const sql = "Robert'); DROP TABLE recordings; -- /* test */ ' OR 1=1; SELECT pg_sleep(10);";
+  const fields = [['transcript', 'text'], ['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric']];
+  const sent = [];
+  const h = harness(async (path, options) => {
+    const input = JSON.parse(options.body); sent.push(input);
+    assert.ok(['/api/analyze-text', '/api/prompt-preview'].includes(path));
+    return path === '/api/prompt-preview' ? { prompt: JSON.stringify(input) } : analyzeSpeech(input);
+  });
+  h.updateConfig(hostedConfig);
+  for (const [field] of fields) h.get(field).value = sql;
+  h.state.rubricFileName = sql;
+  await h.loadPromptPreview(); await h.runAnalysis({ corrected: true });
+  assert.equal(sent.length, 2);
+  for (const input of sent) {
+    for (const [, key] of fields) assert.equal(input[key], sql, key);
+    assert.equal(input.rubricFileName, sql);
+  }
+  assert.equal(h.state.report.transcript, sql);
+  assert.equal(elementText(h.get('annotated-transcript')), sql);
+});
+
+test('1,000 concurrent Analyze and transcript actions share one transcription and one coaching request', async () => {
+  const transcription = deferred(), coaching = deferred(), calls = [];
+  const h = harness(async path => { calls.push(path); return path === '/api/transcribe' ? transcription.promise : coaching.promise; });
+  h.updateConfig(hostedConfig); h.setAudio(new Blob(['audio']), 1, 'Spam test');
+  const actions = Array.from({ length: 1000 }, () => h.runAnalysis());
+  const transcripts = Array.from({ length: 1000 }, () => h.ensureTranscript());
+  assert.deepEqual(calls, ['/api/transcribe']);
+  transcription.resolve({ text: 'Um, practice helps.', durationSeconds: 1, recordingId: 'saved' });
+  await nextTurn();
+  const corrections = Array.from({ length: 1000 }, () => h.runAnalysis({ corrected: true }));
+  assert.deepEqual(calls, ['/api/transcribe', '/api/analyze-text']);
+  coaching.resolve(analyzeSpeech({ text: 'Um, practice helps.', durationSeconds: 1 }));
+  await Promise.all([...actions, ...transcripts, ...corrections]);
+  assert.equal(h.state.busy, false);
+  await Promise.all(Array.from({ length: 1000 }, () => h.ensureTranscript()));
+  assert.equal(calls.length, 2, 'cached transcript actions must not send another request');
+});
+
+test('1,000 repeated Record and Stop actions admit one live session, one final upload and one finish', async () => {
+  const h = harness(); h.updateConfig({ ...hostedConfig, liveTranscription: true });
+  const live = cloudLiveSpeech(h);
+  await Promise.all(Array.from({ length: 1000 }, () => h.startRecording()));
+  h.captureRecordingSamples(new Float32Array(16000), 16000);
+  for (let index = 0; index < 1000; index++) h.stopRecording();
+  await h.state.livePromise;
+  assert.equal(live.calls.filter(call => call.path === '/live-sessions').length, 1);
+  assert.equal(live.calls.filter(call => call.path.endsWith('/prepare')).length, 1);
+  assert.equal(live.calls.filter(call => call.path.includes('/chunks/')).length, 1);
+  assert.equal(live.calls.filter(call => call.path.endsWith('/finish')).length, 1);
+  assert.equal(live.uploads.length, 1);
+});
 
 test('annotation segments and download preserve original Unicode, newlines and unmarked text exactly', () => {
   const h = harness();

@@ -5,13 +5,19 @@ const ERRORS = {
   request_busy:['Another request is processing. Please wait for it to finish.',409],
   storage_limit:['Your saved-recording limit is reached. Delete an older recording first.',429],
   daily_limit:['Your pilot usage limit is reached. Try again later.',429],
+  rate_limited:['Too many requests. Wait a minute, then try again.',429],
   budget_exhausted:['The pilot daily AI allowance is unavailable. Please try again another day.',429],
   invalid_request:['The request is invalid.',400],
+  live_closed:['This live rehearsal ended or expired. Save the recording and transcribe the full take.',409],
+  live_order:['Send live audio in order, one section at a time.',409],
+  live_duration:['The live transcript does not cover the complete recording. Save the take and transcribe it in full.',409],
 };
 function checked({ data, error }) {
   if (error) {
     const known=ERRORS[error.message];
-    throw known?fail(...known):fail('Private storage is temporarily unavailable.',503);
+    const failure=known?fail(...known):fail('Private storage is temporarily unavailable.',503);
+    if (error.message==='rate_limited') failure.retryAfter=60;
+    throw failure;
   }
   return data;
 }
@@ -19,18 +25,24 @@ export function createSupabaseStore(client) {
   const rpc=async(name,args)=>checked(await client.rpc(name,args));
   const recordings=()=>client.from('rehearsal_recordings');
   return {
+    admitRequest(user=null) { return rpc('rehearsal_admit_request',{p_user:user}); },
     async verifyUser(token) { const {data,error}=await client.auth.getUser(token); return error?null:data?.user; },
     async profile(id) {
       checked(await client.from('rehearsal_profiles').upsert({user_id:id},{onConflict:'user_id',ignoreDuplicates:true}));
       return checked(await client.from('rehearsal_profiles').select('user_id').eq('user_id',id).single());
     },
-    async list(id) { return checked(await recordings().select('id,title,created_at,duration_seconds,size_bytes,status').eq('user_id',id).order('created_at',{ascending:false}).limit(50)); },
+    async list(id) { return checked(await recordings().select('id,title,created_at,duration_seconds,size_bytes,status').eq('user_id',id).eq('upload_expired',false).order('created_at',{ascending:false}).limit(50)); },
     async owned(user,id) { return checked(await recordings().select('*').eq('user_id',user).eq('id',id).maybeSingle()); },
     async create(user,id,title,duration,size) {
       const result=await rpc('rehearsal_create_recording',{p_user:user,p_id:id,p_title:title,p_duration:duration,p_size:size});
       return Array.isArray(result)?result[0]:result;
     },
     async audio(path) { return checked(await client.storage.from('recordings').download(path)); },
+    async uploadAudio(path,bytes) {
+      const result=await client.storage.from('recordings').upload(path,bytes,{contentType:'audio/wav',upsert:false});
+      if (Number(result.error?.statusCode||result.error?.status)===409 || result.error?.error==='Duplicate') throw fail('This recording already contains audio.',409);
+      return checked(result);
+    },
     async signAudio(path,seconds) { return checked(await client.storage.from('recordings').createSignedUrl(path,seconds)).signedUrl; },
     async update(user,id,patch) { checked(await recordings().update({...patch,updated_at:new Date().toISOString()}).eq('user_id',user).eq('id',id)); },
     async remove(user,id) {
@@ -40,6 +52,14 @@ export function createSupabaseStore(client) {
     },
     reserve(user,recording,request,kind,inputHash,cost) { return rpc('rehearsal_reserve',{p_user:user,p_recording:recording,p_request:request,p_kind:kind,p_hash:inputHash,p_cost:cost}); },
     finish(user,request,ok,response) { return rpc('rehearsal_finish',{p_user:user,p_request:request,p_ok:ok,p_response:response}); },
+    liveStart(user,recording,request,title,inputHash,cost) { return rpc('rehearsal_live_start',{p_user:user,p_recording:recording,p_request:request,p_title:title,p_hash:inputHash,p_cost:cost}); },
+    liveGet(user,recording) { return rpc('rehearsal_live_get',{p_user:user,p_recording:recording}); },
+    livePrepare(user,recording) { return rpc('rehearsal_live_prepare',{p_user:user,p_recording:recording}); },
+    livePrepared(user,recording) { return rpc('rehearsal_live_prepared',{p_user:user,p_recording:recording}); },
+    liveChunk(user,recording,sequence,inputHash,samples,final) { return rpc('rehearsal_live_chunk',{p_user:user,p_recording:recording,p_sequence:sequence,p_hash:inputHash,p_samples:samples,p_final:final}); },
+    liveChunkDone(user,recording,sequence,text) { return rpc('rehearsal_live_chunk_done',{p_user:user,p_recording:recording,p_sequence:sequence,p_text:text}); },
+    liveClose(user,recording,cancel=false) { return rpc('rehearsal_live_close',{p_user:user,p_recording:recording,p_cancel:cancel}); },
+    liveFinish(user,recording,duration,size) { return rpc('rehearsal_live_finish',{p_user:user,p_recording:recording,p_duration:duration,p_size:size}); },
     events(user,events) { return rpc('rehearsal_ingest_events',{p_user:user,p_events:events}); },
   };
 }

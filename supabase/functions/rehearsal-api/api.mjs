@@ -1,5 +1,6 @@
 import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions } from '../../../lib/analysis-core.mjs';
 import { PROVIDERS, requestCoaching } from '../../../lib/providers.mjs';
+import { createRequestLimit } from './request-limit.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_AUDIO = 20 * 1024 * 1024;
@@ -16,18 +17,25 @@ function text(value, max, required = false) {
   if (typeof value !== 'string' || value.length > max || required && !value.trim()) throw fail('A text field is missing or too long.');
   return value;
 }
-async function readLimited(response, limit) {
-  if (Number(response.headers.get('content-length')) > limit) throw fail('The request or response is too large.', 413);
+export async function readLimited(response, limit, timeoutMs = 20000) {
   const reader = response.body?.getReader();
   if (!reader) return new Uint8Array();
-  const chunks = []; let size = 0;
+  const chunks = []; let size = 0, timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(fail('The request or response body timed out.', 408)), timeoutMs);
+  });
   try {
+    if (Number(response.headers.get('content-length')) > limit) throw fail('The request or response is too large.', 413);
     while (true) {
-      const { value, done } = await reader.read(); if (done) break;
-      size += value.length; if (size > limit) { await reader.cancel(); throw fail('The request or response is too large.', 413); }
+      const { value, done } = await Promise.race([reader.read(), deadline]); if (done) break;
+      size += value.length; if (size > limit) throw fail('The request or response is too large.', 413);
       chunks.push(value);
     }
-  } finally { reader.releaseLock(); }
+  } catch (error) {
+    // Cancellation itself can stall on an untrusted stream; never await it.
+    void reader.cancel().catch(() => {});
+    throw error;
+  } finally { clearTimeout(timer); reader.releaseLock(); }
   const bytes = new Uint8Array(size); let at = 0;
   for (const chunk of chunks) { bytes.set(chunk, at); at += chunk.length; }
   return bytes;
@@ -41,7 +49,7 @@ async function jsonBody(request) {
   }
   catch (error) { if (error.safe) throw error; throw fail('The request was not valid JSON.'); }
 }
-export function inspectHostedWav(buffer) {
+export function inspectHostedWav(buffer, minDuration = 0.5, maxDuration = 600) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 44 || buffer.byteLength > MAX_AUDIO) throw fail('Use a WAV recording of up to 10 minutes.');
   const view = new DataView(buffer), label = at => String.fromCharCode(...new Uint8Array(buffer, at, 4));
   const size=buffer.byteLength-44;
@@ -51,7 +59,7 @@ export function inspectHostedWav(buffer) {
       view.getUint16(32,true)!==2 || view.getUint16(34,true)!==16 || label(36)!=='data' || view.getUint32(40,true)!==size || size%2) {
     throw fail('Re-import this audio through the app to prepare a compatible WAV recording.');
   }
-  return number(size/32000,0.5,600);
+  return number(size/32000,minDuration,maxDuration);
 }
 export function analysisInput(body, durationSeconds) {
   exact(body,['recordingId','requestId','text','targetScript','targetTalkingPoints','plannedIntroduction','plannedTransitions','instructorRubric','rubricFileName','targetMode','speakerName','durationSeconds','useAI']);
@@ -87,11 +95,13 @@ async function hash(value) { return [...new Uint8Array(await crypto.subtle.diges
 function metadata(row) { return {id:row.id,title:row.title,createdAt:row.created_at,durationSeconds:row.duration_seconds,sizeBytes:row.size_bytes,status:row.status}; }
 
 /** All data access uses a verified server-derived user ID; store is injectable for tests. */
-export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching }) {
+export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, now=Date.now }) {
+  const enterRequest=createRequestLimit({now});
+  let globalPauseUntil=0;
   const policy=buildCoachingInstructions(policyText), worker=secureWorker(env);
   const provider=env.COACHING_PROVIDER||'google', model=env.COACHING_MODEL||PROVIDERS[provider]?.defaultModel;
   if (!['openai','anthropic','google','deepseek','meta'].includes(provider) || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$/.test(model||'')) throw new Error('Invalid coaching configuration.');
-  const speechCost=reservation(env.BARK_RESERVE_MICROUSD), coachCost=reservation(env.COACHING_RESERVE_MICROUSD);
+  const speechCost=reservation(env.BARK_RESERVE_MICROUSD), coachCost=reservation(env.COACHING_RESERVE_MICROUSD), liveCost=reservation(env.BARK_LIVE_RESERVE_MICROUSD);
   const origins=new Set(String(env.ALLOWED_ORIGINS||'').split(',').map(x=>x.trim()).filter(Boolean));
   for (const origin of origins) {
     const url=new URL(origin);
@@ -109,6 +119,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     const identities=Array.isArray(user.identities)?user.identities:[];
     if (claims.sub!==user.id || !claims.amr?.some(item=>item?.method==='oauth') || !identities.some(identity=>['google','azure'].includes(identity.provider)) ||
         identities.some(identity=>!['google','azure','email'].includes(identity.provider))) throw fail('Use Google or Microsoft sign-in for this pilot.',403);
+    await store.admitRequest(user.id);
     await store.profile(user.id);
     return {id:user.id};
   }
@@ -137,23 +148,118 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       throw failure;
     }
   }
+  async function liveWorker(path, audio) {
+    const response=await fetchImpl(new URL(path,worker).href,{method:'POST',redirect:'error',headers:{
+      Authorization:`Bearer ${env.BARK_WORKER_TOKEN}`,...(audio?{'Content-Type':'audio/wav'}:{}),
+      ...(env.BARK_WORKER_MODAL_KEY?{'Modal-Key':env.BARK_WORKER_MODAL_KEY,'Modal-Secret':env.BARK_WORKER_MODAL_SECRET}:{})},
+      ...(audio?{body:audio}:{}),signal:AbortSignal.timeout(125000)});
+    if (!response.ok) throw fail('Live transcription is unavailable. Your recording remains in this tab; save and transcribe the complete take.',response.status===429?429:502);
+    try { return JSON.parse(new TextDecoder().decode(await readLimited(response,512*1024))); }
+    catch { throw fail('The speech worker returned an unreadable response.',502); }
+  }
+  async function liveAction(request,path,user) {
+    if (!worker || !liveCost) throw fail('Live cloud transcription is not configured yet.',503);
+    if (path==='/live-sessions' && request.method==='POST') {
+      const body=await jsonBody(request); exact(body,['recordingId','requestId','title']);
+      const id=uuid(body.recordingId),requestId=uuid(body.requestId),title=text(body.title??'My rehearsal',120,true).trim();
+      const session=await store.liveStart(user.id,id,requestId,title,await hash({mode:'live',recordingId:id,title}),liveCost);
+      if (session.status!=='active') throw fail('This live rehearsal has ended. Start a new recording.',409);
+      return {recordingId:id,storagePath:session.storage_path,bucket:'recordings',expiresAt:session.expires_at,chunkSeconds:10,maxDurationSeconds:600};
+    }
+    const match=path.match(/^\/live-sessions\/([^/]+)(?:\/(prepare|finish|chunks\/([0-9]+)))?$/);
+    if (!match) throw fail('This live rehearsal action does not exist.',404);
+    const id=uuid(match[1]),action=match[2];
+    if (!action && request.method==='GET') {
+      const session=await store.liveGet(user.id,id);
+      return {recordingId:id,status:session.status,ready:session.prepare_state==='completed',nextSequence:session.next_sequence,transcript:session.transcript,expiresAt:session.expires_at};
+    }
+    if (!action && request.method==='DELETE') { await store.liveClose(user.id,id,true); return {recordingId:id,cancelled:true}; }
+    if (request.method!=='POST') throw fail('This live rehearsal action does not exist.',404);
+    if (action==='prepare') {
+      if ((await readLimited(request,0)).length) throw fail('Preparation does not accept a request body.');
+      const claim=await store.livePrepare(user.id,id);
+      if (claim.state==='completed') return {recordingId:id,ready:true,model:'bark-3.0-plus'};
+      if (claim.state!=='new') throw fail('The speech model is still preparing. Please wait.',409);
+      try {
+        const result=await liveWorker('prepare');
+        if (result.ready!==true || result.model!=='bark-3.0-plus') throw fail('The speech worker could not prepare the model.',502);
+        await store.livePrepared(user.id,id);
+        return {recordingId:id,ready:true,model:'bark-3.0-plus'};
+      } catch (error) {
+        await store.liveClose(user.id,id).catch(()=>{});
+        throw error?.safe?error:fail('Live preparation timed out. Your audio remains in this tab; save the complete take.',502);
+      }
+    }
+    if (action?.startsWith('chunks/')) {
+      const sequence=number(Number(match[3]),0,59),finalHeader=request.headers.get('x-rehearsal-final');
+      if (finalHeader!==null && finalHeader!=='true') throw fail('Use a valid final-section flag.');
+      if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='audio/wav') throw fail('Send live sections as WAV audio.',415);
+      const bytes=await readLimited(request,320044),audio=bytes.buffer,final=finalHeader==='true';
+      const durationSeconds=inspectHostedWav(audio,1/16000,10),samples=(bytes.byteLength-44)/2;
+      if (!final && samples!==160000) throw fail('Ordinary live sections must contain ten seconds; mark the shorter ending as final.');
+      const digest=[...new Uint8Array(await crypto.subtle.digest('SHA-256',audio))].map(x=>x.toString(16).padStart(2,'0')).join('');
+      const claim=await store.liveChunk(user.id,id,sequence,digest,samples,final);
+      let text=claim.text;
+      if (claim.state!=='completed') {
+        if (claim.state!=='new') throw fail('This section is still processing. Retry the same section after it finishes.',409);
+        try {
+          const result=await liveWorker('transcribe-live',audio);
+          if (result.model!=='bark-3.0-plus' || typeof result.text!=='string' || result.text.length>60000 || typeof result.durationSeconds!=='number' || Math.abs(result.durationSeconds-durationSeconds)>1/16000) throw fail('The speech worker returned an invalid live transcript.',502);
+          text=(await store.liveChunkDone(user.id,id,sequence,result.text.trim())).text;
+        } catch (error) {
+          await store.liveClose(user.id,id).catch(()=>{});
+          throw error?.safe?error:fail('Live transcription timed out. Save your recording and transcribe the complete take.',502);
+        }
+      }
+      const session=await store.liveGet(user.id,id);
+      // Replayed old chunks reproduce only the transcript through that sequence.
+      const transcript=session.chunks.slice(0,sequence+1).map(chunk=>chunk.text||'').filter(Boolean).join(' ');
+      return {recordingId:id,sequence,text,durationSeconds,transcript,nextSequence:sequence+1};
+    }
+    if (action==='finish') {
+      const body=await jsonBody(request); exact(body,['durationSeconds','sizeBytes']);
+      const duration=number(body.durationSeconds,0.5,600),size=number(body.sizeBytes,16044,MAX_AUDIO);
+      const session=await store.liveGet(user.id,id),row=await store.owned(user.id,id);
+      if (!row || row.status==='deleting') throw fail('This recording was not found.',404);
+      const audio=await store.audio(row.storage_path);
+      if (audio.size!==size) throw fail('The stored audio does not match the completed take.');
+      const actualDuration=inspectHostedWav(await audio.arrayBuffer());
+      if (Math.abs(actualDuration-duration)>1/16000) throw fail('The recording duration does not match its audio.');
+      const result=await store.liveFinish(user.id,id,actualDuration,audio.size);
+      return {recordingId:id,text:result.text,durationSeconds:actualDuration,chunks:[],model:'bark-3.0-plus',localSpeech:false,complete:result.complete};
+    }
+    throw fail('This live rehearsal action does not exist.',404);
+  }
   return async function handle(request) {
     const origin=request.headers.get('origin');
     const headers={'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Vary':'Origin'};
     if (origins.has(origin)) headers['Access-Control-Allow-Origin']=origin;
     const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers});
+    let release;
     try {
+      release=enterRequest();
       if (!origins.has(origin)) throw fail('This origin is not allowed.',403);
-      if (request.method==='OPTIONS') return new Response(null,{status:204,headers:{...headers,'Access-Control-Allow-Methods':'GET, POST, DELETE, OPTIONS','Access-Control-Allow-Headers':'authorization, apikey, content-type','Access-Control-Max-Age':'600'}});
+      if (request.method==='OPTIONS') return new Response(null,{status:204,headers:{...headers,'Access-Control-Allow-Methods':'GET, POST, DELETE, OPTIONS','Access-Control-Allow-Headers':'authorization, apikey, content-type, x-rehearsal-final','Access-Control-Max-Age':'600'}});
       const url=new URL(request.url), path=url.pathname.replace(/^\/(?:functions\/v1\/)?rehearsal-api(?=\/|$)/,'');
       if (url.search) throw fail('Query parameters are not supported.');
+      if (!['GET','POST','DELETE'].includes(request.method)) throw fail('This method is not allowed.',405);
+      const publicConfig=request.method==='GET'&&path==='/config';
+      const authorization=request.headers.get('authorization');
+      if ((!publicConfig||authorization)&&(!authorization?.startsWith('Bearer ')||authorization.length>16384||!/^Bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(authorization))) throw fail('Sign in with Google or Microsoft to continue.',401);
+      if (globalPauseUntil>now()) throw Object.assign(fail('The service is receiving too many requests. Please try again shortly.',429),{retryAfter:Math.ceil((globalPauseUntil-now())/1000)});
+      try { await store.admitRequest(); }
+      catch(error) {
+        if(error?.safe&&error.status===429) globalPauseUntil=now()+Math.min(60,Math.max(1,Number(error.retryAfter)||60))*1000;
+        throw error;
+      }
       if (request.method==='GET' && path==='/config') {
         const user=await identify(request,true);
-        return json({hosted:true,configured:true,localSpeech:false,liveTranscription:false,retention:'private',auth:{signedIn:Boolean(user)},
+        return json({hosted:true,configured:true,localSpeech:false,liveTranscription:Boolean(worker&&liveCost),liveChunkSeconds:10,retention:'private',auth:{signedIn:Boolean(user)},
           speechConfigured:Boolean(worker&&speechCost),analysisConfigured:Boolean(env.COACHING_API_KEY&&coachCost),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,
           transcriptionModel:'bark-3.0-plus',providers:[],maxDurationSeconds:600,maxAudioBytes:MAX_AUDIO});
       }
       const user=await identify(request);
+      if (path==='/live-sessions' || path.startsWith('/live-sessions/')) return json(await liveAction(request,path,user));
       if (request.method==='GET' && path==='/recordings') return json({recordings:(await store.list(user.id)).map(metadata)});
       if (request.method==='POST' && path==='/recordings') {
         const body=await jsonBody(request); exact(body,['id','title','durationSeconds','sizeBytes']);
@@ -161,6 +267,25 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         if (!Number.isInteger(size)) throw fail('Use a whole-byte file size.');
         const row=await store.create(user.id,id,title,duration,size);
         return json({id:row.id,storagePath:row.storage_path,bucket:'recordings'},201);
+      }
+      const upload=path.match(/^\/recordings\/([^/]+)\/audio$/);
+      if (upload && request.method==='POST') {
+        const id=uuid(upload[1]),row=await store.owned(user.id,id);
+        if (!row || row.upload_expired) throw fail('This recording was not found.',404);
+        if (row.status!=='pending' || Date.parse(row.upload_expires_at)<=now()) throw fail('This recording no longer accepts uploads.',409);
+        if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='audio/wav') throw fail('Re-import this audio through the app before saving it.',415);
+        const bytes=await readLimited(request,MAX_AUDIO),durationSeconds=inspectHostedWav(bytes.buffer);
+        try { await store.uploadAudio(row.storage_path,bytes); }
+        catch (error) {
+          if (!error.safe || error.status!==409) throw error;
+          // A lost acknowledgement may be retried, but can never replace a take.
+          const prior=await store.audio(row.storage_path);
+          if (prior.size!==bytes.byteLength) throw fail('This recording already contains different audio.',409);
+          const existing=new Uint8Array(await prior.arrayBuffer());
+          if (!existing.every((value,index)=>value===bytes[index])) throw fail('This recording already contains different audio.',409);
+        }
+        await store.update(user.id,id,{duration_seconds:durationSeconds,size_bytes:bytes.byteLength});
+        return json({id,stored:true,durationSeconds,sizeBytes:bytes.byteLength},201);
       }
       const detail=path.match(/^\/recordings\/([^/]+)$/);
       if (detail && ['GET','DELETE'].includes(request.method)) {
@@ -203,19 +328,26 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         if (!row.transcript) throw fail('Create a transcript for this recording before requesting coaching.',409);
         const input=analysisInput(body,row.duration_seconds);
         let prompt; try { prompt=buildAnalysisPrompt(input,policy); } catch { throw fail('Add a readable transcript and valid preparation text.'); }
-        if (new TextEncoder().encode(prompt).byteLength>512*1024) throw fail('Shorten the script, rubric, or preparation notes.',413);
+        if (new TextEncoder().encode(prompt).byteLength>256*1024) throw fail('Shorten the script, rubric, or preparation notes.',413);
         return json(await paid(user,id,requestId,'coach',input,coachCost,async()=>{
-          let feedback;
-          try { feedback=await coach({provider,model,apiKey:env.COACHING_API_KEY,workspaceId:env.COACHING_WORKSPACE_ID,prompt,fetchImpl,browser:false}); }
+          let feedback, coachingUsage;
+          const coachingStarted=performance.now();
+          try { feedback=await coach({provider,model,apiKey:env.COACHING_API_KEY,workspaceId:env.COACHING_WORKSPACE_ID,prompt,fetchImpl,browser:false,onUsage:usage=>{
+            coachingUsage={...usage,elapsedMs:Math.round(performance.now()-coachingStarted)};
+            console.info(JSON.stringify({event:'coaching_usage',provider,model,...coachingUsage}));
+          }}); }
           catch { throw fail('The AI coach is unavailable. Your recording is saved; try again later.',502); }
           const report=analyzeSpeech({...input,aiFeedback:feedback});
           if (report.analysis.method!=='ai') throw fail('The AI coach returned an incomplete report. Your recording is saved.',502);
-          const output={...report,transcript:input.text,warnings:[],meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:'complete',localSpeech:false,recordingId:id}};
+          const output={...report,transcript:input.text,warnings:[],meta:{...input,text:undefined,useAI:undefined,generatedAt:new Date().toISOString(),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,coachingStatus:'complete',localSpeech:false,recordingId:id,...(coachingUsage?{coachingUsage}:{})}};
           await store.update(user.id,id,{status:'analyzed',transcript:input.text,report:output});
           return output;
         }));
       }
       throw fail('This app action does not exist.',404);
-    } catch (error) { return json({error:error?.safe?error.message:'The service could not complete this request.',...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})},error?.safe?error.status:503); }
+    } catch (error) {
+      if(error?.safe&&error.retryAfter) headers['Retry-After']=String(Math.min(60,Math.max(1,Math.ceil(Number(error.retryAfter)||60))));
+      return json({error:error?.safe?error.message:'The service could not complete this request.',...(error?.safe&&error.jobState==='failed'?{jobState:'failed'}:{})},error?.safe?error.status:503);
+    } finally { release?.(); }
   };
 }

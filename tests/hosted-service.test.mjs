@@ -30,13 +30,15 @@ function fixture({ signedIn = true, handle } = {}) {
       signOut: async () => { session = null; authHandler?.('SIGNED_OUT', null); return {}; },
       onAuthStateChange: callback => { authHandler = callback; return { data: { subscription: { unsubscribe() {} } } }; },
     },
-    storage: { from: bucket => ({ upload: async (path, blob, options) => { uploads.push({ bucket, path, blob, options }); return {}; } }) },
+    storage: { from() { throw new Error('The browser must never upload directly to Storage.'); } },
   };
   const fetchImpl = async (destination, options) => {
-    const call = { path: destination.replace(`${url}/functions/v1/rehearsal-api`, ''), ...options, body: options?.body ? JSON.parse(options.body) : undefined };
+    const call = { path: destination.replace(`${url}/functions/v1/rehearsal-api`, ''), ...options, body: options?.body instanceof Blob ? options.body : options?.body ? JSON.parse(options.body) : undefined };
     calls.push(call);
+    if (/^\/recordings\/[0-9a-f-]+\/audio$/.test(call.path)) uploads.push(call);
     if (handle) { const handled = await handle(call); if (handled) return handled; }
     if (call.path === '/recordings' && options.method === 'POST') return response({ id: call.body.id, storagePath: `${userId}/${call.body.id}/audio.wav`, bucket: 'recordings' });
+    if (/^\/recordings\/[0-9a-f-]+\/audio$/.test(call.path)) return response({ id: call.path.split('/')[2], stored: true, durationSeconds: (call.body.size - 44) / 32000, sizeBytes: call.body.size });
     if (call.path === '/transcribe') return response({ text: 'Um, practice helps.', durationSeconds: 1, chunks: [], model: 'bark-3.0-plus', localSpeech: false, recordingId: call.body.recordingId });
     if (call.path === '/analyze-text') return response({ analysis: { method: 'ai' } });
     if (call.path === '/config') return response({ auth: { signedIn: true }, analysisConfigured: true });
@@ -57,6 +59,41 @@ test('hosted configuration is off only when absent and rejects partial or secret
     { VITE_SUPABASE_URL: `${url}/evil`, VITE_SUPABASE_PUBLISHABLE_KEY: publishableKey },
     { VITE_SUPABASE_URL: 'https://secret@pilot.supabase.co', VITE_SUPABASE_PUBLISHABLE_KEY: publishableKey },
   ]) assert.throws(() => readHostedConfig(env));
+});
+
+test('live speech uses the authenticated gateway, saves once, and reuses its recording for coaching', async () => {
+  let id;
+  const { service, calls, uploads } = fixture({ handle: call => {
+    if (call.path === '/live-sessions') {
+      id = call.body.recordingId;
+      return response({ recordingId: id, bucket: 'recordings', storagePath: `${userId}/${id}/audio.wav` });
+    }
+    if (call.path.endsWith('/prepare')) return response({ ready: true });
+    if (call.path.includes('/chunks/')) return response({ recordingId: id, sequence: 0, nextSequence: 1, text: 'Um, practice helps.' });
+    if (call.path.endsWith('/finish')) return response({ recordingId: id, complete: true, text: 'Um, practice helps.' });
+  } });
+  let saved;
+  service.setRecordingSavedHandler((blob, recordingId) => { saved = { blob, recordingId }; });
+  const audio = wav();
+  const live = service.startLiveSession({ sampleRate: 16000, encodeAudio: () => audio });
+  live.push(new Float32Array(16000));
+  const result = await live.finish(audio);
+  assert.equal(result.complete, true); assert.equal(result.recordingId, id);
+  assert.deepEqual(saved, { blob: audio, recordingId: id });
+  await live.finish(audio);
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].path, `/recordings/${id}/audio`);
+  assert.equal(uploads[0].headers.Authorization, 'Bearer private-session-token');
+  assert.equal(uploads[0].headers['Content-Type'], 'audio/wav');
+  assert.equal(uploads[0].body, audio);
+  assert.equal(calls.filter(call => call.path === '/recordings').length, 0);
+  const chunk = calls.find(call => call.path.includes('/chunks/'));
+  assert.equal(chunk.headers['Content-Type'], 'audio/wav');
+  assert.equal(chunk.headers.Authorization, 'Bearer private-session-token');
+  assert.equal(chunk.headers['X-Rehearsal-Final'], 'true');
+  assert.equal(chunk.body, audio);
+  await service.request('/api/analyze-text', { body: { recordingId: id, text: result.text } });
+  assert.equal(calls.at(-1).body.recordingId, id);
 });
 
 test('signed-out startup sends nothing; transcription requires OAuth and unsupported routes cannot send data', async () => {
@@ -89,9 +126,10 @@ test('one explicit transcription saves a private WAV, sends a job ID, and reuses
   const result = await service.request('/api/transcribe', { body: audio });
   assert.equal(result.text, 'Um, practice helps.');
   assert.equal(uploads.length, 1);
-  assert.equal(uploads[0].bucket, 'recordings');
-  assert.equal(uploads[0].options.upsert, false);
-  assert.ok(uploads[0].path.startsWith(`${userId}/`));
+  assert.equal(uploads[0].path, `/recordings/${result.recordingId}/audio`);
+  assert.equal(uploads[0].headers.Authorization, 'Bearer private-session-token');
+  assert.equal(uploads[0].headers['Content-Type'], 'audio/wav');
+  assert.equal(uploads[0].body, audio);
   assert.equal(calls.find(call => call.path === '/recordings').body.durationSeconds, 1);
   const jobs = calls.filter(call => call.path === '/transcribe');
   assert.equal(jobs[0].body.requestId, jobs[1].body.requestId);
@@ -185,13 +223,94 @@ test('an account switch while reading WAV metadata prevents creating or uploadin
   assert.equal(f.calls.length, 0); assert.equal(f.uploads.length, 0);
 });
 
-test('an account switch during storage upload cannot mark the prior recording saved or start inference', async () => {
+test('an account switch during gateway upload cannot mark the prior recording saved or start inference', async () => {
   const uploaded = deferred(), entered = deferred();
-  const f = fixture(); f.service.onAuthChange(() => {}); f.authChange(firstSession);
-  f.client.storage.from = () => ({ upload: () => { entered.resolve(); return uploaded.promise; } });
+  const f = fixture({ handle: async call => { if (call.path.endsWith('/audio')) { entered.resolve(); await uploaded.promise; } } });
+  f.service.onAuthChange(() => {}); f.authChange(firstSession);
   let saved = 0; f.service.setRecordingSavedHandler(() => saved++);
   const sending = f.service.request('/api/transcribe', { body: wav() }); await entered.promise;
   f.authChange(secondSession); uploaded.resolve({});
-  await assert.rejects(sending, { status: 401 });
+  await assert.rejects(sending, error => error.name === 'AbortError' || error.status === 401);
   assert.equal(saved, 0); assert.equal(f.calls.filter(call => call.path === '/transcribe').length, 0);
+  assert.equal(f.calls.some(call => call.method === 'DELETE'), false);
+});
+
+test('simultaneous transcription requests coalesce reservation and authenticated audio upload', async () => {
+  const entered=deferred(),uploaded=deferred();
+  const f=fixture({handle:async call=>{if(call.path.endsWith('/audio')){entered.resolve();await uploaded.promise;}}});
+  const audio=wav();let saved=0;f.service.setRecordingSavedHandler(()=>saved++);
+  const first=f.service.request('/api/transcribe',{body:audio});await entered.promise;
+  const second=f.service.request('/api/transcribe',{body:audio});await new Promise(setImmediate);
+  assert.equal(f.calls.filter(call=>call.path==='/recordings').length,1);assert.equal(f.uploads.length,1);
+  uploaded.resolve();const results=await Promise.all([first,second]);
+  assert.equal(results[0].recordingId,results[1].recordingId);assert.equal(saved,1);
+  const jobs=f.calls.filter(call=>call.path==='/transcribe');assert.equal(jobs[0].body.requestId,jobs[1].body.requestId);
+});
+
+test('uncertain audio upload keeps its reservation and retries identical bytes without deleting a saved take', async () => {
+  let lost=true;
+  const f=fixture({handle:call=>{if(call.path.endsWith('/audio')&&lost){lost=false;throw new TypeError('Reply lost after storage');}}});
+  const audio=wav();let saved=0;f.service.setRecordingSavedHandler(()=>saved++);
+  await assert.rejects(f.service.request('/api/transcribe',{body:audio}));
+  assert.equal(saved,0);assert.equal(f.calls.some(call=>call.method==='DELETE'),false);
+  await f.service.request('/api/transcribe',{body:audio});
+  assert.equal(f.calls.filter(call=>call.path==='/recordings').length,1);
+  assert.equal(f.uploads.length,2);assert.equal(f.uploads[0].path,f.uploads[1].path);
+  assert.equal(f.uploads[0].body,audio);assert.equal(f.uploads[1].body,audio);assert.equal(saved,1);
+});
+
+test('definite format rejection cleans an empty reservation; failed cleanup retains the ID for safe retry', async () => {
+  for(const cleanupFails of [false,true]) {
+    let rejected=false;
+    const f=fixture({handle:call=>{
+      if(call.path.endsWith('/audio')&&!rejected){rejected=true;return response({error:'Invalid WAV.'},415);}
+      if(call.method==='DELETE'&&cleanupFails)return response({error:'Try later.'},503);
+    }});
+    const audio=wav();await assert.rejects(f.service.request('/api/transcribe',{body:audio}),{status:415});
+    assert.equal(f.calls.filter(call=>call.method==='DELETE').length,1);
+    assert.equal(f.calls.filter(call=>call.path==='/transcribe').length,0);
+    await f.service.request('/api/transcribe',{body:audio});
+    assert.equal(f.uploads[0].path===f.uploads[1].path,cleanupFails);
+    assert.equal(f.calls.filter(call=>call.path==='/recordings').length,cleanupFails?1:2);
+  }
+});
+
+test('saved-audio acknowledgements must match the exact recording and WAV metadata', async () => {
+  for(const patch of [{id:randomUUID()},{stored:false},{sizeBytes:32046},{durationSeconds:600},{durationSeconds:'1'}]) {
+    const f=fixture({handle:call=>call.path.endsWith('/audio')?response({id:call.path.split('/')[2],stored:true,sizeBytes:32044,durationSeconds:1,...patch}):undefined});
+    let saved=0;f.service.setRecordingSavedHandler(()=>saved++);
+    await assert.rejects(f.service.request('/api/transcribe',{body:wav()}),{status:502});
+    assert.equal(saved,0);assert.equal(f.calls.some(call=>call.path==='/transcribe'||call.method==='DELETE'),false);
+  }
+});
+
+test('cancelled gateway upload cannot report success or start inference and a retry reuses its ID', async () => {
+  const entered=deferred(),uploaded=deferred();let first=true;
+  const f=fixture({handle:async call=>{if(call.path.endsWith('/audio')&&first){first=false;entered.resolve();await uploaded.promise;}}});
+  const audio=wav(),controller=new AbortController();let saved=0;f.service.setRecordingSavedHandler(()=>saved++);
+  const sending=f.service.request('/api/transcribe',{body:audio,signal:controller.signal});await entered.promise;
+  controller.abort();uploaded.resolve();await assert.rejects(sending,{name:'AbortError'});
+  assert.equal(saved,0);assert.equal(f.uploads[0].signal.aborted,true);
+  assert.equal(f.calls.some(call=>call.method==='DELETE'||call.path==='/transcribe'),false);
+  await f.service.request('/api/transcribe',{body:audio});
+  assert.equal(f.calls.filter(call=>call.path==='/recordings').length,1);assert.equal(f.uploads[0].path,f.uploads[1].path);
+});
+
+test('failed live saving never finalizes a report and explicit cancelled-session fallback reuses the audio endpoint', async () => {
+  let id,rejectUpload=true;
+  const f=fixture({handle:call=>{
+    if(call.path==='/live-sessions'){id=call.body.recordingId;return response({recordingId:id,bucket:'recordings',storagePath:`${userId}/${id}/audio.wav`});}
+    if(call.path.endsWith('/prepare'))return response({ready:true});
+    if(call.path.includes('/chunks/'))return response({recordingId:id,sequence:0,nextSequence:1,text:'Um, practice helps.'});
+    if(call.path.endsWith('/audio')&&rejectUpload){rejectUpload=false;return response({error:'Storage unavailable.'},503);}
+  }});
+  const audio=wav();let saved=0;f.service.setRecordingSavedHandler(()=>saved++);
+  const live=f.service.startLiveSession({sampleRate:16000,encodeAudio:()=>audio});live.push(new Float32Array(16000));
+  await assert.rejects(live.finish(audio),{status:503});await assert.rejects(live.finish(audio),{status:503});
+  assert.equal(f.uploads.length,1);assert.equal(saved,0);assert.equal(f.calls.some(call=>call.path.endsWith('/finish')),false);
+  live.cancel();await new Promise(setImmediate);
+  const result=await f.service.request('/api/transcribe',{body:audio});
+  assert.equal(result.recordingId,id);assert.equal(saved,1);
+  assert.equal(f.calls.filter(call=>call.path==='/recordings').length,0);
+  assert.equal(f.uploads.length,2);assert.equal(f.uploads[0].path,f.uploads[1].path);
 });
