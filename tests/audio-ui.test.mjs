@@ -2020,6 +2020,34 @@ test('account changes and page exit clear assignment text and cancel stale priva
   await h.emitWindowEvent('pagehide', { persisted: false }); assert.equal(after.disposed, 1);
 });
 
+test('300 attachment replacements, removals, and account changes abort both parsers and never restore stale private content', async () => {
+  let active = 0, peak = 0, canceled = 0, calls = 0;
+  const signals = [], previews = [], pending = [];
+  const h = harness(async () => { calls++; }, {
+    extractRubric(_file, { signal }) {
+      signals.push(signal); peak = Math.max(peak, ++active);
+      return new Promise((_resolve, reject) => {
+        const abort = () => { signal.removeEventListener('abort', abort); active--; canceled++; reject(new DOMException('Canceled', 'AbortError')); };
+        signal.addEventListener('abort', abort, { once: true });
+      });
+    },
+    async prepareRubricPreview() { const preview = previewFixture(); previews.push(preview); return preview; },
+  });
+  for (let index = 0; index < 300; index++) {
+    pending.push((index % 2 ? h.importAssignment : h.importRubric)({ name: `private-${index}.pdf`, size: 100 }));
+    if (index % 7 === 0) h.removeAssignment();
+    if (index % 11 === 0) h.removeRubric();
+    if (index % 19 === 0) h.window.rehearsalHostedActions.accountChanged(`account-${index}`);
+    if (index % 5 === 0) await Promise.resolve();
+  }
+  h.removeRubric(); h.removeAssignment(); await Promise.all(pending);
+  assert.equal(canceled, 300); assert.equal(active, 0); assert.ok(peak <= 2, 'at most the two current attachments may be read');
+  assert.ok(signals.every(signal => signal.aborted)); assert.ok(previews.every(preview => preview.disposed >= 1));
+  assert.equal(h.get('instructor-rubric').value, ''); assert.equal(h.get('assignment-instructions').value, '');
+  assert.equal(h.get('rubric-thumbnail').textContent, ''); assert.equal(h.get('assignment-thumbnail').textContent, '');
+  assert.equal(h.state.rubricPreview, null); assert.equal(h.state.assignmentPreview, null); assert.equal(calls, 0);
+});
+
 test('saved feedback restores its assignment snapshot and older feedback clears a different assignment', async () => {
   const preview = previewFixture();
   const h = harness(undefined, { extractRubric: async () => ({ text: 'New instructions' }), prepareRubricPreview: async () => preview });

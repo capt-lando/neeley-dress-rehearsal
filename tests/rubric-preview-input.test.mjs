@@ -155,6 +155,57 @@ test('relationship targets must resolve to an existing safe part of the correct 
   assert.doesNotMatch(text, /r:embed="(?:wrong|outside|encoded)"/); assert.match(text, /r:embed="safe"/);
 });
 
+test('prototype-named relationship types are rejected as unsupported without invoking inherited properties', () => {
+  for (const type of [...Object.getOwnPropertyNames(Object.prototype), 'prototype']) {
+    const output = parts(prepare(archive('<w:drawing><a:blip r:embed="hostile"/></w:drawing>', {
+      'word/media/image.png': png,
+      'word/_rels/document.xml.rels': utf8(rels(relation('hostile', type, 'media/image.png'))),
+    })));
+    assert.doesNotMatch(decode(output['word/document.xml']), /r:embed/);
+    assert.doesNotMatch(decode(output['word/_rels/document.xml.rels']), /Id="hostile"/);
+  }
+});
+
+test('XML entity and processing-instruction attacks are rejected in UTF-8 and both UTF-16 byte orders', () => {
+  for (const value of [`<!DOCTYPE x [<!ENTITY exploit SYSTEM "file:///private">]>${xml(paragraph('&exploit;'))}`, `<?xml-stylesheet href="https://bad.invalid"?>${xml(paragraph('text'))}`]) {
+    const little = new Uint8Array(Buffer.from('\ufeff' + value, 'utf16le')), big = little.slice();
+    for (let index = 0; index < big.length; index += 2) [big[index], big[index + 1]] = [big[index + 1], big[index]];
+    for (const bytes of [utf8(value), little, big]) assert.throws(() => prepare(zip.zipSync({ 'word/document.xml': bytes })), { code: 'RUBRIC_PREVIEW_CORRUPT' });
+  }
+});
+
+test('the image memory budget is shared across all embedded raster files', () => {
+  const raster = png.slice(); new DataView(raster.buffer).setUint32(16, 6000); new DataView(raster.buffer).setUint32(20, 4000);
+  assert.throws(() => prepare(archive(undefined, { 'word/media/one.png': raster, 'word/media/two.png': raster, 'word/media/three.png': raster })), { code: 'RUBRIC_PREVIEW_LIMIT' });
+});
+
+test('400 deterministic malformed archive mutations either fail safely or rebuild a bounded inert package', t => {
+  const seed = archive(paragraph('Safe rubric'), {
+    'word/media/image.png': png,
+    'word/_rels/document.xml.rels': utf8(rels(relation('image', 'image', 'media/image.png') + relation('remote', 'hyperlink', 'https://bad.invalid/tracker', 'External'))),
+    'word/active.html': utf8('<script>alert(1)</script>'),
+  });
+  let rejected = 0, accepted = 0, random = 0x13e92a71;
+  const next = () => { random = (Math.imul(random, 1664525) + 1013904223) >>> 0; return random; };
+  for (let index = 0; index < 400; index++) {
+    let input = seed.slice();
+    if (index % 3 === 0) input = input.subarray(0, next() % input.length);
+    else for (let flip = 0; flip < 1 + index % 5; flip++) input[next() % input.length] ^= 1 << (next() % 8);
+    let result;
+    try { result = prepare(input); }
+    catch (error) { assert.equal(error.name, 'RubricDocumentError'); rejected++; continue; }
+    accepted++; assert.ok(result.data.byteLength <= DOCX_PREVIEW_LIMITS.expandedBytes + 1024 * 1024);
+    const output = parts(result);
+    assert.equal(output['word/active.html'], undefined);
+    for (const [name, value] of Object.entries(output)) {
+      assert.doesNotMatch(name, /(?:^|\/)\.\.(?:\/|$)|\\|^\//);
+      if (name.endsWith('.xml') || name.endsWith('.rels')) assert.doesNotMatch(decode(value), /bad\.invalid|<!DOCTYPE|<!ENTITY|<script/);
+    }
+  }
+  assert.ok(rejected > 100); assert.ok(accepted > 0);
+  t.diagnostic(`${rejected} malformed archives rejected; ${accepted} safely rebuilt; no active or remote content retained.`);
+});
+
 test('preview validates real input size and required reader support', () => {
   assert.throws(() => prepare(new Uint8Array(5 * 1024 * 1024 + 1)), { code: 'RUBRIC_PREVIEW_LIMIT' });
   assert.throws(() => prepareDocxPreview(archive(), { ...deps, DOMParserImpl: undefined }), { code: 'RUBRIC_PREVIEW_BROWSER' });

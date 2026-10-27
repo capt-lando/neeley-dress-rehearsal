@@ -310,7 +310,7 @@ function createPreparationDocument({ key, textId, label, caption }) {
         el('preview-card').hidden = false;
         el('preview-meta').textContent = `${preview.pageCount} ${preview.pageCount === 1 ? 'page' : 'pages'}`;
       })();
-      const [extracted, visual] = await Promise.allSettled([window.rehearsalDocuments.extractRubric(file), previewTask]);
+      const [extracted, visual] = await Promise.allSettled([window.rehearsalDocuments.extractRubric(file, { signal: controller.signal }), previewTask]);
       if (generation !== state[key + 'Generation']) return;
       if (state[key + 'Preview']) state[key + 'FileName'] = file.name;
       if (extracted.status === 'rejected') throw extracted.reason;

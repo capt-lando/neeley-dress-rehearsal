@@ -61,6 +61,15 @@ test('PDF canvas dimensions are bounded for enormous pages and high display widt
   assert.ok(canvas.width * canvas.height <= PREVIEW_LIMITS.pixels); preview.dispose();
 });
 
+test('PDF rejects extreme aspect ratios and nonfinite page sizes before allocating a canvas', async () => {
+  for (const [width, height] of [[1, 1_000_000], [0, 100], [Infinity, 100], [NaN, 100], [-100, -100]]) {
+    const dom = environment(), engine = pdf({ page: { getViewport({ scale }) { return { width: width * scale, height: height * scale }; } } });
+    const preview = await prepareRubricPreview(file('hostile.pdf', '%PDF-1.7'), { ...dom, ...engine });
+    await assert.rejects(preview.render(0, dom.container), { code: 'RUBRIC_PREVIEW_PAGE' });
+    assert.equal(engine.seen.renders.length, 0); assert.equal(dom.container.childElementCount, 0); preview.dispose();
+  }
+});
+
 test('PDF abort cancels rendering, destroys worker, and prevents late mounting', async () => {
   let done; const renderPromise = new Promise(resolve => { done = resolve; });
   const controller = new AbortController(), dom = environment(), engine = pdf({ renderPromise });
@@ -175,6 +184,17 @@ test('DOCX output hardening removes active markup, external media, and CSS URLs'
   assert.doesNotMatch(root.innerHTML, /bad\.invalid/); assert.match(root.textContent, /Safe text/);
 });
 
+test('preview markup stress removes active content and adjacent CSS URLs without slow scanning of long values', () => {
+  const dom = environment(), root = dom.document.createElement('div');
+  root.innerHTML = '<style>.word{font-family:' + 'a'.repeat(200_000) + ';background:url(https://bad.invalid/one);cursor:url(https://bad.invalid/two),auto;color:purple}</style>' +
+    Array.from({ length: 500 }, (_, i) => `<p onclick="alert(${i})">Criterion ${i}</p><svg><foreignObject><iframe src="https://bad.invalid/frame"></iframe></foreignObject><a xlink:href="javascript:bad()">Link</a></svg><img src="data:image/svg+xml;base64,AAAA"><object data="https://bad.invalid/object"></object><form action="https://bad.invalid/send"><input value="private"></form>`).join('');
+  sanitizePreviewDom(root);
+  assert.equal(root.querySelectorAll('p').length, 500);
+  assert.equal(root.querySelector('iframe,object,form,input,img,foreignObject'), null);
+  assert.doesNotMatch(root.innerHTML, /bad\.invalid|javascript:|onclick|xlink:href/);
+  assert.match(root.querySelector('style').textContent, /color:purple/);
+});
+
 test('an exceptionally tall Word page reports a limit instead of silently clipping', async () => {
   const dom = environment(), full = dom.document.createElement('div');
   const prototype = dom.document.defaultView.HTMLElement.prototype;
@@ -192,4 +212,21 @@ test('an exceptionally tall Word page reports a limit instead of silently clippi
   } finally {
     if (originalHeight) Object.defineProperty(prototype, 'scrollHeight', originalHeight); else delete prototype.scrollHeight;
   }
+});
+
+test('wide Word pages scale their actual width instead of clipping and extreme widths fail explicitly', async () => {
+  const dom = environment(), prototype = dom.document.defaultView.HTMLElement.prototype;
+  const original = prototype.getBoundingClientRect; let width = 3840;
+  prototype.getBoundingClientRect = function () { return this.localName === 'section' ? { width } : original.call(this); };
+  try {
+    const preview = await prepareRubricPreview(file('wide.docx', 'PKfixture'), { ...dom,
+      sanitizeDocx: bytes => ({ data: bytes.buffer, warnings: [] }),
+      renderDocx: async (_data, body) => { body.innerHTML = '<section class="rubric-word"><p>Wide document</p></section>'; },
+    });
+    await preview.render(0, dom.container, 760);
+    assert.equal(dom.container.firstElementChild.contentDocument.querySelector('section').style.transform, `scale(${760 / 3840})`);
+    width = PREVIEW_LIMITS.pageWidth + 1;
+    await assert.rejects(preview.render(0, dom.container, 760), { code: 'RUBRIC_PREVIEW_PAGE_LIMIT' });
+    assert.equal(dom.container.childElementCount, 0); preview.dispose();
+  } finally { prototype.getBoundingClientRect = original; }
 });

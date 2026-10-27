@@ -3,10 +3,12 @@ import policy from '../_shared/coaching-policy.json' with { type: 'json' };
 import { createHostedApi } from './api.mjs';
 import { createSupabaseStore } from './store.mjs';
 import { createRealtimeHandler } from './realtime.mjs';
+import { createBoundedFetch } from './bounded-fetch.mjs';
 
 const env = Deno.env.toObject();
 const client = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  global: { fetch: createBoundedFetch() },
 });
 const store=createSupabaseStore(client);
 const api=createHostedApi({env,store,policyText:policy.text});

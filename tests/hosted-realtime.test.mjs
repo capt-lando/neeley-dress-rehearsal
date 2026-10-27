@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { attachRealtimeSession,createRealtimeHandler,REALTIME_CONFIG } from '../supabase/functions/rehearsal-api/realtime.mjs';
+import {createBoundedFetch} from '../supabase/functions/rehearsal-api/bounded-fetch.mjs';
 
 const user='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222';
 const recordingId='33333333-3333-4333-8333-333333333333',requestId='44444444-4444-4444-8444-444444444444';
@@ -235,4 +236,58 @@ test('accepted HTTP upgrades are held alive until the session closes',async()=>{
     upgrade:()=>({socket,response:new Response('upgraded')}),waitUntil:promise=>{active=promise;}});
   const response=await handler(new Request('https://example.test/live-stream',{headers:{origin,upgrade:'websocket'}}));
   assert.equal(await response.text(),'upgraded');assert.ok(active instanceof Promise);socket.finishClose();await active;
+});
+
+for(const stalledStage of ['authentication','claim'])test(`one thousand simultaneous upgrades stay bounded and recover after stalled ${stalledStage}`,async()=>{
+  let admitted=0,aborted=0,providerCalls=0,claimCalls=0;
+  const sockets=[],tasks=[];
+  const bounded=createBoundedFetch({timeoutMs:20,fetchImpl:(_input,{signal})=>new Promise((_resolve,reject)=>{
+    const stop=()=>{aborted++;reject(signal.reason);};
+    if(signal.aborted)stop();else signal.addEventListener('abort',stop,{once:true});
+  })});
+  const store={
+    async admitRequest(id){if(!id)admitted++;},async profile(){},
+    async verifyUser(){
+      if(stalledStage==='authentication')await bounded('https://storage.invalid/auth/v1/user');
+      return {id:user,identities:[{provider:'google'}]};
+    },
+    async liveStreamClaim(){claimCalls++;await bounded('https://storage.invalid/rest/v1/rpc/rehearsal_stream_claim');},
+  };
+  const handler=createRealtimeHandler({env:{ALLOWED_ORIGINS:origin,COACHING_PROVIDER:'openai',COACHING_API_KEY:'synthetic'},store,
+    upgrade:()=>{const socket=new Socket();sockets.push(socket);return {socket,response:new Response('upgraded')};},
+    waitUntil:promise=>tasks.push(promise),connectProvider:()=>{providerCalls++;throw new Error('must not connect');},
+    authTimeoutMs:5,sessionTimeoutMs:1000,
+  });
+  const request=()=>new Request('https://example.test/live-stream',{headers:{origin,upgrade:'websocket'}});
+  const responses=await Promise.all(Array.from({length:1000},()=>handler(request())));
+  assert.equal(responses.filter(response=>response.status===200).length,8);
+  assert.equal(responses.filter(response=>response.status===429).length,992);
+  assert.equal(admitted,8);assert.equal(sockets.length,8);
+  for(const socket of sockets)socket.emit({type:'start',token:token(),recordingId,requestId,segmentIndex:0});
+  let watchdog;
+  try {
+    await Promise.race([Promise.all(tasks),new Promise((_,reject)=>{watchdog=setTimeout(()=>reject(new Error('Stalled requests retained connection slots.')),2000);})]);
+  } finally {clearTimeout(watchdog);}
+  assert.equal(aborted,8);assert.equal(providerCalls,0);assert.equal(claimCalls,stalledStage==='claim'?8:0);
+  assert.equal(sockets.every(socket=>socket.readyState===3),true);
+  assert.equal((await handler(request())).status,200,'all completed timeout paths must release their slot');
+  sockets.at(-1).finishClose();await tasks.at(-1);
+});
+
+test('thirty-two simultaneous claims for one segment open exactly one provider and cancellation closes only that claim',async()=>{
+  let claimed=false,claims=0,failures=0;
+  const sessions=Array.from({length:32},()=>fixture({store:{
+    async liveStreamClaim(){
+      claims++;if(claimed)return {state:'reserved'};claimed=true;
+      return {state:'new',maxSamples:2640000,consumedSamples:0,transcript:'',nextSequence:0};
+    },
+    async liveStreamFail(...identity){assert.deepEqual(identity,[user,recordingId,requestId,0]);failures++;},
+  }}));
+  await Promise.all(sessions.map(session=>session.start()));
+  const winners=sessions.filter(session=>session.calls.some(call=>call[0]==='connect'));
+  assert.equal(claims,32);assert.equal(winners.length,1);
+  winners[0].socket.emit({type:'cancel'});
+  await Promise.all(sessions.map(session=>session.session.done));
+  assert.equal(failures,1);assert.equal(winners[0].provider.readyState,3);
+  assert.equal(sessions.every(session=>session.calls.every(call=>call[0]!=='finish')),true);
 });

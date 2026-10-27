@@ -367,6 +367,64 @@ test('private history refuses foreign signed audio URLs and disposed sessions re
   await assert.rejects(service.request('/api/config'), { status: 410 });
 });
 
+test('saved audio must match the verified owner and exact recording before any download', async () => {
+  const id = randomUUID(), other = randomUUID();
+  const path = `/storage/v1/object/sign/recordings/${userId}/${id}/audio.wav`;
+  const cases = [
+    { audioUrl: `${url}/storage/v1/object/sign/recordings/${secondSession.user.id}/${id}/audio.wav` },
+    { audioUrl: `${url}/storage/v1/object/sign/recordings/${userId}/${other}/audio.wav` },
+    { audioUrl: `${url}${path}/extra` },
+    { audioUrl: `${url}${path.replace('/audio.wav', '/%2e%2e/other/audio.wav')}` },
+    { audioUrl: `${url}${path.replace(`${userId}/`, `${userId}%2f`)}` },
+    { audioUrl: `${url}${path.replace('audio.wav', 'audio.wav%2fextra')}` },
+    { audioUrl: `${url}${path}#other` },
+    { audioUrl: `https://other:password@pilot.supabase.co${path}` },
+    { audioUrl: 'not a URL' },
+    { recording: { id: other } },
+    { recording: null },
+  ];
+  for (const change of cases) {
+    const f = fixture({ handle: call => call.path === `/recordings/${id}` ? response({ recording: { id }, audioUrl: `${url}${path}`, ...change }) : null });
+    await assert.rejects(f.service.openRecording(id), { status: 502 });
+    assert.equal(f.calls.length, 1, JSON.stringify(change));
+  }
+});
+
+test('valid private audio downloads cannot redirect or send ambient browser credentials', async () => {
+  const id = randomUUID(), audioUrl = `${url}/storage/v1/object/sign/recordings/${userId}/${id}/audio.wav?token=signed-test-token`;
+  const f = fixture({ handle: call => call.path === `/recordings/${id}` ? response({ recording: { id, transcript: 'Owned transcript.' }, audioUrl })
+    : call.path === audioUrl ? new Response(wav()) : null });
+  const record = await f.service.openRecording(id.toUpperCase());
+  assert.equal(record.id, id); assert.equal(record.transcript, 'Owned transcript.'); assert.equal(record.blob.size, 32044);
+  const download = f.calls.at(-1);
+  assert.equal(download.redirect, 'error'); assert.equal(download.credentials, 'omit'); assert.equal(download.referrerPolicy, 'no-referrer');
+  assert.equal(download.headers, undefined);
+});
+
+test('cancel, account change, and disposal abort pending saved-audio downloads', async () => {
+  for (const stop of ['cancel', 'account', 'dispose']) {
+    const id = randomUUID(), audioUrl = `${url}/storage/v1/object/sign/recordings/${userId}/${id}/audio.wav`;
+    const entered = deferred(); let downloadSignal;
+    const f = fixture({ handle: call => {
+      if (call.path === `/recordings/${id}`) return response({ recording: { id }, audioUrl });
+      if (call.path === audioUrl) {
+        downloadSignal = call.signal; entered.resolve();
+        return new Promise((_resolve, reject) => call.signal.addEventListener('abort', () => reject(call.signal.reason), { once: true }));
+      }
+    } });
+    f.service.onAuthChange(() => {}); f.authChange(firstSession);
+    const opening = f.service.openRecording(id);
+    const rejected = assert.rejects(opening, error => error.name === 'AbortError' || error.status === 401 || error.status === 410);
+    await entered.promise;
+    if (stop === 'cancel') await f.service.cancelCurrentRequest();
+    if (stop === 'account') f.authChange(secondSession);
+    if (stop === 'dispose') f.service.dispose();
+    await rejected;
+    assert.equal(downloadSignal.aborted, true, stop);
+    assert.equal(f.uploads.length, 0);
+  }
+});
+
 test('an account switch during session lookup rejects stale tokens before any network mutation', async () => {
   const f = fixture(); f.service.onAuthChange(() => {}); f.authChange(firstSession);
   const lookup = deferred(); f.client.auth.getSession = () => lookup.promise;

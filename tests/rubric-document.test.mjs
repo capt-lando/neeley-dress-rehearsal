@@ -35,6 +35,7 @@ function pdfMock(pages, overrides = {}) {
     WorkerImpl: class {
       constructor(url, options) { seen.workerUrl = url; seen.workerOptions = options; seen.worker = this; this.listeners = new Map(); }
       addEventListener(type, handler) { this.listeners.set(type, handler); }
+      removeEventListener(type, handler) { if (this.listeners.get(type) === handler) this.listeners.delete(type); }
       terminate() { seen.terminated++; }
     },
     PDFWorker: class {
@@ -186,6 +187,7 @@ test('PDF streams all pages locally and cleans up readers, pages and the worker'
   assert.equal(seen.options.data, bytes);
   assert.equal(seen.options.url, undefined);
   assert.equal(seen.options.useWorkerFetch, false);
+  assert.equal(seen.options.isEvalSupported, false);
   assert.equal(seen.options.worker.port, seen.worker);
   assert.deepEqual(seen.workerOptions, { type: 'module' });
   assert.deepEqual(seen.requested, [1, 2]);
@@ -194,6 +196,54 @@ test('PDF streams all pages locally and cleans up readers, pages and the worker'
   assert.equal(seen.cancelled, 2);
   assert.equal(seen.terminated, 1);
   assert.equal(seen.workerDestroyed, 1);
+  assert.equal(seen.worker.listeners.size, 0);
+});
+
+test('document cancellation rejects before reading or after a pending file read without starting parsers', async () => {
+  let reads = 0, finishRead;
+  const input = { name: 'canceled.docx', size: 10, arrayBuffer() { reads++; return new Promise(resolve => { finishRead = resolve; }); } };
+  await assert.rejects(extractRubric(input, { signal: AbortSignal.abort() }), { name: 'AbortError' }); assert.equal(reads, 0);
+  const controller = new AbortController(), reading = extractRubric(input, { signal: controller.signal });
+  controller.abort(); finishRead(utf8('invalid document').buffer);
+  await assert.rejects(reading, { name: 'AbortError' }); assert.equal(reads, 1);
+});
+
+test('PDF cancellation kills workers during load, page access, and text reads and removes listeners', async () => {
+  for (const phase of ['load', 'page', 'read']) {
+    const pending = new Promise(() => {}), controller = new AbortController();
+    let readCanceled = 0;
+    const overrides = phase === 'load' ? { promise: pending } : { document: {
+      numPages: 1,
+      getPage: phase === 'page' ? () => pending : async () => ({ cleanup() {}, streamTextContent() { return { getReader() { return { read: () => pending, cancel() { readCanceled++; return Promise.resolve(); } }; } }; } }),
+    } };
+    const { pdfjs, seen } = pdfMock([], overrides);
+    let added = 0, removed = 0;
+    const signal = { get aborted() { return controller.signal.aborted; }, addEventListener(...args) { added++; controller.signal.addEventListener(...args); }, removeEventListener(...args) { removed++; controller.signal.removeEventListener(...args); } };
+    const reading = extractPdfText(utf8('%PDF-test'), pdfjs, { signal });
+    await new Promise(resolve => setImmediate(resolve)); controller.abort();
+    await assert.rejects(reading, { name: 'AbortError' });
+    assert.equal(seen.terminated, 1, phase); assert.equal(seen.destroyed, 1, phase); assert.equal(seen.workerDestroyed, 1, phase);
+    assert.equal(seen.worker.listeners.size, 0, phase); assert.equal(added, 1); assert.equal(removed, 1);
+    assert.equal(readCanceled, phase === 'read' ? 1 : 0);
+  }
+});
+
+test('250 rapid canceled PDF reads leave no live workers or event listeners', async () => {
+  let active = 0, peak = 0, created = 0, terminated = 0; const reads = [], workers = [];
+  let previous;
+  for (let index = 0; index < 250; index++) {
+    previous?.abort(); const controller = new AbortController(); previous = controller;
+    const { pdfjs } = pdfMock([], { promise: new Promise(() => {}) });
+    const Worker = pdfjs.WorkerImpl;
+    pdfjs.WorkerImpl = class extends Worker {
+      constructor(...args) { super(...args); workers.push(this); created++; peak = Math.max(peak, ++active); }
+      terminate() { super.terminate(); active--; terminated++; }
+    };
+    reads.push(extractPdfText(utf8('%PDF-test'), pdfjs, { signal: controller.signal }).then(() => assert.fail('Canceled input resolved'), error => assert.equal(error.name, 'AbortError')));
+  }
+  previous.abort(); await Promise.all(reads);
+  assert.equal(created, 250); assert.equal(terminated, 250); assert.equal(peak, 1); assert.equal(active, 0);
+  assert.ok(workers.every(worker => worker.listeners.size === 0));
 });
 
 test('PDF page limit rejects before extracting any partial document', async () => {
