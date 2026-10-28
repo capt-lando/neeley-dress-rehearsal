@@ -467,7 +467,11 @@ function providerInfo(id = state.config.analysisProvider) {
   return { label: provider?.label || ({ openai: 'OpenAI', hosted: 'AI coach', anthropic: 'Claude', google: 'Gemini' }[id]) || 'AI coach' };
 }
 function openSettings() {
-  if (state.config.hosted) { window.rehearsalAccount?.open(); return; }
+  if (state.config.hosted) {
+    if (window.rehearsalAccount) window.rehearsalAccount.open();
+    else $('account-dialog').showModal();
+    return;
+  }
   setStatus(state.config.coachingViaHost
     ? 'Analyze sends your transcript and preparation text to this Codex conversation.'
     : 'The rehearsal service is unavailable. Reload the published app to reconnect.', state.config.coachingViaHost ? '' : 'error');
@@ -1853,7 +1857,10 @@ window.rehearsalHostedActions = {
 
 $('settings-open').addEventListener('click', openSettings);
 $('rehearse-tab').addEventListener('click', () => showPage('rehearse'));
-$('history-tab').addEventListener('click', () => showPage('history'));
+$('history-tab').addEventListener('click', () => {
+  if (state.config.hosted && !state.config.auth?.signedIn) { openSettings(); return; }
+  showPage('history');
+});
 $('new-rehearsal').addEventListener('click', startNewRehearsal);
 window.addEventListener('hashchange', () => {
   const page = window.location?.hash?.slice(1);
