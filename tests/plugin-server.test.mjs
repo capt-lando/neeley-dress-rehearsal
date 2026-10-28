@@ -186,13 +186,13 @@ test('annotation replacement wording stays a suggestion and never rewrites the s
   store.dispose();
 });
 
-test('impact sentence recognition survives plugin publication as positive feedback', () => {
+test('legacy impact sentence recognition publishes as the unified great sentence category', () => {
   const { store, rehearsalId, revision } = pending();
   const value = feedback();
   value.annotations[0] = { quote: 'Please approve a pilot next term.', category: 'impact',
     assessment: 'strength', comment: 'This direct call to action gives the audience a clear next step.' };
   const result = store.submit(rehearsalId, revision, value);
-  assert.equal(result.report.analysis.annotations[0].category, 'impact');
+  assert.equal(result.report.analysis.annotations[0].category, 'great');
   assert.equal(result.report.analysis.annotations[0].assessment, 'strength');
   assert.equal(result.report.transcript, input.text);
   store.dispose();

@@ -84,7 +84,7 @@ function validateFeedback(feedback, input) {
     fail('INVALID_FEEDBACK', `Repair the unsupported rubric entries: ${unrated.length ? unrated.join(', ') : CRITERIA.join(', ')}. Each needs a finite score from 0 to 5, a nonempty reason, and a real transcript quotation of at most 500 characters. For an absent feature, quote the relevant passage reviewed. No rating has been published; resubmit the same revision.`);
   }
   if (report.analysis.annotations.length !== feedback.annotations.length) {
-    fail('INVALID_FEEDBACK', 'One or more annotations were invalid. Copy each quote exactly from this revision’s transcript (including case, spacing, and punctuation), use thesis/evidence/structure/delivery/clarity/great/impact, a nonempty comment, and the correct positive occurrence number when wording repeats. Keep quotations within 500 characters and remove overlapping highlights. Repair and resubmit the same revision; no partial report has been published.');
+    fail('INVALID_FEEDBACK', 'One or more annotations were invalid. Copy each quote exactly from this revision’s transcript (including case, spacing, and punctuation), use thesis/evidence/structure/delivery/clarity/great, a nonempty comment, and the correct positive occurrence number when wording repeats. Keep quotations within 500 characters and remove overlapping highlights. Repair and resubmit the same revision; no partial report has been published.');
   }
   return report;
 }

@@ -208,12 +208,12 @@ test('a proposed correction implies needs_work only when no recognized assessmen
   assert.equal(explicit.assessment, 'observation');
 });
 
-test('great and impact are always strengths, with exact transcript grounding', () => {
+test('great and the legacy impact alias become canonical great strengths with exact transcript grounding', () => {
   const text = 'Practice turns a good idea into a clear message.';
   for (const category of ['great', 'impact']) {
     for (const assessment of [undefined, 'strength', 'needs_work', 'observation', 'invalid']) {
       const [annotation] = annotationsFor(text, [{ quote: text, category, assessment, comment: 'The concise contrast makes the takeaway memorable.' }]);
-      assert.equal(annotation.category, category);
+      assert.equal(annotation.category, 'great');
       assert.equal(annotation.assessment, 'strength');
       assert.equal(text.slice(annotation.start, annotation.end), text);
     }
@@ -246,11 +246,12 @@ test('coaching prompt requests grounded annotations and preserves the transcript
   assert.equal(payload.transcript, text);
   assert.match(prompt, /"annotations"\s*:/);
   assert.match(prompt, /"quote"\s*:/);
-  assert.match(prompt, /thesis\|evidence\|structure\|delivery\|clarity\|great\|impact/);
+  assert.match(prompt, /"category":"thesis\|evidence\|structure\|delivery\|clarity\|great"/);
   assert.match(prompt, /"assessment":"strength\|needs_work\|observation"/);
-  assert.match(prompt, /use at most one or two when deserved/);
+  assert.match(prompt, /including a punchy takeaway or rhetorical climax/);
+  assert.doesNotMatch(prompt, /\|impact|use at most one or two/);
   assert.match(prompt, /set assessment independently of its topic category/);
-  assert.match(prompt, /Always use strength for great and impact/);
+  assert.match(prompt, /Always use strength for great\./);
   assert.match(prompt, /"suggestion"\s*:/);
   assert.match(prompt, /briefly explain why the selected wording is effective or why it needs work/);
   assert.match(prompt, /a concrete replacement for that selected phrase or sentence/);

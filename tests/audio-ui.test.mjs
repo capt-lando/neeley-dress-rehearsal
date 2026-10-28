@@ -7,7 +7,7 @@ import { createHostedLiveSession } from '../lib/hosted-live.mjs';
 import { createRealtimeSocketFixture } from './fixtures/realtime-socket.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
-import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment } from '../lib/transcript-discussion.mjs';
+import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, annotationCategory } from '../lib/transcript-discussion.mjs';
 import { createRehearsalChat } from '../public/rehearsal-chat.js';
 import { analyzeSpeech, sanitizeAiFeedback, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 const TEST_MODEL_ID = 'gpt-live-transcribe';
@@ -179,7 +179,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
     },
     Option: class { constructor(label, value) { this.label = label; this.value = value; } },
     Blob, Uint8Array, Float32Array, ArrayBuffer, DataView, Math, Date, AbortController, AbortSignal, DOMException,
-    renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, createRehearsalChat,
+    renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, annotationCategory, createRehearsalChat,
     URL: {
       createObjectURL: blob => { const url = `blob:rehearsal-${++blobCounter}`; objectUrls.set(url, blob); return url; },
       revokeObjectURL: value => revoked.push(value),
@@ -1603,7 +1603,7 @@ test('selective annotations render through the ending beyond the former twelve-n
   assert.equal(exportedTranscript(html), text);
 });
 
-test('positive, impact and needs-work passages retain distinct assessment markers in the page and exported transcript', () => {
+test('legacy impact passages merge into great sentences while needs-work markers stay distinct in the page and export', () => {
   const h = harness();
   const sentences = ['A strong example.', 'A great sentence.', 'One room can change a semester.', 'It is sort of useful.', 'An observed claim.', 'A legacy suggestion.'];
   const text = sentences.join(' ');
@@ -1618,11 +1618,18 @@ test('positive, impact and needs-work passages retain distinct assessment marker
   const expected = ['strength', 'strength', 'strength', 'needs_work', 'observation', 'needs_work'];
   const report = { transcript: text, analysis: { method: 'ai', annotations } };
   h.renderAnnotatedTranscript(report);
-  assert.deepEqual(h.createdElements.filter(node => node.tagName === 'MARK').map(node => node.dataset.assessment), expected);
+  const marks = h.createdElements.filter(node => node.tagName === 'MARK');
+  assert.deepEqual(marks.map(node => node.dataset.assessment), expected);
+  assert.equal(marks[2].className, 'annotation-great');
+  assert.equal(h.createdElements.filter(node => node.className === 'annotation-star').length, 2);
   const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
   assert.deepEqual([...exported.querySelectorAll('.transcript mark')].map(mark => mark.dataset.assessment), expected);
   assert.match(exported.querySelector('style').textContent, /mark\[data-assessment="needs_work"\][^{]*\{background:transparent;text-decoration-line:underline/);
-  assert.match(exported.querySelector('style').textContent, /mark\.annotation-impact\{[^}]*animation:annotation-impact-sweep 3\.8s ease-in-out infinite/);
+  assert.match(exported.querySelector('style').textContent, /mark\.annotation-great\{[^}]*box-shadow:[^}]*animation:annotation-great-sweep 8s ease-in-out infinite/);
+  assert.equal(exported.querySelectorAll('.transcript .annotation-great').length, 2);
+  assert.equal(exported.querySelectorAll('.transcript .annotation-star').length, 2);
+  assert.doesNotMatch(html, /annotation-impact|Impact sentence/);
+  assert.doesNotMatch(appHtml, /annotation-impact|Impact sentence/);
   assert.match(exported.querySelector('style').textContent, /prefers-reduced-motion:reduce/);
   assert.equal(exported.querySelector('.legend-needs-work').textContent, 'Needs work');
   assert.equal(exportedTranscript(html), text);
@@ -1695,7 +1702,7 @@ function annotationBubbleFixture() {
   const controller = createAnnotationPopover({ document, window, container, bubble,
     title: get('annotation-bubble-title'), explanation: get('annotation-bubble-explanation'), suggestion: get('annotation-bubble-suggestion'),
     suggestionSection: get('annotation-bubble-revision'), closeButton: get('annotation-bubble-close'), discussButton: get('annotation-bubble-discuss'), onDiscuss: quote => discussed.push(quote),
-    categoryLabel: category => ({ clarity: 'Clarity', great: 'Great sentence', impact: 'Impact sentence' })[category] });
+    categoryLabel: category => ({ clarity: 'Clarity', great: 'Great sentence' })[category] });
   controller.setAnnotations(segments.filter(segment => segment.annotation).map(segment => segment.annotation));
   const fire = (target, type, props = {}) => {
     const event = new domWindow.Event(type, { bubbles: true, cancelable: true }); Object.assign(event, props); target.dispatchEvent(event); return event;
@@ -1734,7 +1741,7 @@ test('annotation bubble explains and suggests wording, selects every fragment, s
   assert.deepEqual(f.discussed, ['It might help students.']);
   assert.equal(f.bubble.hidden, true);
   f.controller.open(3, f.references[2]);
-  assert.equal(f.get('annotation-bubble-title').textContent, 'Impact sentence');
+  assert.equal(f.get('annotation-bubble-title').textContent, 'Great sentence');
   assert.equal(f.get('annotation-bubble-revision').hidden, true);
 });
 

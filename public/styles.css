@@ -77,22 +77,19 @@
 .annotation-structure{background:#e8f1fa;color:#294f72}
 .annotation-delivery{background:#fbf2dc;color:#745411}
 .annotation-clarity{background:#faeaf0;color:#74364d}
-.annotation-great{background:transparent;color:#6e541b}
-.annotation-impact{background:#fff9ee;color:#7b4e2a}
+.annotation-great{background:#fff9ee;color:#6e541b}
 .legend-underline{width:12px;height:9px;display:inline-block;border-bottom:2px solid #c55050}
-.annotated-transcript mark.annotation-great{background:transparent;text-shadow:0 0 7px #d4a13066;animation:annotation-great-glow 3s ease-in-out infinite}
-.annotated-transcript mark.annotation-impact{background:linear-gradient(100deg,transparent 25%,#f3c76922 39%,#f3c76999 50%,#f3c76922 61%,transparent 75%) 180% 0/260% 100% no-repeat;background-color:#fff9ee;text-shadow:0 0 6px #ddb45a40;padding:2px 0;animation:annotation-impact-sweep 3.8s ease-in-out infinite}
+.annotated-transcript mark.annotation-great{background:linear-gradient(100deg,transparent 25%,#f3c76922 39%,#f3c76999 50%,#f3c76922 61%,transparent 75%) 180% 0/260% 100% no-repeat;background-color:#fff9ee;text-shadow:0 0 6px #ddb45a40;box-shadow:0 0 0 1px #d5ae5538,0 0 6px #d8ab4c25;padding:2px 0;animation:annotation-great-sweep 8s ease-in-out infinite}
 .annotated-transcript mark[data-assessment="needs_work"]{background:transparent;text-decoration-line:underline;text-decoration-color:#c55050;text-decoration-thickness:1.5px;text-underline-offset:4px;text-decoration-skip-ink:auto}
 .annotation-star{color:#a7770d;font-size:1.2em;line-height:1}
-.annotation-ref .annotation-star{margin-right:3px;animation:annotation-star-glow 3s ease-in-out infinite}
+.annotation-ref .annotation-star{margin-right:3px;animation:annotation-star-glow 8s ease-in-out infinite}
 .annotation-ref{font-family:var(--sans);font-size:10px;font-weight:700;text-decoration:none;vertical-align:super;line-height:1;padding:0 3px;color:#5f4371;border-radius:3px;white-space:nowrap}
 .annotation-ref:hover{text-decoration:underline;text-underline-offset:2px}
 .annotated-transcript mark[data-annotation-number]{cursor:pointer;transition:filter .18s ease,box-shadow .18s ease}
 .annotated-transcript mark[data-annotation-number]:hover{filter:brightness(.96)}
 .annotated-transcript mark[data-annotation-number]:focus-visible{outline:2px solid #8d6ca6;outline-offset:3px}
 .annotated-transcript mark.is-selected{filter:brightness(.9);box-shadow:0 0 0 2px #9e7bb32b;animation:annotation-select .22s ease-out}
-.annotated-transcript mark.annotation-great.is-selected{filter:none;box-shadow:none;text-shadow:0 0 8px #c58a16b3;animation:none}
-.annotated-transcript mark.annotation-impact.is-selected{filter:brightness(.96);box-shadow:none;animation:annotation-impact-sweep 3.8s ease-in-out infinite}
+.annotated-transcript mark.annotation-great.is-selected{filter:none;box-shadow:0 0 0 1px #c69c3f66,0 0 9px #d8ab4c55;text-shadow:0 0 6px #ddb45a60;animation:annotation-great-sweep 8s ease-in-out infinite}
 .annotated-transcript mark[data-assessment="needs_work"].is-selected{filter:none;box-shadow:none;text-decoration-color:#a52e36;text-decoration-thickness:2.5px;animation:none}
 .annotation-ref.is-selected{color:#3b2052;text-decoration:underline;text-underline-offset:3px}
 .annotation-note-suggestion{margin:5px 0 0;font-size:inherit;color:inherit}
@@ -104,7 +101,6 @@
 .annotation-bubble-heading .icon-button{flex-shrink:0;width:24px;height:24px;font-size:19px}
 .annotation-bubble[data-category="great"] .annotation-bubble-heading h4{color:#86610c}
 .annotation-bubble[data-category="great"] .annotation-bubble-heading h4::before{content:"★";margin-right:6px;color:#a7770d}
-.annotation-bubble[data-category="impact"] .annotation-bubble-heading h4{color:#8a562c}
 .annotation-bubble-content{max-height:min(45vh,310px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .annotation-bubble-content>p{font-size:12px;line-height:1.7;margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .annotation-bubble-revision{border-top:1px solid #ece5f1;margin-top:13px;padding-top:11px}
@@ -112,12 +108,11 @@
 .annotation-bubble-revision blockquote{margin:0;padding:9px 11px;border-left:2px solid #c7b2d6;border-radius:0 5px 5px 0;background:#f7f3fa;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
 .annotation-bubble>.text-button{font-size:10px;margin-top:12px}
 @keyframes annotation-select{from{filter:brightness(1);box-shadow:0 0 0 0 #9e7bb300}to{filter:brightness(.9);box-shadow:0 0 0 2px #9e7bb32b}}
-@keyframes annotation-great-glow{0%,100%{text-shadow:0 0 4px #d4a13040}50%{text-shadow:0 0 8px #d4a13080}}
-@keyframes annotation-impact-sweep{0%,12%{background-position:180% 0}75%,100%{background-position:-80% 0}}
+@keyframes annotation-great-sweep{0%,12%{background-position:180% 0}75%,100%{background-position:-80% 0}}
 @keyframes annotation-star-glow{0%,100%{text-shadow:0 0 2px #e2b54160}50%{text-shadow:0 0 7px #dba120d9;color:#b47c05}}
 @keyframes annotation-bubble-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-@media(prefers-reduced-motion:reduce){.annotated-transcript mark[data-annotation-number]{transition:none}.annotated-transcript mark.is-selected,.annotated-transcript mark.annotation-great,.annotation-ref .annotation-star,.annotation-bubble{animation:none}.annotated-transcript mark.annotation-impact,.annotated-transcript mark.annotation-impact.is-selected{animation:none;background-image:none;text-shadow:none}}
-@media print{.annotation-bubble{display:none!important}.annotated-transcript mark.is-selected{filter:none;box-shadow:none;animation:none}.annotated-transcript mark.annotation-great,.annotation-ref .annotation-star{animation:none;text-shadow:none}.annotated-transcript mark.annotation-impact,.annotated-transcript mark.annotation-impact.is-selected{animation:none;background-image:none;text-shadow:none}}
+@media(prefers-reduced-motion:reduce){.annotated-transcript mark[data-annotation-number]{transition:none}.annotated-transcript mark.is-selected,.annotation-ref .annotation-star,.annotation-bubble{animation:none}.annotated-transcript mark.annotation-great,.annotated-transcript mark.annotation-great.is-selected{animation:none;background-image:none;text-shadow:none}}
+@media print{.annotation-bubble{display:none!important}.annotated-transcript mark.is-selected{filter:none;box-shadow:none;animation:none}.annotation-ref .annotation-star{animation:none;text-shadow:none}.annotated-transcript mark.annotation-great,.annotated-transcript mark.annotation-great.is-selected{animation:none;background-image:none;text-shadow:none;box-shadow:0 0 0 1px #d5ae5538}}
 .annotations-notes{margin:17px 0 0;padding-left:24px;color:#796587;font-size:11px;line-height:1.8}
 .annotations-notes:empty{display:none}
 .annotations-notes>li{padding:7px 8px 7px 4px;margin-bottom:4px;border-bottom:1px solid #eee8f2;scroll-margin-top:30px;overflow-wrap:anywhere}

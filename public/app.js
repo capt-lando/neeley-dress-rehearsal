@@ -3,7 +3,7 @@
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
 import { createRehearsalChat } from './rehearsal-chat.js';
-import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment } from '../lib/transcript-discussion.mjs';
+import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, annotationCategory } from '../lib/transcript-discussion.mjs';
 import { MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -1689,17 +1689,18 @@ function renderReport() {
   markPromptStale();
   if ($('prompt-details').open) loadPromptPreview();
 }
-const ANNOTATION_LABELS = Object.freeze({ thesis: 'Thesis', evidence: 'Evidence', structure: 'Structure', delivery: 'Word habits', clarity: 'Clarity', great: 'Great sentence', impact: 'Impact sentence' });
+const ANNOTATION_LABELS = Object.freeze({ thesis: 'Thesis', evidence: 'Evidence', structure: 'Structure', delivery: 'Word habits', clarity: 'Clarity', great: 'Great sentence' });
 function annotationSegments(text, annotations) {
   const source = String(text || '');
   const accepted = [];
   let end = 0;
   const candidates = Array.isArray(annotations) ? annotations.filter(item => item && typeof item === 'object').slice(0, MAX_TRANSCRIPT_ANNOTATIONS).sort((a, b) => a.start - b.start || a.end - b.end) : [];
   for (const item of candidates) {
-    if (!Object.hasOwn(ANNOTATION_LABELS, item.category) || !Number.isInteger(item.start) || !Number.isInteger(item.end) ||
+    const category = annotationCategory(item);
+    if (!Object.hasOwn(ANNOTATION_LABELS, category) || !Number.isInteger(item.start) || !Number.isInteger(item.end) ||
         item.start < end || item.end <= item.start || item.end > source.length || typeof item.quote !== 'string' ||
         source.slice(item.start, item.end) !== item.quote || typeof item.comment !== 'string' || !item.comment.trim()) continue;
-    accepted.push({ ...item, assessment: annotationAssessment(item), number: accepted.length + 1 });
+    accepted.push({ ...item, category, assessment: annotationAssessment(item), number: accepted.length + 1 });
     end = item.end;
   }
   const segments = [];
@@ -1761,12 +1762,12 @@ function buildAnnotatedDocument(report) {
   const transcript = segments.map(segment => {
     const item = segment.annotation;
     if (!item) return escapeHtml(segment.text);
-    const label = item.category === 'great' ? `Read great sentence annotation ${item.number}` : item.category === 'impact' ? `Read impact sentence annotation ${item.number}` : `Read annotation ${item.number}`;
+    const label = item.category === 'great' ? `Read great sentence annotation ${item.number}` : `Read annotation ${item.number}`;
     return `<mark class="annotation-${item.category}" data-assessment="${item.assessment}" aria-describedby="note-${item.number}">${escapeHtml(segment.text)}</mark><a class="annotation-ref" href="#note-${item.number}" aria-label="${label}">${item.category === 'great' ? star : ''}[${item.number}]</a>`;
   }).join('');
   const notes = annotations.map(item => `<li class="annotation-${item.category}" id="note-${item.number}"><strong>${escapeHtml(ANNOTATION_LABELS[item.category])}:</strong> ${escapeHtml(item.comment)}${typeof item.suggestion === 'string' && item.suggestion.trim() ? `<p class="annotation-note-suggestion"><strong>Suggested wording:</strong> ${escapeHtml(item.suggestion.trim())}</p>` : ''}</li>`).join('');
   const legend = Object.entries(ANNOTATION_LABELS).map(([category, label]) => `<span class="annotation-${category}">${category === 'great' ? `${star} ` : ''}${escapeHtml(label)}</span>`).join(' ') + ' <span class="legend-needs-work">Needs work</span>';
-  const markerStyles = `.transcript mark{box-decoration-break:clone;-webkit-box-decoration-break:clone}.annotation-great{background:transparent}.annotation-impact{background:#fff9ee}.transcript mark.annotation-great{text-shadow:0 0 7px #d4a13066;animation:annotation-great-glow 3s ease-in-out infinite}.transcript .annotation-star{animation:annotation-star-glow 3s ease-in-out infinite}.transcript mark.annotation-impact{background:linear-gradient(100deg,transparent 25%,#f3c76922 39%,#f3c76999 50%,#f3c76922 61%,transparent 75%) 180% 0/260% 100% no-repeat;background-color:#fff9ee;text-shadow:0 0 6px #ddb45a40;padding:2px 0;animation:annotation-impact-sweep 3.8s ease-in-out infinite}.transcript mark[data-assessment="needs_work"],.legend-needs-work{background:transparent;text-decoration-line:underline;text-decoration-color:#c55050;text-decoration-thickness:1.5px;text-underline-offset:4px}.annotation-note-suggestion{margin:6px 0 0;color:inherit}@keyframes annotation-great-glow{0%,100%{text-shadow:0 0 4px #d4a13040}50%{text-shadow:0 0 8px #d4a13080}}@keyframes annotation-star-glow{0%,100%{text-shadow:0 0 2px #e2b54160}50%{text-shadow:0 0 7px #dba120d9;color:#b47c05}}@keyframes annotation-impact-sweep{0%,12%{background-position:180% 0}75%,100%{background-position:-80% 0}}@media(prefers-reduced-motion:reduce){.transcript mark.annotation-great,.transcript .annotation-star{animation:none}.transcript mark.annotation-impact{animation:none;background-image:none;text-shadow:none}}@media print{.transcript mark.annotation-great,.transcript .annotation-star{animation:none;text-shadow:none}.transcript mark.annotation-impact{animation:none;background-image:none;text-shadow:none}}`;
+  const markerStyles = `.transcript mark{box-decoration-break:clone;-webkit-box-decoration-break:clone}.annotation-great{background:#fff9ee}.transcript .annotation-star{animation:annotation-star-glow 8s ease-in-out infinite}.transcript mark.annotation-great{background:linear-gradient(100deg,transparent 25%,#f3c76922 39%,#f3c76999 50%,#f3c76922 61%,transparent 75%) 180% 0/260% 100% no-repeat;background-color:#fff9ee;text-shadow:0 0 6px #ddb45a40;box-shadow:0 0 0 1px #d5ae5538,0 0 6px #d8ab4c25;padding:2px 0;animation:annotation-great-sweep 8s ease-in-out infinite}.transcript mark[data-assessment="needs_work"],.legend-needs-work{background:transparent;text-decoration-line:underline;text-decoration-color:#c55050;text-decoration-thickness:1.5px;text-underline-offset:4px}.annotation-note-suggestion{margin:6px 0 0;color:inherit}@keyframes annotation-star-glow{0%,100%{text-shadow:0 0 2px #e2b54160}50%{text-shadow:0 0 7px #dba120d9;color:#b47c05}}@keyframes annotation-great-sweep{0%,12%{background-position:180% 0}75%,100%{background-position:-80% 0}}@media(prefers-reduced-motion:reduce){.transcript .annotation-star{animation:none}.transcript mark.annotation-great{animation:none;background-image:none;text-shadow:none}}@media print{.transcript .annotation-star{animation:none;text-shadow:none}.transcript mark.annotation-great{animation:none;background-image:none;text-shadow:none;box-shadow:0 0 0 1px #d5ae5538}}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Dress Rehearsal — annotated transcript</title><style>body{font:16px/1.65 system-ui,sans-serif;color:#29262d;max-width:850px;margin:48px auto;padding:0 24px}h1{font-size:28px;line-height:1.2}p{color:#655f6b}.legend{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.legend>span,mark{padding:2px 5px;border-radius:4px;color:inherit}.transcript{white-space:pre-wrap;font-size:19px;line-height:1.9;overflow-wrap:anywhere}.annotation-thesis{background:#f0e9f7}.annotation-evidence{background:#e8f4ea}.annotation-structure{background:#e8f1fa}.annotation-delivery{background:#fbf2dc}.annotation-clarity{background:#faeaf0}.annotation-star{color:#a7770d;font-size:1.2em;line-height:1}.annotation-ref .annotation-star{margin-right:3px}.annotation-ref{font-size:11px;vertical-align:super;color:#5d347c;text-decoration:none;margin:0 3px;white-space:nowrap}li{padding:8px;margin:0 0 4px;overflow-wrap:anywhere}footer{font-size:13px;color:#655f6b;margin-top:32px}@media print{body{margin:0;max-width:none}mark,.legend>span,li,.annotation-star{print-color-adjust:exact;-webkit-print-color-adjust:exact}}${markerStyles}</style></head><body><h1>${annotations.length ? 'Full annotated transcript' : 'Full transcript'}</h1><p>${annotations.length ? 'AI coaching notes on selected passages. Stars recognize great sentences.' : 'Original transcript. No grounded AI coaching annotations were available.'} The text below preserves the analyzed transcript; suggestions are separate.</p><div class="legend" aria-label="Annotation categories">${legend}</div><div class="transcript">${transcript}</div>${notes ? `<h2>Coaching notes</h2><ol>${notes}</ol>` : ''}<footer>Dress Rehearsal · Neeley presentation practice. Annotations are coaching suggestions, not an academic grade. Speech recognition can make mistakes.</footer></body></html>`;
 }
 async function downloadAnnotatedTranscript() {
