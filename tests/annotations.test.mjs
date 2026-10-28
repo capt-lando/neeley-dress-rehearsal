@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeSpeech, buildAnalysisPrompt } from '../lib/analysis.mjs';
+import { MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
+import { readFile } from 'node:fs/promises';
 
 function annotationsFor(text, annotations) {
   return analyzeSpeech({
@@ -92,17 +94,142 @@ test('overlapping and duplicate annotations never produce overlapping highlight 
   assert.equal(new Set(annotations.map(item => `${item.start}:${item.end}`)).size, annotations.length);
 });
 
-test('annotation count is bounded and every returned range points inside the transcript', () => {
+test('annotations continue beyond twelve highlights through the end of a longer transcript', () => {
   const sentences = Array.from({ length: 20 }, (_, index) => `Distinct passage number ${index} ends here.`);
   const text = sentences.join('\n');
   const annotations = annotationsFor(text, sentences.map(quote => ({
     quote, category: 'delivery', comment: 'Try saying this sentence with a deliberate transition.',
   })));
-  assert.equal(annotations.length, 12);
+  assert.equal(annotations.length, sentences.length);
+  assert.equal(annotations.at(-1).quote, sentences.at(-1));
   for (const annotation of annotations) {
     assert.ok(annotation.start >= 0 && annotation.end <= text.length);
     assert.equal(text.slice(annotation.start, annotation.end), annotation.quote);
   }
+});
+
+test('the safety ceiling retains grounded highlights across the complete transcript', () => {
+  const sentences = Array.from({ length: MAX_TRANSCRIPT_ANNOTATIONS + 40 }, (_, index) => `Distinct passage number ${index} ends here.`);
+  const text = sentences.join('\n');
+  const annotations = annotationsFor(text, sentences.map(quote => ({
+    quote, category: 'thesis', comment: 'Explain how this supports the central proposal.',
+  })));
+  assert.equal(annotations.length, MAX_TRANSCRIPT_ANNOTATIONS);
+  assert.equal(annotations[0].quote, sentences[0]);
+  assert.equal(annotations.at(-1).quote, sentences.at(-1));
+  for (let index = 0; index < annotations.length; index++) {
+    const item = annotations[index];
+    assert.equal(text.slice(item.start, item.end), item.quote);
+    if (index > 0) assert.ok(annotations[index - 1].end <= item.start);
+  }
+});
+
+test('later repeated passages stay at their reviewed occurrences without automatically highlighting every repetition', () => {
+  const quote = 'We should expand tutoring.';
+  const text = Array(250).fill(quote).join('\n');
+  const annotations = annotationsFor(text, [
+    { quote, category: 'thesis', comment: 'The opening makes the proposal clear.', occurrence: 1 },
+    { quote, category: 'clarity', comment: 'Develop the proposal with a concrete example here.', occurrence: 125 },
+    { quote, category: 'great', comment: 'The ending restates the proposal in a concise sentence.', occurrence: 250 },
+    { quote, category: 'great', comment: 'A nonexistent occurrence.', occurrence: 251 },
+    { quote, category: 'great', comment: 'An unsafe occurrence.', occurrence: Number.MAX_SAFE_INTEGER + 1 },
+  ]);
+  assert.equal(annotations.length, 3);
+  assert.deepEqual(annotations.map(item => item.start), [0, 124 * (quote.length + 1), text.lastIndexOf(quote)]);
+  assert.equal(annotations.at(-1).category, 'great');
+});
+
+test('valid later notes survive a prefix of unusable candidates', () => {
+  const text = 'An opening. A middle section. A specific conclusion.';
+  const annotations = annotationsFor(text, [
+    ...Array.from({ length: 120 }, () => ({ quote: 'Invented words.', category: 'thesis', comment: 'Not present.' })),
+    { quote: 'A specific conclusion.', category: 'great', comment: 'The ending concisely restates the proposal.' },
+  ]);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].start, text.indexOf('A specific conclusion.'));
+});
+
+test('great sentences require exact spoken evidence and do not turn unmarked text into praise', () => {
+  const text = 'Our proposal gives every student a place to practice. We can work on the details next.';
+  const annotations = annotationsFor(text, [
+    { quote: 'Our proposal gives every student a place to practice.', category: 'great', comment: 'This sentence ties the proposal directly to its benefit for students.' },
+    { quote: 'Every student will earn an A.', category: 'great', comment: 'Invented praise.' },
+  ]);
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].category, 'great');
+  assert.equal(annotations[0].end, text.indexOf(' We can'));
+});
+
+test('suggested wording stays separate from grounded evidence and the original transcript', () => {
+  const text = 'The plan is, like, flexible enough for different schedules.';
+  const suggestion = 'The plan can accommodate different schedules.';
+  const [annotation] = annotationsFor(text, [{
+    quote: text, category: 'clarity', comment: 'Removing the filler makes the benefit easier to follow.', suggestion,
+  }]);
+  assert.equal(annotation.suggestion, suggestion);
+  assert.equal(annotation.quote, text);
+  assert.equal(text.slice(annotation.start, annotation.end), text);
+  assert.ok(!text.includes(suggestion));
+  assert.deepEqual(annotationsFor(text, [{
+    quote: suggestion, category: 'clarity', comment: 'A proposed rewrite cannot become spoken evidence.', suggestion: text,
+  }]), []);
+});
+
+test('legacy annotations keep their shape and invalid or empty suggestions are ignored', () => {
+  const text = 'Our proposal gives every student a place to practice.';
+  const base = { quote: text, category: 'thesis', comment: 'This sentence clearly states the student benefit.' };
+  const expected = { ...base, start: 0, end: text.length };
+  assert.deepEqual(annotationsFor(text, [base]), [expected]);
+  for (const suggestion of [undefined, null, '', '   ', {}, [], 7, true]) {
+    assert.deepEqual(annotationsFor(text, [{ ...base, suggestion }]), [expected]);
+  }
+});
+
+test('explicit assessments distinguish strengths, weaknesses and observations in any topic category', () => {
+  const text = 'The proposal improves student access.';
+  for (const category of ['thesis', 'evidence', 'structure', 'delivery', 'clarity']) {
+    for (const assessment of ['strength', 'needs_work', 'observation']) {
+      const [annotation] = annotationsFor(text, [{ quote: text, category, assessment, comment: 'An explanation of this passage.' }]);
+      assert.equal(annotation.assessment, assessment);
+    }
+  }
+});
+
+test('a proposed correction implies needs_work only when no recognized assessment was supplied', () => {
+  const text = 'The plan is flexible.';
+  const base = { quote: text, category: 'clarity', comment: 'Identify what makes it flexible.' };
+  for (const assessment of [undefined, null, '', 'bad', {}, [], 7]) {
+    const [annotation] = annotationsFor(text, [{ ...base, assessment }]);
+    assert.ok(!Object.hasOwn(annotation, 'assessment'));
+    const [corrected] = annotationsFor(text, [{ ...base, assessment, suggestion: 'The plan could accommodate different schedules.' }]);
+    assert.equal(corrected.assessment, 'needs_work');
+  }
+  const [explicit] = annotationsFor(text, [{ ...base, assessment: 'observation', suggestion: 'An optional alternative phrasing.' }]);
+  assert.equal(explicit.assessment, 'observation');
+});
+
+test('great and impact are always strengths, with exact transcript grounding', () => {
+  const text = 'Practice turns a good idea into a clear message.';
+  for (const category of ['great', 'impact']) {
+    for (const assessment of [undefined, 'strength', 'needs_work', 'observation', 'invalid']) {
+      const [annotation] = annotationsFor(text, [{ quote: text, category, assessment, comment: 'The concise contrast makes the takeaway memorable.' }]);
+      assert.equal(annotation.category, category);
+      assert.equal(annotation.assessment, 'strength');
+      assert.equal(text.slice(annotation.start, annotation.end), text);
+    }
+  }
+  assert.deepEqual(annotationsFor(text, [{ quote: 'Practice guarantees success.', category: 'impact', comment: 'Invented takeaway.' }]), []);
+});
+
+test('suggested wording is bounded plain text without being executed or treated as evidence', () => {
+  const text = 'We can improve the plan.';
+  const base = { quote: text, category: 'clarity', comment: 'Name the improvement.' };
+  const [bounded] = annotationsFor(text, [{ ...base, suggestion: 'x'.repeat(800) }]);
+  assert.equal(bounded.suggestion.length, 500);
+  const inert = '<script>throw new Error("not executable")</script>';
+  const [annotation] = annotationsFor(text, [{ ...base, suggestion: inert }]);
+  assert.equal(annotation.suggestion, inert);
+  assert.equal(annotation.quote, text);
 });
 
 test('local reports and unusable AI annotations provide an empty annotation list', () => {
@@ -119,5 +246,39 @@ test('coaching prompt requests grounded annotations and preserves the transcript
   assert.equal(payload.transcript, text);
   assert.match(prompt, /"annotations"\s*:/);
   assert.match(prompt, /"quote"\s*:/);
-  assert.match(prompt, /thesis\|evidence\|structure\|delivery\|clarity/);
+  assert.match(prompt, /thesis\|evidence\|structure\|delivery\|clarity\|great\|impact/);
+  assert.match(prompt, /"assessment":"strength\|needs_work\|observation"/);
+  assert.match(prompt, /use at most one or two when deserved/);
+  assert.match(prompt, /set assessment independently of its topic category/);
+  assert.match(prompt, /Always use strength for great and impact/);
+  assert.match(prompt, /"suggestion"\s*:/);
+  assert.match(prompt, /briefly explain why the selected wording is effective or why it needs work/);
+  assert.match(prompt, /a concrete replacement for that selected phrase or sentence/);
+  assert.match(prompt, /For effective wording, leave suggestion empty or omit it/);
+  assert.match(prompt, /Never invent supporting facts, statistics, examples, or commitments in a rewrite/);
+  assert.match(prompt, /Suggestions are proposed edits, never transcript quotations or evidence/);
+});
+
+test('annotation guidance scales with speech length and remains selective across the full speech', () => {
+  const short = buildAnalysisPrompt({ text: 'We should expand tutoring. Please approve the pilot.' });
+  const longText = `${'We should expand tutoring for everyone. '.repeat(500)}Final sentence of the speech.`;
+  const long = buildAnalysisPrompt({ text: longText });
+  assert.match(short, /length-aware annotation budget for this transcript is up to 6 useful highlights/);
+  assert.match(long, /length-aware annotation budget for this transcript is up to 48 useful highlights/);
+  assert.match(long, /not a quota or a minimum/);
+  assert.match(long, /opening, each substantive body section, and the ending/);
+  assert.match(long, /phrases that connect back to the actual thesis/);
+  assert.match(long, /Leave other text unmarked/);
+  assert.match(long, /Keep each annotation comment under 25 words/);
+  assert.match(long, /never manufacture praise or require a star/);
+  assert.match(long, /count occurrences throughout the complete transcript/);
+  assert.doesNotMatch(long, /up to 12 useful/);
+  const payload = JSON.parse(long.slice(long.lastIndexOf('DATA_JSON:\n') + 'DATA_JSON:\n'.length));
+  assert.equal(payload.transcript, longText);
+});
+
+test('the hosted coaching policy matches the editable local policy', async () => {
+  const local = await readFile(new URL('../lib/coaching-prompt.md', import.meta.url), 'utf8');
+  const hosted = JSON.parse(await readFile(new URL('../supabase/functions/_shared/coaching-policy.json', import.meta.url), 'utf8'));
+  assert.equal(hosted.text, local);
 });

@@ -182,7 +182,7 @@
       </section>
       <section class="annotation-section" aria-labelledby="annotation-title">
         <div class="annotation-header"><div><h3 id="annotation-title">Your transcript</h3><p id="annotation-status" class="support-text" role="status">Your words appear here as you record. Press Analyze rehearsal when you are ready for annotations.</p></div><button class="secondary-button small-button" id="download-transcript" type="button" disabled>Download transcript <span aria-hidden="true">↓</span></button></div>
-        <ul class="annotation-legend" id="annotation-legend" aria-label="Highlight categories" hidden><li><span class="legend-dot annotation-thesis" aria-hidden="true"></span>Thesis</li><li><span class="legend-dot annotation-evidence" aria-hidden="true"></span>Evidence</li><li><span class="legend-dot annotation-structure" aria-hidden="true"></span>Structure</li><li><span class="legend-dot annotation-delivery" aria-hidden="true"></span>Delivery</li><li><span class="legend-dot annotation-clarity" aria-hidden="true"></span>Clarity</li></ul>
+        <ul class="annotation-legend" id="annotation-legend" aria-label="Annotation categories and markers" hidden><li><span class="legend-dot annotation-thesis" aria-hidden="true"></span>Thesis</li><li><span class="legend-dot annotation-evidence" aria-hidden="true"></span>Evidence</li><li><span class="legend-dot annotation-structure" aria-hidden="true"></span>Structure</li><li><span class="legend-dot annotation-delivery" aria-hidden="true"></span>Delivery</li><li><span class="legend-dot annotation-clarity" aria-hidden="true"></span>Clarity</li><li><span class="annotation-star" aria-hidden="true">★</span>Great sentence</li><li><span class="legend-dot annotation-impact" aria-hidden="true"></span>Impact sentence</li><li><span class="legend-underline" aria-hidden="true"></span>Needs work</li></ul>
         <div class="annotated-transcript" id="annotated-transcript" data-empty="true" role="region" aria-label="Rehearsal transcript" tabindex="0">Your next presentation starts here. Record a take to see your words.</div>
         <ol class="annotations-notes" id="annotations-notes" aria-label="Annotation notes"></ol>
       </section>
@@ -245,6 +245,12 @@
   <footer class="site-footer">
     <span class="creator-credit">Created by:<br><strong>Landon Moustirats</strong></span>
   </footer>
+
+  <aside id="annotation-bubble" class="annotation-bubble" role="dialog" aria-modal="false" aria-labelledby="annotation-bubble-title" aria-describedby="annotation-bubble-explanation" tabindex="-1" hidden>
+    <div class="annotation-bubble-heading"><h4 id="annotation-bubble-title">Coaching note</h4><button id="annotation-bubble-close" class="icon-button" type="button" aria-label="Close coaching note">×</button></div>
+    <div class="annotation-bubble-content"><p id="annotation-bubble-explanation"></p><div id="annotation-bubble-revision" class="annotation-bubble-revision" hidden><p class="annotation-bubble-label">Suggested wording</p><blockquote id="annotation-bubble-suggestion"></blockquote></div></div>
+    <button id="annotation-bubble-discuss" class="text-button" type="button">Discuss sentence <span aria-hidden="true">↗</span></button>
+  </aside>
 
   <dialog id="cancel-restart-dialog" aria-labelledby="cancel-restart-title" aria-describedby="cancel-restart-description">
     <div class="dialog-heading"><h2 id="cancel-restart-title">Cancel and start over?</h2></div>

@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { parseHTML } from 'linkedom';
 import { createHostedLiveSession } from '../lib/hosted-live.mjs';
 import { createRealtimeSocketFixture } from './fixtures/realtime-socket.mjs';
 import { createProcessingProgress } from '../lib/processing-progress.mjs';
 import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
-import { renderDiscussableTranscript, selectedTranscriptQuote } from '../lib/transcript-discussion.mjs';
+import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment } from '../lib/transcript-discussion.mjs';
 import { createRehearsalChat } from '../public/rehearsal-chat.js';
-import { analyzeSpeech, sanitizeAiFeedback } from '../lib/analysis-core.mjs';
+import { analyzeSpeech, sanitizeAiFeedback, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 const TEST_MODEL_ID = 'gpt-live-transcribe';
 
 function inspectWav(wav) {
@@ -35,7 +36,7 @@ const declarations = executableAppSource.slice(0, listenerStart);
 class Element {
   constructor() {
     this.value = ''; this.textContent = ''; this.children = []; this.options = [];
-    this.style = {}; this.dataset = {}; this.attributes = new Map(); this.listeners = new Map();
+    this.style = { setProperty(name, value) { this[name] = value; } }; this.dataset = {}; this.attributes = new Map(); this.listeners = new Map();
     this.hidden = false; this.disabled = false; this.open = false; this.checked = false;
     this.currentTime = 0; this.duration = NaN; this.paused = true; this.ended = false;
     this.scrollTop = 0; this.clientHeight = 300; this.offsetTop = 0; this.offsetHeight = 20;
@@ -147,7 +148,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
-    createProcessingProgress, validateAudioUploadHeader: validateUploadHeader,
+    createProcessingProgress, validateAudioUploadHeader: validateUploadHeader, MAX_TRANSCRIPT_ANNOTATIONS,
     document: {
       getElementById: id => {
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
@@ -178,7 +179,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
     },
     Option: class { constructor(label, value) { this.label = label; this.value = value; } },
     Blob, Uint8Array, Float32Array, ArrayBuffer, DataView, Math, Date, AbortController, AbortSignal, DOMException,
-    renderDiscussableTranscript, selectedTranscriptQuote, createRehearsalChat,
+    renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, createRehearsalChat,
     URL: {
       createObjectURL: blob => { const url = `blob:rehearsal-${++blobCounter}`; objectUrls.set(url, blob); return url; },
       revokeObjectURL: value => revoked.push(value),
@@ -255,6 +256,39 @@ test('paragraph selection survives the click after pointerup and excludes annota
   h.attachTranscriptSelection({ type: 'click', target });
   assert.equal(referencesRemoved, true);
   assert.deepEqual(quotes, [quote], 'the follow-up click must not replace a selected paragraph with one sentence');
+});
+
+test('highlight and star activation opens coaching once while plain sentences and dragged selections still attach to chat', async () => {
+  const h = harness(), text = 'A clear claim. Another point.';
+  h.renderAnnotatedTranscript({ transcript: text, analysis: { method: 'ai', annotations: [annotation(text, 'A clear claim.', 'great')] } });
+  const mark = h.createdElements.find(node => node.tagName === 'MARK');
+  const reference = h.createdElements.find(node => node.className === 'annotation-ref');
+  const firstSentence = h.get('annotated-transcript').children[0];
+  const lastSentence = h.get('annotated-transcript').children.at(-1);
+  const openings = [], quotes = [];
+  h.state.annotationPopover.open = (number, trigger) => openings.push({ number, trigger });
+  h.state.chat = { selectQuote: quote => quotes.push(quote) };
+  const targetFor = trigger => ({ closest: selector => selector === '[data-annotation-number]' ? trigger : selector === '.transcript-sentence' ? firstSentence : null });
+  let prevented = 0;
+  await h.emitElementEvent('annotated-transcript', 'click', { target: targetFor(mark), preventDefault() { prevented++; } });
+  await h.emitElementEvent('annotated-transcript', 'click', { target: targetFor(reference), preventDefault() { prevented++; } });
+  assert.equal(openings.length, 2); assert.deepEqual(quotes, []);
+  for (const key of ['Enter', ' ']) {
+    const target = targetFor(reference);
+    await h.emitElementEvent('annotated-transcript', 'keydown', { key, target, preventDefault() { prevented++; } });
+    await h.emitElementEvent('annotated-transcript', 'keyup', { key, target, preventDefault() { prevented++; } });
+  }
+  assert.equal(openings.length, 4, 'keyup must not reopen or toggle the bubble after keydown');
+  assert.ok(prevented >= 6, 'keyboard activation suppresses native link clicks and scrolling');
+  await h.emitElementEvent('annotated-transcript', 'click', { target: { closest: selector => selector === '.transcript-sentence' ? lastSentence : null } });
+  assert.deepEqual(quotes, ['Another point.']);
+  const fragment = { textContent: text, querySelectorAll: () => [] };
+  h.window.getSelection = () => ({ isCollapsed: false, rangeCount: 1, anchorNode: firstSentence, focusNode: lastSentence, getRangeAt: () => ({ cloneContents: () => fragment }) });
+  await h.emitElementEvent('annotated-transcript', 'pointerup', { target: targetFor(mark) });
+  h.window.getSelection = () => ({ isCollapsed: true });
+  await h.emitElementEvent('annotated-transcript', 'click', { target: targetFor(mark), preventDefault() {} });
+  assert.equal(openings.length, 4, 'a click following a text selection must not open coaching');
+  assert.deepEqual(quotes, ['Another point.', text]);
 });
 const inputDevice = (deviceId, label = '') => ({ kind: 'audioinput', deviceId, label });
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
@@ -1394,17 +1428,11 @@ function annotation(text, quote, category = 'thesis', comment = 'Review this pas
   return { quote, category, comment, start, end: start + quote.length };
 }
 
-function decodeHtmlText(text) {
-  const entities = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
-  return text.replace(/&(?:amp|lt|gt|quot|#39);/g, entity => entities[entity]);
-}
-
-function exportedTranscript(document) {
-  const match = document.match(/<div class="transcript">([\s\S]*?)<\/div>/);
-  assert.ok(match, 'download must contain the transcript');
-  return decodeHtmlText(match[1]
-    .replace(/<a class="annotation-ref"[^>]*>\[\d+\]<\/a>/g, '')
-    .replace(/<\/?mark\b[^>]*>/g, ''));
+function exportedTranscript(html) {
+  const transcript = parseHTML(html).document.querySelector('.transcript');
+  assert.ok(transcript, 'download must contain the transcript');
+  transcript.querySelectorAll('.annotation-ref').forEach(reference => reference.remove());
+  return transcript.textContent;
 }
 
 test('hostile report fields, rubric names and saved captions never reach HTML sinks', async () => {
@@ -1547,6 +1575,213 @@ test('annotation validation refuses mismatched ranges, unknown categories and ov
   const html = h.buildAnnotatedDocument({ transcript: text, analysis: { method: 'ai', annotations: candidates } });
   assert.equal((html.match(/<mark\b/g) || []).length, 2);
   assert.ok(!html.includes('Invented quote') && !html.includes('Duplicate excerpt.'));
+});
+
+test('selective annotations render through the ending beyond the former twelve-note and hundred-candidate limits', () => {
+  const h = harness(), quote = 'Practice makes ideas clearer.';
+  const paragraphs = Array.from({ length: 121 }, (_, index) => `${quote} Unmarked context for point ${index + 1}.\n`);
+  const text = paragraphs.join('');
+  let start = 0;
+  const annotations = paragraphs.map((paragraph, index) => {
+    const item = { quote, start, end: start + quote.length, category: index === paragraphs.length - 1 ? 'great' : 'thesis', comment: `Point ${index + 1} connects to the central idea.` };
+    start += paragraph.length;
+    return item;
+  });
+  const report = { transcript: text, analysis: { method: 'ai', annotations } };
+  h.renderAnnotatedTranscript(report);
+  assert.equal(h.get('annotations-notes').children.length, paragraphs.length);
+  const marks = h.createdElements.filter(node => node.tagName === 'MARK');
+  assert.equal(marks.length, paragraphs.length);
+  assert.equal(marks.at(-1).id, 'annotation-quote-121');
+  assert.equal(marks.at(-1).className, 'annotation-great');
+  const segments = h.annotationSegments(text, annotations);
+  assert.equal(segments.map(segment => segment.text).join(''), text);
+  assert.equal(segments.filter(segment => !segment.annotation).map(segment => segment.text).join(''), paragraphs.map(paragraph => paragraph.slice(quote.length)).join(''));
+  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
+  assert.equal(exported.querySelectorAll('.transcript mark').length, paragraphs.length);
+  assert.equal(exported.querySelector('.transcript mark:last-of-type').className, 'annotation-great');
+  assert.equal(exportedTranscript(html), text);
+});
+
+test('positive, impact and needs-work passages retain distinct assessment markers in the page and exported transcript', () => {
+  const h = harness();
+  const sentences = ['A strong example.', 'A great sentence.', 'One room can change a semester.', 'It is sort of useful.', 'An observed claim.', 'A legacy suggestion.'];
+  const text = sentences.join(' ');
+  const categories = ['evidence', 'great', 'impact', 'clarity', 'thesis', 'structure'];
+  const annotations = sentences.map((sentence, index) => annotation(text, sentence, categories[index]));
+  Object.assign(annotations[0], { assessment: 'strength', suggestion: 'Keep this example.' });
+  Object.assign(annotations[1], { assessment: 'needs_work' });
+  Object.assign(annotations[2], { assessment: 'needs_work' });
+  Object.assign(annotations[3], { assessment: 'needs_work', suggestion: 'It gives students a reliable place to study.' });
+  Object.assign(annotations[4], { assessment: 'observation' });
+  Object.assign(annotations[5], { suggestion: 'A concrete opening.' });
+  const expected = ['strength', 'strength', 'strength', 'needs_work', 'observation', 'needs_work'];
+  const report = { transcript: text, analysis: { method: 'ai', annotations } };
+  h.renderAnnotatedTranscript(report);
+  assert.deepEqual(h.createdElements.filter(node => node.tagName === 'MARK').map(node => node.dataset.assessment), expected);
+  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
+  assert.deepEqual([...exported.querySelectorAll('.transcript mark')].map(mark => mark.dataset.assessment), expected);
+  assert.match(exported.querySelector('style').textContent, /mark\[data-assessment="needs_work"\][^{]*\{background:transparent;text-decoration-line:underline/);
+  assert.match(exported.querySelector('style').textContent, /mark\.annotation-impact\{[^}]*animation:annotation-impact-sweep 3\.8s ease-in-out infinite/);
+  assert.match(exported.querySelector('style').textContent, /prefers-reduced-motion:reduce/);
+  assert.equal(exported.querySelector('.legend-needs-work').textContent, 'Needs work');
+  assert.equal(exportedTranscript(html), text);
+});
+
+test('great sentences show an accessible star and explanatory note without adding icon text to selected quotes', () => {
+  const h = harness(), text = '  Our claim deserves evidence.\n\nCafé volunteers turn small donations into meals.  ';
+  const quote = 'Café volunteers turn small donations into meals.';
+  const comment = 'This concrete image makes the benefit easy to understand.';
+  const annotations = [annotation(text, quote, 'great', comment)];
+  const report = { transcript: text, analysis: { method: 'ai', annotations } };
+  h.renderAnnotatedTranscript(report);
+  assert.equal(h.get('annotation-legend').hidden, false);
+  assert.equal(elementText(h.get('annotations-notes').children[0]), `Great sentence: ${comment}`);
+  const { document } = parseHTML('<html><body><div id="transcript"></div></body></html>');
+  const container = document.getElementById('transcript');
+  renderDiscussableTranscript({ document, container, text, segments: h.annotationSegments(text, annotations) });
+  const reference = container.querySelector('.annotation-ref'), star = reference.querySelector('.annotation-star');
+  assert.equal(star.textContent, '★');
+  assert.equal(star.getAttribute('aria-hidden'), 'true');
+  assert.equal(reference.getAttribute('aria-label'), 'Read great sentence annotation 1');
+  assert.equal(reference.getAttribute('href'), '#annotation-note-1');
+  assert.equal(container.querySelector('mark').getAttribute('aria-describedby'), 'annotation-note-1');
+  assert.equal(container.querySelector('mark').parentElement.dataset.quote, quote);
+  assert.equal(selectedTranscriptQuote(container, { isCollapsed: false, rangeCount: 1, anchorNode: container.firstChild, focusNode: container.lastChild,
+    getRangeAt: () => ({ cloneContents: () => container.cloneNode(true) }) }), text.trim());
+  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
+  assert.equal(exported.querySelector('.transcript .annotation-star').textContent, '★');
+  assert.equal(exported.querySelector('.transcript .annotation-ref').getAttribute('aria-label'), 'Read great sentence annotation 1');
+  assert.equal(exported.querySelector('#note-1').textContent, `Great sentence: ${comment}`);
+  assert.equal(exportedTranscript(html), text);
+  assert.equal(parseHTML(appHtml).document.querySelector('#annotation-legend .annotation-star').parentElement.textContent, '★Great sentence');
+});
+
+test('great sentence annotations keep hostile quote and encouragement content inert in the page and download', () => {
+  const h = harness(), text = '<img src=x onerror="alert(1)"> Makes a vivid point.';
+  const comment = '</li><script>alert("praise")</script> & keep this example.';
+  const report = { transcript: text, analysis: { method: 'ai', annotations: [annotation(text, text, 'great', comment)] } };
+  h.renderAnnotatedTranscript(report);
+  assert.equal(elementText(h.get('annotations-notes').children[0]), `Great sentence: ${comment}`);
+  assert.ok(h.createdElements.every(node => !['SCRIPT', 'IMG'].includes(node.tagName)));
+  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
+  assert.equal(exported.querySelectorAll('script,img').length, 0);
+  assert.equal(exported.querySelector('#note-1').textContent, `Great sentence: ${comment}`);
+  assert.equal(exportedTranscript(html), text);
+});
+
+function annotationBubbleFixture() {
+  const h = harness(), { document, window: domWindow } = parseHTML(appHtml);
+  const container = document.getElementById('annotated-transcript'), bubble = document.getElementById('annotation-bubble');
+  const text = 'Our plan is sort of useful. It might help students. Volunteers turn donations into meals. One shared room can change a semester.';
+  const suggestion = 'Our plan gives students a reliable place to study. <script>example</script>';
+  const annotations = [
+    { ...annotation(text, 'Our plan is sort of useful. It might help students.', 'clarity', 'The hedging hides the benefit. Name the useful result.'), suggestion },
+    annotation(text, 'Volunteers turn donations into meals.', 'great', 'A concrete image connects the action to its benefit.'),
+    annotation(text, 'One shared room can change a semester.', 'impact', 'The compact contrast makes your central takeaway memorable.'),
+  ];
+  const segments = h.annotationSegments(text, annotations);
+  renderDiscussableTranscript({ document, container, text, segments });
+  let activeElement = document.body;
+  Object.defineProperty(document, 'activeElement', { get: () => activeElement });
+  for (const element of [bubble, ...container.querySelectorAll('[data-annotation-number]')]) element.focus = () => { activeElement = element; };
+  const marks = [...container.querySelectorAll('mark')], references = [...container.querySelectorAll('.annotation-ref')];
+  for (const control of [...marks, ...references]) control.getBoundingClientRect = () => ({ left: 350, top: 350, right: 380, bottom: 370, width: 30, height: 20 });
+  bubble.getBoundingClientRect = () => ({ width: 340, height: 180 });
+  const events = new Map(), discussed = [];
+  const window = { innerWidth: 390, innerHeight: 400,
+    addEventListener(type, listener) { events.set(type, listener); }, removeEventListener(type) { events.delete(type); } };
+  const get = id => document.getElementById(id);
+  const controller = createAnnotationPopover({ document, window, container, bubble,
+    title: get('annotation-bubble-title'), explanation: get('annotation-bubble-explanation'), suggestion: get('annotation-bubble-suggestion'),
+    suggestionSection: get('annotation-bubble-revision'), closeButton: get('annotation-bubble-close'), discussButton: get('annotation-bubble-discuss'), onDiscuss: quote => discussed.push(quote),
+    categoryLabel: category => ({ clarity: 'Clarity', great: 'Great sentence', impact: 'Impact sentence' })[category] });
+  controller.setAnnotations(segments.filter(segment => segment.annotation).map(segment => segment.annotation));
+  const fire = (target, type, props = {}) => {
+    const event = new domWindow.Event(type, { bubbles: true, cancelable: true }); Object.assign(event, props); target.dispatchEvent(event); return event;
+  };
+  return { controller, document, container, bubble, marks, references, get, fire, window, events, discussed, text, suggestion };
+}
+
+test('annotation bubble explains and suggests wording, selects every fragment, stays within viewport and returns focus on dismissal', () => {
+  const f = annotationBubbleFixture();
+  assert.equal(f.controller.open(1, f.marks[0]), true);
+  assert.equal(f.bubble.hidden, false);
+  assert.equal(f.document.activeElement, f.bubble);
+  assert.equal(f.get('annotation-bubble-title').textContent, 'Clarity · Note 1');
+  assert.match(f.get('annotation-bubble-explanation').textContent, /hedging hides the benefit/);
+  assert.equal(f.get('annotation-bubble-suggestion').textContent, f.suggestion);
+  assert.equal(f.get('annotation-bubble-revision').hidden, false);
+  assert.equal(f.bubble.querySelector('script'), null, 'suggested wording is inert text');
+  assert.equal(f.container.querySelectorAll('mark.is-selected').length, 2, 'both sentence fragments of one annotation are selected');
+  assert.equal(f.container.querySelectorAll('[role="button"] [role="button"]').length, 0);
+  for (const control of f.container.querySelectorAll('[data-annotation-number="1"]')) assert.equal(control.getAttribute('aria-expanded'), 'true');
+  assert.equal(f.bubble.dataset.placement, 'above');
+  assert.ok(parseFloat(f.bubble.style.left) >= 12 && parseFloat(f.bubble.style.left) + 340 <= f.window.innerWidth - 12);
+  assert.ok(parseFloat(f.bubble.style.top) >= 12 && parseFloat(f.bubble.style.top) + 180 <= f.window.innerHeight - 12);
+  const escape = f.fire(f.bubble, 'keydown', { key: 'Escape' });
+  assert.equal(escape.defaultPrevented, true); assert.equal(f.bubble.hidden, true);
+  assert.equal(f.document.activeElement, f.marks[0]);
+  assert.equal(f.container.querySelectorAll('.is-selected').length, 0);
+  assert.equal(f.marks[0].getAttribute('aria-expanded'), 'false');
+  f.controller.open(2, f.references[1]);
+  assert.equal(f.get('annotation-bubble-title').textContent, 'Great sentence');
+  assert.equal(f.get('annotation-bubble-revision').hidden, true, 'positive or legacy notes do not invent a correction');
+  f.fire(f.get('annotation-bubble-close'), 'click');
+  assert.equal(f.bubble.hidden, true); assert.equal(f.document.activeElement, f.references[1]);
+  f.controller.open(1, f.marks[1]);
+  f.fire(f.get('annotation-bubble-discuss'), 'click');
+  assert.deepEqual(f.discussed, ['It might help students.']);
+  assert.equal(f.bubble.hidden, true);
+  f.controller.open(3, f.references[2]);
+  assert.equal(f.get('annotation-bubble-title').textContent, 'Impact sentence');
+  assert.equal(f.get('annotation-bubble-revision').hidden, true);
+});
+
+test('multiline annotation bubbles anchor to the final visible line instead of the empty union of line boxes', () => {
+  const f = annotationBubbleFixture();
+  f.marks[0].getClientRects = () => [
+    { left: 230, top: 70, right: 370, bottom: 90, width: 140, height: 20 },
+    { left: 40, top: 90, right: 150, bottom: 110, width: 110, height: 20 },
+  ];
+  f.controller.open(1, f.marks[0]);
+  assert.equal(f.bubble.dataset.placement, 'below');
+  assert.equal(f.bubble.style.top, '122px');
+  assert.equal(f.bubble.style.left, '12px');
+  assert.equal(f.bubble.style.getPropertyValue('--annotation-tail-left'), '83px');
+});
+
+test('annotation bubble clears on outside interaction, scroll, resize and transcript replacement without affecting original quotes', () => {
+  const f = annotationBubbleFixture();
+  for (const type of ['pointerdown', 'focusin']) {
+    f.controller.open(1, f.marks[0]); f.fire(f.document.body, type);
+    assert.equal(f.bubble.hidden, true); assert.equal(f.container.querySelectorAll('.is-selected').length, 0);
+  }
+  f.controller.open(1, f.marks[0]);
+  f.events.get('scroll')({ target: f.get('annotation-bubble-explanation') });
+  assert.equal(f.bubble.hidden, false, 'scrolling within the explanation keeps it open');
+  f.events.get('scroll')({ target: f.container });
+  assert.equal(f.bubble.hidden, true); assert.equal(f.document.activeElement, f.marks[0]);
+  f.controller.open(1, f.marks[0]); f.events.get('resize')(); assert.equal(f.bubble.hidden, true);
+  f.controller.open(1, f.marks[0]);
+  assert.equal(selectedTranscriptQuote(f.container, { isCollapsed: false, rangeCount: 1, anchorNode: f.container.firstChild, focusNode: f.container.lastChild,
+    getRangeAt: () => ({ cloneContents: () => f.container.cloneNode(true) }) }), f.text);
+  f.controller.setAnnotations([]);
+  assert.equal(f.bubble.hidden, true); assert.equal(f.get('annotation-bubble-explanation').textContent, '');
+  assert.equal(f.get('annotation-bubble-suggestion').textContent, ''); assert.equal(f.controller.open(1, f.marks[0]), false);
+  f.controller.dispose(); assert.equal(f.events.size, 0);
+});
+
+test('suggested wording stays separate and safely escaped in notes and downloads without changing analyzed text', () => {
+  const h = harness(), text = 'The plan is sort of useful.';
+  const suggestion = '<img src=x onerror="alert(1)"> Our plan gives students a reliable place to study.';
+  const report = { transcript: text, analysis: { method: 'ai', annotations: [{ ...annotation(text, text, 'clarity', 'Name the useful result.'), suggestion }] } };
+  h.renderAnnotatedTranscript(report);
+  assert.ok(elementText(h.get('annotations-notes')).includes(`Suggested wording: ${suggestion}`));
+  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
+  assert.equal(exportedTranscript(html), text);
+  assert.equal(exported.querySelector('.annotation-note-suggestion').textContent, `Suggested wording: ${suggestion}`);
+  assert.equal(exported.querySelectorAll('script,img').length, 0);
 });
 
 test('hostile transcript and comment markup remain inert text in the page and downloaded document', () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions } from '../lib/analysis-core.mjs';
+import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 
 export const INPUT_LIMITS = Object.freeze({
   text: 60_000, targetScript: 30_000, targetTalkingPoints: 30_000,
@@ -75,8 +75,8 @@ function validateFeedback(feedback, input) {
       CRITERIA.some(criterion => feedback.rubric.filter(item => object(item) && item.criterion === criterion).length !== 1)) {
     fail('INVALID_FEEDBACK', `Return exactly one rated rubric entry for each criterion: ${CRITERIA.join(', ')}. Each needs a 0–5 score, a reason, and transcript evidence. Fetch this revision with get_coaching_request if needed, then repair and resubmit it.`);
   }
-  if (!Array.isArray(feedback.annotations) || feedback.annotations.length > 12) {
-    fail('INVALID_FEEDBACK', 'Return annotations as an array with at most 12 exact, non-overlapping transcript highlights. Use [] only when no useful grounded highlights exist.');
+  if (!Array.isArray(feedback.annotations) || feedback.annotations.length > MAX_TRANSCRIPT_ANNOTATIONS) {
+    fail('INVALID_FEEDBACK', `Return annotations as an array with at most ${MAX_TRANSCRIPT_ANNOTATIONS} exact, non-overlapping transcript highlights. Select useful passages across the whole speech, leaving ordinary text unmarked. Use [] only when no useful grounded highlights exist.`);
   }
   const report = analyzeSpeech({ ...input, aiFeedback: feedback });
   const unrated = report.analysis.rubric.filter(item => !Number.isFinite(item.score)).map(item => item.criterion);
@@ -84,7 +84,7 @@ function validateFeedback(feedback, input) {
     fail('INVALID_FEEDBACK', `Repair the unsupported rubric entries: ${unrated.length ? unrated.join(', ') : CRITERIA.join(', ')}. Each needs a finite score from 0 to 5, a nonempty reason, and a real transcript quotation of at most 500 characters. For an absent feature, quote the relevant passage reviewed. No rating has been published; resubmit the same revision.`);
   }
   if (report.analysis.annotations.length !== feedback.annotations.length) {
-    fail('INVALID_FEEDBACK', 'One or more annotations were invalid. Copy each quote exactly from this revision’s transcript (including case, spacing, and punctuation), use thesis/evidence/structure/delivery/clarity, a nonempty comment, and a valid occurrence (1–200). Keep quotations within 500 characters and remove overlapping highlights. Repair and resubmit the same revision; no partial report has been published.');
+    fail('INVALID_FEEDBACK', 'One or more annotations were invalid. Copy each quote exactly from this revision’s transcript (including case, spacing, and punctuation), use thesis/evidence/structure/delivery/clarity/great/impact, a nonempty comment, and the correct positive occurrence number when wording repeats. Keep quotations within 500 characters and remove overlapping highlights. Repair and resubmit the same revision; no partial report has been published.');
   }
   return report;
 }

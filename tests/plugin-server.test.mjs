@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { buildAnalysisPrompt } from '../lib/analysis-core.mjs';
+import { buildAnalysisPrompt, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 import { INPUT_LIMITS, RehearsalStore } from '../plugin/session-store.mjs';
 import { createRehearsalServer } from '../plugin/server.mjs';
 
@@ -135,6 +135,67 @@ test('annotations must be present and every submitted highlight must survive exa
   const { store, rehearsalId, revision } = pending();
   const value = feedback(); value.annotations = [];
   assert.deepEqual(store.submit(rehearsalId, revision, value).report.analysis.annotations, [], 'the existing policy permits no highlights when none are useful');
+});
+
+test('coaching accepts selective highlights beyond the opening and a great sentence at a later occurrence', () => {
+  const phrase = 'Every student deserves support.';
+  const sections = Array.from({ length: 18 }, (_, index) => `Section ${index + 1} explains a distinct benefit. ${phrase} Ordinary background remains unmarked.`);
+  const text = sections.join('\n\n');
+  const { store, rehearsalId, revision } = pending(undefined, { ...input, text });
+  const value = feedback(text);
+  value.annotations = sections.map((_, index) => ({
+    quote: `Section ${index + 1} explains a distinct benefit.`, category: 'thesis',
+    comment: 'This connects the benefit to your central recommendation.', occurrence: 1,
+  }));
+  value.annotations.push({ quote: phrase, category: 'great', comment: 'A concise closing line that brings the audience back to your purpose.', occurrence: 18 });
+  const result = store.submit(rehearsalId, revision, value);
+  assert.equal(result.status, 'complete');
+  assert.equal(result.report.analysis.annotations.length, 19);
+  const star = result.report.analysis.annotations.at(-1);
+  assert.equal(star.category, 'great');
+  assert.equal(star.start, text.lastIndexOf(phrase));
+  assert.ok(result.report.analysis.annotations.every(item => !item.quote.includes('Ordinary background')));
+  assert.equal(result.report.transcript, text);
+  store.dispose();
+});
+
+test('oversized annotation arrays remain repairable without publishing a partial report', () => {
+  const { store, rehearsalId, revision } = pending();
+  const value = feedback();
+  value.annotations = Array.from({ length: MAX_TRANSCRIPT_ANNOTATIONS + 1 }, () => ({ ...value.annotations[0] }));
+  assert.throws(() => store.submit(rehearsalId, revision, value), { code: 'INVALID_FEEDBACK' });
+  assert.equal(store.get(rehearsalId).status, 'pending');
+  assert.equal(store.get(rehearsalId).report, null);
+  assert.equal(store.submit(rehearsalId, revision, feedback()).status, 'complete');
+  store.dispose();
+});
+
+test('annotation replacement wording stays a suggestion and never rewrites the saved transcript', () => {
+  const { store, rehearsalId, revision } = pending();
+  const value = feedback();
+  const suggestion = 'Let us pilot evening tutoring so working students can get support.';
+  value.annotations[0].suggestion = suggestion;
+  value.annotations[0].assessment = 'needs_work';
+  const result = store.submit(rehearsalId, revision, value);
+  assert.equal(result.report.analysis.annotations[0].suggestion, suggestion);
+  assert.equal(result.report.analysis.annotations[0].assessment, 'needs_work');
+  assert.equal(result.report.analysis.annotations[0].quote, 'We should expand tutoring.');
+  assert.equal(result.report.transcript, input.text);
+  assert.equal(store.get(rehearsalId).report.transcript, input.text);
+  assert.ok(!result.report.analysis.thesis.evidence.includes(suggestion));
+  store.dispose();
+});
+
+test('impact sentence recognition survives plugin publication as positive feedback', () => {
+  const { store, rehearsalId, revision } = pending();
+  const value = feedback();
+  value.annotations[0] = { quote: 'Please approve a pilot next term.', category: 'impact',
+    assessment: 'strength', comment: 'This direct call to action gives the audience a clear next step.' };
+  const result = store.submit(rehearsalId, revision, value);
+  assert.equal(result.report.analysis.annotations[0].category, 'impact');
+  assert.equal(result.report.analysis.annotations[0].assessment, 'strength');
+  assert.equal(result.report.transcript, input.text);
+  store.dispose();
 });
 
 test('a newer request rejects both stale retrieval and stale submission without overwriting it', () => {
