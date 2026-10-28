@@ -61,6 +61,7 @@ function renderSummaryDraft(text = '', live = false) {
     segments: [{ text: state.summaryTranscript, annotation: null }] });
   else container.textContent = 'Your words will appear here as you record.';
   $('annotation-title').textContent = 'Full transcript';
+  $('annotation-status').dataset.explanation = 'false';
   $('annotation-status').textContent = live
     ? 'Draft words appear as you speak. Annotations begin when you press Analyze.'
     : hasText ? 'Click a sentence or highlight a passage to add it to chat. Press Analyze for annotations.'
@@ -103,7 +104,7 @@ function syncAnnotationLoading({ viewUpdated = false } = {}) {
   const wasLoading = state.annotationLoading;
   const container = $('annotated-transcript'), panel = $('annotation-panel'), placeholder = $('annotation-loading');
   if (loading && (!wasLoading || viewUpdated)) {
-    state.annotationReadyView = { status: $('annotation-status').textContent, legendHidden: $('annotation-legend').hidden,
+    state.annotationReadyView = { status: $('annotation-status').textContent, explanation: $('annotation-status').dataset.explanation || 'false', legendHidden: $('annotation-legend').hidden,
       downloadDisabled: $('download-transcript').disabled };
   }
   state.annotationLoading = loading;
@@ -113,11 +114,13 @@ function syncAnnotationLoading({ viewUpdated = false } = {}) {
     const focusInTranscript = container.contains(document.activeElement) || $('annotation-bubble').contains(document.activeElement);
     state.annotationPopover?.close();
     $('annotation-legend').hidden = true; $('download-transcript').disabled = true;
+    $('annotation-status').dataset.explanation = 'false';
     $('annotation-status').textContent = 'AI review in progress. Your annotations will appear here when it finishes.';
     if (focusInTranscript) placeholder.focus({ preventScroll: true });
   } else if (wasLoading) {
     if (!viewUpdated && state.annotationReadyView) {
       $('annotation-status').textContent = state.annotationReadyView.status;
+      $('annotation-status').dataset.explanation = state.annotationReadyView.explanation;
       $('annotation-legend').hidden = state.annotationReadyView.legendHidden;
       $('download-transcript').disabled = state.annotationReadyView.downloadDisabled;
     }
@@ -1778,6 +1781,7 @@ function renderAnnotatedTranscript(report) {
   $('annotation-title').textContent = count ? 'Full annotated transcript' : 'Full transcript';
   $('annotation-legend').hidden = !count;
   container.setAttribute('aria-label', count ? 'Original transcript with AI annotations' : 'Original transcript');
+  $('annotation-status').dataset.explanation = String(Boolean(count) && !(state.transcriptText && state.transcriptText !== text));
   $('annotation-status').textContent = state.transcriptText && state.transcriptText !== text
     ? 'Showing the analyzed version. Your edits appear in playback; update feedback to annotate your corrected transcript.'
     : count ? `${count} AI coaching annotations. Click a marked passage for details. Gold stars recognize great sentences; red underlines show wording to improve. Use Update feedback for a fresh AI review.`

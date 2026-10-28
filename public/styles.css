@@ -460,3 +460,5 @@
   .history-page .saved-recording-actions{max-width:none;justify-content:flex-start}
 }
 @media print{.history-page{display:none!important}}
+/* Preserve the explanatory copy's responsive spacing without displaying it. */
+@media screen{#analysis-disclaimer,#annotation-status[data-explanation="true"]{visibility:hidden}}
