@@ -10,6 +10,7 @@ import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
 import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, annotationCategory } from '../lib/transcript-discussion.mjs';
 import { createRehearsalChat } from '../public/rehearsal-chat.js';
 import { analyzeSpeech, sanitizeAiFeedback, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
+import { MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES } from '../lib/recording-limits.mjs';
 const TEST_MODEL_ID = 'gpt-live-transcribe';
 
 function inspectWav(wav) {
@@ -135,7 +136,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
     createGain() { return { ...graphNode(), gain: { value: 0 } }; }
   }
   let blobCounter = 0;
-  let progressHandler = () => {};
+  let progressHandler = () => {}, recordingSavedHandler = () => {};
   const revoked = [];
   const objectUrls = new Map(), createdElements = [], timers = [];
   const savedRecords = new Map(), storageCalls = { save: [], get: [], remove: [], list: 0 };
@@ -148,7 +149,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
-    createProcessingProgress, validateAudioUploadHeader: validateUploadHeader, MAX_TRANSCRIPT_ANNOTATIONS,
+    createProcessingProgress, validateAudioUploadHeader: validateUploadHeader, MAX_TRANSCRIPT_ANNOTATIONS, MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES,
     document: {
       getElementById: id => {
         if (startup && !htmlIds.includes(id)) { missingIds.push(id); return null; }
@@ -172,7 +173,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
     },
     window: {
       AudioContext, matchMedia: () => ({ matches: false }), addEventListener: (...args) => windowEvents.addEventListener(...args),
-      rehearsalService: { hosted, request: requestImpl, setProgressHandler(handler) { progressHandler = handler; } },
+      rehearsalService: { hosted, request: requestImpl, setProgressHandler(handler) { progressHandler = handler; }, setRecordingSavedHandler(handler) { recordingSavedHandler = handler; } },
       location: { pathname: '/practice/', search: '', hash: initialHash },
       rehearsalDocuments: { extractRubric, prepareRubricPreview },
       rehearsalRecordings: recordingStore,
@@ -210,7 +211,7 @@ globalThis.audioTest = {
     emitWindowEvent: (type, event) => emit(windowEvents, type, event),
     emitDocumentEvent: (type, event) => emit(documentEvents, type, event),
     emitElementEvent: (id, type, event) => emit(get(id), type, event),
-    emitProgress: message => progressHandler(message) };
+    emitProgress: message => progressHandler(message), emitRecordingSaved: (blob, id) => recordingSavedHandler(blob, id) };
 }
 
 function microphone(label) {
@@ -333,6 +334,7 @@ test('hosted recording and replay never run local inference, upload audio, or sa
   await nextTurn();
   assert.deepEqual(requests, ['/api/config']);
   assert.match(h.get('audio-save-status').textContent, /This take is in this tab/);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
   assert.equal(h.get('saved-recordings-details').hidden, true);
   assert.equal(h.get('cloud-recordings-details').hidden, false);
 });
@@ -367,6 +369,7 @@ test('hosted live recording shows words immediately, excludes pauses, and saves 
   assert.equal(h.window.rehearsalHostedActions.canReplaceAudio(), false);
   assert.equal(h.get('analyze-button').disabled, true);
   assert.equal(cloud.uploads.length, 0, 'the complete WAV waits for the final transcript segment');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
   assert.ok(cloud.sockets[0].frames.every(frame => frame.byteLength <= 9600), 'Every PCM frame is at most 200 ms');
   assert.equal(cloud.sockets[0].samples, 242400, 'All 10.1 seconds are sent exactly once at 24 kHz');
   assert.ok(!cloud.calls.some(call => call.path.includes('/chunks/') || call.path.endsWith('/prepare')));
@@ -376,6 +379,7 @@ test('hosted live recording shows words immediately, excludes pauses, and saves 
   assert.equal(inspectWav(Buffer.from(await cloud.uploads[0].arrayBuffer())).durationSeconds, 10.1);
   assert.equal(h.storageCalls.save.length, 0, 'cloud recording does not create an anonymous browser copy');
   assert.equal(h.state.cloudRecordingId, cloud.id);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
   assert.equal(h.analysisInput(h.state.transcriptText).recordingId, cloud.id);
   assert.equal(await h.ensureTranscript(), 'Um, practice helps. Next point.');
   assert.equal(cloud.uploads.length, 1); assert.equal(historyRefreshes, 1);
@@ -402,7 +406,8 @@ test('failed cloud segments keep capturing and save complete audio on Stop witho
   assert.equal(h.state.transcriptText, ''); assert.equal(h.get('transcript').value, '');
   assert.equal(h.state.liveTake, null); assert.equal(h.get('follow-transcript-connect').hidden, false);
   assert.match(h.get('follow-transcript-note').textContent, /incomplete preview/);
-  assert.match(h.get('audio-save-status').textContent, /Saved privately/);
+  assert.match(h.get('audio-save-status').textContent, /Saved to your account/);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true', 'a partial transcript does not undo the confirmed audio save');
 });
 
 test('silent microphone input never stops a hosted recording or starts coaching', async () => {
@@ -427,6 +432,7 @@ test('a failed cloud save leaves an explicit download/retry path and releases an
   assert.ok(h.state.audioBlob); assert.equal(h.state.liveTake, null); assert.equal(h.state.transcriptText, '');
   assert.equal(h.get('analyze-button').disabled, false); assert.equal(h.get('follow-transcript-connect').hidden, false);
   assert.match(h.get('audio-save-status').textContent, /Download it or retry transcription/);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
 });
 
 test('hosted live recording requires sign-in and account changes cancel before Stop can upload private audio', async () => {
@@ -454,6 +460,8 @@ test('opening a private cloud take enables downloading its exact audio without a
   assert.equal(h.get('transcript').value, 'Um, practice helps.');
   assert.equal(h.state.cloudRecordingId, 'cloud-take');
   assert.equal(h.storageCalls.save.length, 0);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
+  assert.doesNotMatch(h.get('app-status').textContent, /No new analysis was needed/i);
   await h.downloadCurrentAudio();
   const [download] = clickedDownloads(h);
   assert.equal(h.objectUrls.get(download.href), blob);
@@ -467,7 +475,98 @@ test('hosted explicit transcription remembers the cloud recording ID for coachin
   await h.ensureTranscript();
   assert.equal(requests.length, 1); assert.equal(requests[0].path, '/api/transcribe');
   assert.equal(h.state.cloudRecordingId, id); assert.equal(h.analysisInput('Um, practice helps.').recordingId, id);
-  assert.match(h.get('audio-save-status').textContent, /Saved privately/);
+  assert.match(h.get('audio-save-status').textContent, /Saved to your account/);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
+});
+
+test('completed and restored AI feedback offer a new recording while replacement, capture and reset use their own labels', async () => {
+  const text = 'Practice makes the next presentation clearer.';
+  const report = { transcript: text, analysis: { method: 'ai', overallRating: 80 } };
+  const h = harness(async path => path === '/api/transcribe'
+    ? { text, durationSeconds: 1, recordingId: 'analyzed-take' } : report);
+  h.updateConfig(hostedConfig);
+  const assertAction = (visible, accessible = visible) => {
+    assert.equal(h.get('record-action-label').textContent, visible);
+    assert.equal(h.get('record-button').getAttribute('aria-label'), accessible);
+  };
+  h.setAudio(new Blob(['audio']), 1, 'New take');
+  assertAction('Record another take', 'Record a new rehearsal');
+  await h.runAnalysis();
+  assertAction('Begin new recording');
+  const saved = { id: 'analyzed-take', blob: h.state.audioBlob, durationSeconds: 1, transcript: text, report };
+  h.discardAudio();
+  assertAction('Start your rehearsal', 'Start recording');
+  h.window.rehearsalHostedActions.restoreRecording(saved);
+  assertAction('Begin new recording');
+  assert.doesNotMatch(h.get('app-status').textContent, /No new analysis was needed/i);
+  h.window.rehearsalHostedActions.recordingDeleted('analyzed-take');
+  assertAction('Record another take', 'Record a new rehearsal');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
+  h.window.rehearsalHostedActions.restoreRecording({ id: 'not-analyzed', blob: new Blob(['other audio']), durationSeconds: 2, transcript: text });
+  assertAction('Record another take', 'Record a new rehearsal');
+  h.window.rehearsalHostedActions.restoreRecording(saved);
+  await h.startRecording();
+  assertAction('Stop recording');
+  h.toggleRecordingPause(); assertAction('Stop recording');
+  h.toggleRecordingPause();
+  h.captureRecordingSamples(new Float32Array(16000).fill(0.25), 16000);
+  h.stopRecording();
+  assertAction('Record another take', 'Record a new rehearsal');
+  h.discardAudio();
+  assertAction('Start your rehearsal', 'Start recording');
+});
+
+test('failed or superseded coaching cannot mark an unanalyzed take as analyzed', async () => {
+  const text = 'This is the current transcript.';
+  for (const outcome of ['failed', 'superseded', 'partial']) {
+    const pending = deferred();
+    const h = harness(async path => path === '/api/transcribe'
+      ? { text, durationSeconds: 1, recordingId: 'original' } : pending.promise);
+    h.updateConfig(hostedConfig); h.setAudio(new Blob(['original audio']), 1, 'Original');
+    const analysis = h.runAnalysis(); await nextTurn();
+    assert.equal(h.get('record-action-label').textContent, 'Record another take');
+    if (outcome === 'failed') pending.reject(new Error('Coaching unavailable'));
+    else {
+      if (outcome === 'superseded') h.setAudio(new Blob(['replacement audio']), 2, 'Replacement');
+      pending.resolve({ transcript: text, analysis: { method: outcome === 'partial' ? 'local' : 'ai', overallRating: 80 } });
+    }
+    await analysis;
+    assert.equal(h.get('record-action-label').textContent, 'Record another take', outcome);
+    assert.equal(h.get('record-button').getAttribute('aria-label'), 'Record a new rehearsal', outcome);
+  }
+});
+
+test('save confirmation follows the current blob and clears after cloud deletion or replacement', async () => {
+  const h = harness(async path => {
+    assert.equal(path, '/api/config'); return hostedConfig;
+  }, { startup: true });
+  await nextTurn();
+  const first = new Blob(['first audio']), second = new Blob(['second audio']);
+  h.setAudio(first, 1, 'First');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
+  h.emitRecordingSaved(first, 'first');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
+  assert.match(h.get('audio-save-status').textContent, /Saved to your account/);
+  h.window.rehearsalHostedActions.recordingDeleted('first');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
+  h.setAudio(second, 2, 'Second');
+  h.emitRecordingSaved(first, 'stale-first');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false', 'late confirmation for another blob must not decorate this take');
+  assert.equal(h.state.cloudRecordingId, '');
+  h.emitRecordingSaved(second, 'second');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
+  h.discardAudio();
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
+});
+
+test('deleting a confirmed browser copy clears its save confirmation while keeping the current audio', async () => {
+  const h = harness(), audio = new Blob(['local audio']);
+  h.setAudio(audio, 1, 'Local take'); await settleAudioSaves(h);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
+  await h.deleteSavedRecording(h.state.audioSave.id);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
+  assert.equal(h.state.audioBlob, audio);
+  assert.match(elementText(h.get('audio-save-status')), /Browser copy deleted/);
 });
 
 test('hosted signed-out users can keep audio locally but cannot send it for transcription', async () => {
@@ -606,14 +705,14 @@ test('cloud audio upload sends only newly encoded 16 kHz mono PCM, never the sel
 test('audio metadata rejects a known overlong file before reading or native decoding and releases its resources', async () => {
   let reads = 0, decodes = 0;
   const h = harness(undefined, {
-    audioMetadata: audio => { audio.duration = 601; audio.listeners.get('loadedmetadata')[0](); },
+    audioMetadata: audio => { audio.duration = 901; audio.listeners.get('loadedmetadata')[0](); },
     decodeAudioData: async () => { decodes++; throw new Error('Must not decode'); },
   });
   const original = new Blob(['previous recording']); h.setAudio(original, 2, 'Previous');
   await h.uploadAudio({ name: 'long.mp3', size: 100, arrayBuffer() { reads++; throw new Error('Must not read'); } });
   assert.equal(reads, 0); assert.equal(decodes, 0);
   assert.equal(h.state.audioBlob, original);
-  assert.match(h.get('app-status').textContent, /longer than 10 minutes/);
+  assert.match(h.get('app-status').textContent, /longer than 15 minutes/);
   const media = h.createdElements.find(node => node.tagName === 'AUDIO');
   assert.equal(media.src, ''); assert.equal(media.paused, true);
   assert.equal(media.listeners.get('loadedmetadata').length, 0); assert.equal(media.listeners.get('error').length, 0);
@@ -631,14 +730,14 @@ test('unknown, unavailable or timed-out metadata preserves valid uploads and the
         audio.duration = metadata === 'infinite' ? Infinity : metadata === 'understated' ? 1 : NaN;
         audio.listeners.get(metadata === 'error' ? 'error' : 'loadedmetadata')[0]();
       },
-      decodeAudioData: async () => { decodes++; return { duration: metadata === 'understated' ? 601 : 1, sampleRate: 16000, length: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) }; },
+      decodeAudioData: async () => { decodes++; return { duration: metadata === 'understated' ? 901 : 1, sampleRate: 16000, length: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) }; },
     });
     const opening = h.uploadAudio(new File(['valid audio'], 'recording.webm'));
     if (metadata === 'timeout') { await nextTurn(); h.flushTimers(); }
     await opening;
     assert.equal(decodes, 1, metadata);
     if (metadata === 'understated') {
-      assert.equal(h.state.audioBlob, null); assert.match(h.get('app-status').textContent, /longer than 10 minutes/);
+      assert.equal(h.state.audioBlob, null); assert.match(h.get('app-status').textContent, /longer than 15 minutes/);
     } else assert.equal(h.state.audioBlob.type, 'audio/wav', metadata);
     assert.equal(h.state.audioMetadataCancel, null);
     assert.equal(h.revoked.filter(url => h.objectUrls.get(url)?.name === 'recording.webm').length, 1);
@@ -675,15 +774,18 @@ test('an older pending save survives replacement without changing the newer take
   h.setAudio(current.blob, current.duration, current.caption);
   const currentRecord = h.state.audioSave;
   assert.match(elementText(h.get('audio-save-status')), /Saving in this browser/);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
   first.resolve(); await nextTurn();
   assert.equal(saved[0].blob, old.blob);
   assert.equal(previousRecord.status, 'saved');
   assert.equal(h.state.audioSave, currentRecord);
   assert.equal(currentRecord.status, 'saving');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false', 'an older take saving must not confirm the current one');
   assert.equal(h.state.audioBlob, current.blob);
   assert.match(elementText(h.get('audio-save-status')), /Saving in this browser/);
   second.resolve(); await settleAudioSaves(h);
   assert.equal(currentRecord.status, 'saved');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
   assert.equal(h.state.pendingAudioSaves.size, 0);
 });
 
@@ -703,6 +805,7 @@ test('clearing playback during a pending save unloads audio without deleting its
   assert.equal(h.state.audioSave, null);
   assert.deepEqual(h.storageCalls.remove, []);
   assert.equal(elementText(h.get('audio-save-status')), '');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
 });
 
 test('saved metadata loads on startup without restoring audio or accessing a saved blob', async () => {
@@ -880,9 +983,11 @@ test('failed older saves remain downloadable after replacement and can be reopen
   assert.equal(h.state.audioBlob, old.blob);
   assert.equal(h.state.audioSave.status, 'failed');
   assert.match(elementText(h.get('audio-save-status')), /Not saved in this browser.*storage is full/);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
   await h.autosaveRecording(h.state.audioSave); await settleAudioSaves(h);
   assert.equal(saves, 3);
   assert.equal(h.state.audioSave.status, 'saved');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
   assert.equal(h.state.unsavedRecordings.size, 0);
 });
 
@@ -897,6 +1002,7 @@ test('deleting an unsaved failed take removes only its in-memory recovery entry'
   assert.deepEqual(h.storageCalls.remove, []);
   assert.equal(h.state.audioBlob, take.blob);
   assert.equal(h.state.audioSave.status, 'removed');
+  assert.equal(h.get('audio-save-status').dataset.saved, 'false');
 });
 
 test('leaving warns for active, pending or failed recordings without tearing down the microphone', async () => {
@@ -1216,6 +1322,45 @@ test('recording caps saved audio at the maximum when the final input block cross
   assert.equal(h.state.recording, false);
   assert.equal(h.state.audioDuration, 2);
   assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 2);
+});
+
+test('the default recording cap keeps exactly fifteen minutes in a real 16 kHz WAV', async () => {
+  const h = harness();
+  assert.equal(h.state.config.maxDurationSeconds, 900);
+  await h.enableMic(); h.state.context.sampleRate = 8000;
+  await h.startRecording();
+  h.captureRecordingSamples(new Float32Array(8000 * 899).fill(0.25), 8000);
+  assert.equal(h.state.recording, true, 'recording must remain active beyond the former ten-minute cap');
+  const finalBlock = new Float32Array(8000 * 2).fill(0.9);
+  finalBlock.fill(-0.25, 0, 8000);
+  assert.equal(h.captureRecordingSamples(finalBlock, 8000), 8000);
+  assert.equal(h.state.recording, false);
+  assert.equal(h.state.audioDuration, 900);
+  const wav = Buffer.from(await h.state.audioBlob.arrayBuffer());
+  assert.equal(inspectWav(wav).durationSeconds, 900);
+  assert.equal(wav.length, 44 + 900 * 16000 * 2);
+  assert.equal(wav.readInt16LE(44), Math.trunc(0.25 * 32767));
+  assert.equal(wav.readInt16LE(wav.length - 2), -8192, 'samples beyond fifteen minutes must not enter the WAV');
+  assert.equal(h.captureRecordingSamples(finalBlock, 8000), 0);
+  assert.match(h.get('app-status').textContent, /15-minute limit/);
+  await settleAudioSaves(h);
+  assert.equal(h.storageCalls.save.length, 1);
+});
+
+test('an exactly fifteen-minute upload passes metadata, decoded duration and prepared-WAV byte limits', async () => {
+  const samples = new Float32Array(8000 * 900).fill(0.25);
+  const h = harness(undefined, {
+    audioMetadata: audio => { audio.duration = 900; audio.listeners.get('loadedmetadata')[0](); },
+    decodeAudioData: async () => ({ duration: 900, sampleRate: 8000, length: samples.length, numberOfChannels: 1, getChannelData: () => samples }),
+  });
+  await h.uploadAudio(new File(['valid source audio'], 'fifteen-minutes.webm'));
+  await settleAudioSaves(h);
+  assert.equal(h.state.audioDuration, 900);
+  assert.equal(h.state.audioBlob.type, 'audio/wav');
+  assert.equal(inspectWav(Buffer.from(await h.state.audioBlob.arrayBuffer())).durationSeconds, 900);
+  assert.ok(h.state.audioBlob.size <= h.state.config.maxAudioBytes);
+  assert.equal(h.storageCalls.save.length, 1);
+  assert.equal(h.get('audio-save-status').dataset.saved, 'true');
 });
 
 test('estimated transcript position handles empty text and boundaries without invalid word indices', () => {

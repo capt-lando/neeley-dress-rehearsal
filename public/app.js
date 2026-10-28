@@ -5,10 +5,11 @@ import { validateAudioUploadHeader } from '../lib/audio-upload-header.mjs';
 import { createRehearsalChat } from './rehearsal-chat.js';
 import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, annotationCategory } from '../lib/transcript-discussion.mjs';
 import { MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
+import { MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES } from '../lib/recording-limits.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  config: { hosted: Boolean(window.rehearsalService?.hosted), configured: false, speechConfigured: false, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: 'gpt-live-transcribe', analysisModel: '', maxDurationSeconds: 600, maxAudioBytes: 20971520 },
+  config: { hosted: Boolean(window.rehearsalService?.hosted), configured: false, speechConfigured: false, analysisConfigured: false, analysisProvider: 'openai', providers: [], transcriptionModel: 'gpt-live-transcribe', analysisModel: '', maxDurationSeconds: MAX_RECORDING_SECONDS, maxAudioBytes: MAX_RECORDING_BYTES },
   stream: null, context: null, source: null, processor: null, silent: null, analyser: null,
   recording: false, recordingPaused: false, startingRecording: false, recordingSampleRate: 0, requestingMic: false, preparingAudio: false, samples: [], sampleCount: 0, timer: null, meterFrame: null,
   audioBlob: null, audioURL: null, audioDuration: 0, duration: 0, report: null, busy: false, requestController: null,
@@ -223,12 +224,18 @@ function setBusy(busy, message = '') {
   if (message) setStatus(message, 'busy');
 }
 function syncRecordingControls() {
+  syncRecordingAction();
   const pending = state.requestingMic || state.startingRecording || state.recoveryPending || state.cancelRestartPending;
   $('record-button').disabled = state.busy || pending;
   $('upload-button').disabled = state.busy || pending || state.recording;
   $('discard-audio').disabled = state.busy || pending || state.recording;
   $('enable-mic').disabled = pending || state.recording;
   $('audio-input').disabled = pending || state.recording;
+}
+function syncRecordingAction() {
+  const analyzed = state.report?.analysis?.method === 'ai';
+  $('record-action-label').textContent = state.recording ? 'Stop recording' : analyzed ? 'Begin new recording' : state.audioBlob ? 'Record another take' : 'Start your rehearsal';
+  $('record-button').setAttribute('aria-label', state.recording ? 'Stop recording' : analyzed ? 'Begin new recording' : state.audioBlob ? 'Record a new rehearsal' : 'Start recording');
 }
 function syncCancelControls() {
   // Audio decoding cannot be interrupted by the browser's decodeAudioData API.
@@ -521,6 +528,7 @@ function resetTranscriptForModelChange() {
   state.transcriptController = null; state.transcriptPromise = null; state.requestController = null;
   state.transcriptGeneration = -1; state.transcriptModel = ''; state.transcriptText = ''; state.transcriptBasis = ''; state.transcriptionAttempted = false;
   state.report = null;
+  syncRecordingAction();
   $('transcript').value = '';
   renderFollowTranscript('');
   $('report').hidden = true;
@@ -739,11 +747,9 @@ async function startRecording() {
     state.recording = true; state.recordingPaused = false; state.recordingSampleRate = context.sampleRate;
     startLiveTranscription();
     $('report').hidden = true;
-    $('record-button').setAttribute('aria-label', 'Stop recording');
     $('mic-icon').setAttribute('hidden', ''); $('stop-icon').hidden = false;
     document.querySelector('.record-panel').classList.add('recording');
     $('record-title').textContent = 'You’ve got the floor.';
-    $('record-action-label').textContent = 'Stop recording';
     $('mic-status').textContent = 'Recording from your selected microphone';
     $('pause-recording').hidden = false; $('pause-recording').textContent = 'Pause';
     $('pause-recording').setAttribute('aria-label', 'Pause recording');
@@ -884,7 +890,7 @@ function finishLiveTranscription() {
     if (state.liveTake !== take || take.generation !== state.audioGeneration || take.model !== state.config.transcriptionModel) throw supersededAudioError();
     if (take.hosted) {
       state.cloudRecordingId = result.recordingId;
-      $('audio-save-status').textContent = 'Saved privately to your account. Replay does not upload or reprocess this recording.';
+      setAudioSaveStatus('Saved to your account. Replay does not upload or reprocess this recording.', Boolean(state.cloudRecordingId));
       window.rehearsalAccount?.refreshHistory();
       if (result.complete !== true) throw new Error(take.error || 'Retry transcription to process the complete saved recording.');
     }
@@ -898,7 +904,7 @@ function finishLiveTranscription() {
   }).catch(error => {
     if (state.liveTake === take) {
       failLiveTranscription(take, error, true);
-      if (take.hosted && !state.cloudRecordingId) $('audio-save-status').textContent = 'This recording is still in this tab. Download it or retry transcription to save it privately.';
+      if (take.hosted && !state.cloudRecordingId) setAudioSaveStatus('This recording is still in this tab. Download it or retry transcription to save it.');
     }
     throw error;
   }).finally(() => {
@@ -951,9 +957,7 @@ function stopRecording(limitReached = false) {
   document.querySelector('.record-panel').classList.remove('recording');
   document.querySelector('.record-panel').classList.remove('recording-paused');
   $('mic-icon').removeAttribute('hidden'); $('stop-icon').hidden = true;
-  $('record-button').setAttribute('aria-label', 'Record a new rehearsal');
   $('record-title').textContent = 'Nice. That’s a first take.';
-  $('record-action-label').textContent = 'Record another take';
   syncRecordingControls(); syncAnalysisControls(); syncCancelControls();
   $('pause-recording').hidden = true; $('pause-recording').setAttribute('aria-pressed', 'false');
   $('mic-status').textContent = microphoneReadyText();
@@ -963,11 +967,12 @@ function stopRecording(limitReached = false) {
   setAudio(makeWav(flattened, sampleRate), state.duration, 'Your rehearsal', { preserveCapture: true });
   window.rehearsalAccount?.track('recording_completed');
   finishLiveTranscription();
-  if (limitReached) setStatus('Your recording reached the 10-minute limit. You can listen back now; check the save status below before closing this tab.');
+  if (limitReached) setStatus(`Your recording reached the ${state.config.maxDurationSeconds / 60}-minute limit. You can listen back now; check the save status below before closing this tab.`);
 }
 function setAudio(blob, duration, caption, { savedRecording = null, preserveCapture = false } = {}) {
   if (!preserveCapture) discardAudio(false);
   state.audioBlob = blob; state.duration = duration; state.audioDuration = duration;
+  syncRecordingAction();
   state.audioURL = URL.createObjectURL(blob);
   $('playback').src = state.audioURL;
   $('playback').load();
@@ -979,9 +984,9 @@ function setAudio(blob, duration, caption, { savedRecording = null, preserveCapt
   updatePlaybackUI();
   if (state.config.hosted) {
     state.audioSave = null;
-    $('audio-save-status').textContent = state.liveTake?.hosted
-      ? 'Saving your complete recording privately… Keep this tab open until saving finishes.'
-      : 'This take is in this tab. Create transcript or Analyze to save it privately to your account.';
+    setAudioSaveStatus(state.liveTake?.hosted
+      ? 'Saving your complete recording… Keep this tab open until saving finishes.'
+      : 'This take is in this tab. Create transcript or Analyze to save it to your account.');
     syncRecordingLibraryControls();
     return;
   }
@@ -1025,12 +1030,11 @@ function discardAudio(reset = true) {
   markPromptStale();
   updatePlaybackUI();
   $('timer').textContent = '00:00';
-  $('audio-save-status').textContent = '';
+  setAudioSaveStatus('');
+  syncRecordingAction();
   syncRecordingLibraryControls();
   if (reset) {
     $('record-title').textContent = 'Begin recording';
-    $('record-action-label').textContent = 'Start your rehearsal';
-    $('record-button').setAttribute('aria-label', 'Start recording');
   }
 }
 function recordingStore() {
@@ -1078,10 +1082,17 @@ function renderRecordingLibraryStatus() {
     ? `${unsaved} ${unsaved === 1 ? 'recording is' : 'recordings are'} not saved in this browser. Download unsaved takes below to keep them, or open a take to try saving again.`
     : state.savedRecordings.length ? 'Saved only in this browser. Download a copy to keep outside the app.' : 'No saved recordings yet. Finished takes and uploaded audio save here automatically.';
 }
+function setAudioSaveStatus(message, saved = false) {
+  const status = $('audio-save-status');
+  status.textContent = message;
+  status.dataset.saved = String(saved);
+  status.classList.remove('error');
+}
 function renderAudioSaveStatus() {
   const record = state.audioSave;
   const status = $('audio-save-status');
   status.classList.toggle('error', record?.status === 'failed');
+  status.dataset.saved = String(record?.status === 'saved');
   status.replaceChildren();
   if (!record) return;
   const messages = {
@@ -1389,7 +1400,7 @@ function ensureTranscript(progress = null) {
   state.transcriptController = controller;
   state.transcriptionAttempted = true;
   $('follow-transcript-status').textContent = 'Preparing your transcript… You can keep listening.';
-  if (state.config.hosted) $('audio-save-status').textContent = state.cloudRecordingId ? 'Saved privately to your account. Preparing your transcript…' : 'Saving this recording privately to your account…';
+  if (state.config.hosted) setAudioSaveStatus(state.cloudRecordingId ? 'Saved to your account. Preparing your transcript…' : 'Saving this recording to your account…', Boolean(state.cloudRecordingId));
   $('follow-transcript-connect').hidden = true;
   syncCancelControls();
   let promise;
@@ -1406,7 +1417,7 @@ function ensureTranscript(progress = null) {
       }
       if (state.config.hosted) {
         state.cloudRecordingId = result.recordingId;
-        $('audio-save-status').textContent = 'Saved privately to your account. Find this take in My saved rehearsals.';
+        setAudioSaveStatus('Saved to your account. Find this take in My saved rehearsals.', Boolean(state.cloudRecordingId));
         window.rehearsalAccount?.refreshHistory();
       }
       cacheTranscript(text, generation);
@@ -1471,7 +1482,7 @@ function readAudioDuration(file) {
 }
 async function uploadAudio(file) {
   if (!file || state.busy || state.recoveryPending || state.cancelRestartPending || state.recording || state.startingRecording || state.requestingMic) return;
-  if (file.size > 60 * 1024 * 1024) { setStatus('Please choose an audio file smaller than 60 MB and no longer than 10 minutes.', 'error'); return; }
+  if (file.size > 60 * 1024 * 1024) { setStatus(`Please choose an audio file smaller than 60 MB and no longer than ${state.config.maxDurationSeconds / 60} minutes.`, 'error'); return; }
   if (state.liveTake) { cancelLiveSession(); showLiveFallback('Live transcription stopped while opening another recording. Retry the complete recording if needed.'); }
   const generation = ++state.audioPreparationGeneration;
   state.preparingAudio = true;
@@ -1482,7 +1493,7 @@ async function uploadAudio(file) {
     if (generation !== state.audioPreparationGeneration) return;
     const duration = await readAudioDuration(file);
     if (generation !== state.audioPreparationGeneration) return;
-    if (duration > state.config.maxDurationSeconds) throw new Error('This recording is longer than 10 minutes. Trim it to a shorter rehearsal and upload it again.');
+    if (duration > state.config.maxDurationSeconds) throw new Error(`This recording is longer than ${state.config.maxDurationSeconds / 60} minutes. Trim it to a shorter rehearsal and upload it again.`);
     // Missing/untrusted metadata still needs the decoder check below. Native decoding
     // has no cancellation or allocation limit; this preflight is not a memory sandbox.
     decodeContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -1490,7 +1501,7 @@ async function uploadAudio(file) {
     if (generation !== state.audioPreparationGeneration) return;
     const audioBuffer = await decodeContext.decodeAudioData(bytes);
     if (generation !== state.audioPreparationGeneration) return;
-    if (audioBuffer.duration > state.config.maxDurationSeconds) throw new Error('This recording is longer than 10 minutes. Trim it to a shorter rehearsal and upload it again.');
+    if (audioBuffer.duration > state.config.maxDurationSeconds) throw new Error(`This recording is longer than ${state.config.maxDurationSeconds / 60} minutes. Trim it to a shorter rehearsal and upload it again.`);
     if (audioBuffer.duration < 0.5) throw new Error('This recording is too short to analyze. Please choose a longer recording.');
     const mono = new Float32Array(audioBuffer.length);
     for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
@@ -1663,6 +1674,7 @@ function renderCoachingState(report) {
 }
 function renderReport() {
   const report = state.report;
+  syncRecordingAction();
   const words = report.wordStats || {};
   const blunders = report.blunders || {};
   const analysis = report.analysis || {};
@@ -1899,7 +1911,7 @@ window.rehearsalHostedActions = {
     if (restoreDraft) cacheTranscript(snapshot.transcript, state.audioGeneration, { edited: true });
     if (state.report) renderAnnotatedTranscript(state.report);
     showPage(snapshot.page, { focus: false });
-    setStatus(snapshot.recordingId ? 'Your rehearsal, transcript, and saved feedback were restored. No new analysis was needed.' : 'Your preparation was restored.');
+    setStatus(snapshot.recordingId ? 'Your rehearsal, transcript, and saved feedback were restored.' : 'Your preparation was restored.');
     return true;
   },
   configurationReady() { state.recoveryNeedsConfig = false; },
@@ -2004,7 +2016,7 @@ window.rehearsalHostedActions = {
       $('assignment-status').textContent = input.assignmentInstructions ? 'Saved assignment instructions restored. Choose the original file to see its preview again.' : 'No assignment instructions were saved with this rehearsal.';
     }
     if (record.report) { state.report = record.report; renderReport(); }
-    $('audio-save-status').textContent = 'Saved privately to your account.';
+    setAudioSaveStatus('Saved to your account.', Boolean(state.cloudRecordingId));
     $('record-title').textContent = 'Live Transcript';
     setStatus('Saved rehearsal opened. Replay does not upload or reprocess the recording.');
     if (showRehearse) showPage('rehearse');
@@ -2015,7 +2027,7 @@ window.rehearsalHostedActions = {
     state.cloudRecordingId = '';
     resetTranscriptForModelChange();
     showTranscriptReadyState();
-    $('audio-save-status').textContent = 'Cloud copy deleted. This open take remains in this tab; analyzing it again will create a new cloud copy.';
+    setAudioSaveStatus('Cloud copy deleted. This open take remains in this tab; analyzing it again will create a new cloud copy.');
   },
 };
 
@@ -2137,7 +2149,7 @@ window.rehearsalService?.setRecordingSavedHandler?.((blob, id) => {
   if (state.audioBlob !== blob) return;
   state.cloudRecordingId = id;
   window.rehearsalAccount?.saveCurrentRehearsal?.();
-  $('audio-save-status').textContent = 'Saved privately to your account. Transcription and coaching can be retried without uploading again.';
+  setAudioSaveStatus('Saved to your account. Transcription and coaching can be retried without uploading again.', Boolean(state.cloudRecordingId));
   window.rehearsalAccount?.refreshHistory();
 });
 api('/api/config').then(updateConfig).catch(error => setStatus(errorMessage(error), 'error'));
