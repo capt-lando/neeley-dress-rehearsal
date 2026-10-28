@@ -1732,12 +1732,12 @@ function renderReport() {
   });
   $('blunder-disclaimer').textContent = blunders.disclaimer || 'Coverage is an estimate from the transcript. Missing words can affect results; review the evidence before drawing conclusions.';
   const thesis = analysis.thesis || {};
-  $('thesis-summary').textContent = textItem(thesis.summary) || 'A clear central idea needs more context.';
+  $('thesis-summary').textContent = textItem(thesis.summary) || 'No central-idea summary is available for this take.';
   $('thesis-clarity').textContent = textItem(thesis.clarity);
   $('thesis-evidence').textContent = textItem(thesis.evidence);
   $('thesis-evidence').hidden = !thesis.evidence;
   fillList('strengths', analysis.strengths, 'Review the transcript for the moments you want to keep.');
-  fillList('improvements', analysis.improvements, 'State your main idea clearly and close with one specific next step.');
+  fillList('improvements', analysis.improvements, 'No specific improvements were suggested for this take.');
   fillList('rhetoric', analysis.rhetoric, 'A connected model analysis can help examine your argument, evidence, and rhetorical choices.');
   const rated = typeof analysis.overallRating === 'number' && Number.isFinite(analysis.overallRating);
   $('overall-rating').replaceChildren(addText('span', rated ? String(Math.round(analysis.overallRating)) : '—'));

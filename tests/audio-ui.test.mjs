@@ -1578,6 +1578,35 @@ test('analysis and corrected feedback reuse the replay transcript without repeat
   assert.equal(h.state.report.transcript, 'My name is Jordan. Practice helps everyone.');
 });
 
+test('new and restored pitch reports do not invent weaknesses from empty coaching fields', () => {
+  const transcript = 'TeamDock puts every deadline in one shared view. A campus pilot cut missed deadlines by half. Book a demo this week.';
+  const report = analyzeSpeech({ text: transcript, durationSeconds: 30, aiFeedback: {
+    improvements: [],
+    rubric: ['claim', 'evidence', 'structure', 'audience', 'conclusion'].map(criterion => ({
+      criterion, score: 4, reason: 'The pitch makes its case concisely.', evidence: [transcript],
+    })),
+  } });
+  assert.equal(report.analysis.method, 'ai');
+  assert.equal(report.analysis.thesis.summary, '', 'missing cue words must not be mistaken for a missing central idea');
+  for (const restored of [false, true]) {
+    const h = harness();
+    if (restored) {
+      h.window.rehearsalHostedActions.restoreRecording({ ...savedTake('pitch'), transcript, report });
+    } else {
+      h.state.report = report;
+      h.renderReport();
+    }
+    assert.equal(elementText(h.get('improvements')), 'No specific improvements were suggested for this take.');
+    assert.equal(elementText(h.get('thesis-summary')), 'No central-idea summary is available for this take.');
+    assert.equal(elementText(h.get('overall-rating')), '80 / 100');
+
+    const suggestion = 'Explain which students took part in the pilot.';
+    h.state.report = { ...report, analysis: { ...report.analysis, improvements: [suggestion] } };
+    h.renderReport();
+    assert.equal(elementText(h.get('improvements')), suggestion, 'supported coaching advice must still appear');
+  }
+});
+
 function annotation(text, quote, category = 'thesis', comment = 'Review this passage.') {
   const start = text.indexOf(quote);
   assert.ok(start >= 0, 'test annotation must quote the original transcript');
