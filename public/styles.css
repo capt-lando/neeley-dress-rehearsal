@@ -462,3 +462,4 @@
 @media print{.history-page{display:none!important}}
 /* Keep space above the transcript heading; collapse the removed copy below it. */
 @media screen{#analysis-disclaimer{visibility:hidden}#annotation-status[data-explanation="true"]{display:none}}
+.report-section.report-statistics{border-top:0}

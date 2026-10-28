@@ -208,16 +208,15 @@
     <section id="report" class="report" aria-labelledby="report-title" hidden>
       <div class="report-topline"><span id="report-source" class="report-source"></span></div>
       <div class="report-context-badges"><span id="report-rubric-badge" hidden>Instructor rubric included</span><span id="report-assignment-badge" hidden>Assignment instructions included</span><span id="report-transitions-badge" hidden>Planned transitions included</span></div>
-      <div class="report-header"><div><h2 id="report-title">Feedback</h2><p id="report-subtitle" class="support-text">Your rehearsal, broken down into things you can act on.</p></div><div class="report-actions"><button class="secondary-button small-button" id="download-report">Download report</button><button class="secondary-button small-button" id="print-report">Print</button></div></div>
+      <div class="report-header"><div><h2 id="report-title">Speech Statistics</h2><p id="report-subtitle" class="support-text">Your rehearsal, broken down into things you can act on.</p></div><div class="report-actions"><button class="secondary-button small-button" id="download-report">Download report</button><button class="secondary-button small-button" id="print-report">Print</button></div></div>
       <div id="report-warnings" class="report-warnings" hidden></div>
 
-      <section class="report-section" aria-labelledby="word-title">
-        <div class="report-section-title"><span>01</span><div><h3 id="word-title">Speech statistics</h3></div></div>
+      <section class="report-section report-statistics" aria-label="Speech statistics">
         <div class="stat-grid" id="word-stats"></div>
         <div class="word-detail-grid"><div><h4>Filler words &amp; repetitions</h4><div id="filler-stats" class="filler-stats"></div><p class="small-note" id="word-disclaimer"></p></div><div><h4>Words you come back to</h4><div id="top-words" class="top-words"></div><div id="repetition-list" class="repetition-list"></div></div></div>
       </section>
       <section class="report-section" aria-labelledby="blunder-title">
-        <div class="report-section-title"><span>02</span><div><h3 id="blunder-title">Mistake detection</h3></div></div>
+        <div class="report-section-title"><div><h3 id="blunder-title">Mistake detection</h3></div></div>
         <div id="blunder-list" class="blunder-list"></div>
         <div class="coverage-header"><h4>Did your points land?</h4><span id="coverage-summary"></span></div>
         <div id="coverage-list" class="coverage-list"></div><p id="blunder-disclaimer" class="small-note"></p>
