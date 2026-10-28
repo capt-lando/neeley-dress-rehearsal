@@ -7,7 +7,8 @@ try {
   if (!hosted) throw new Error('Configure the private recording service before starting this website.');
   const { createClient } = await import('@supabase/supabase-js');
   const client = createClient(hosted.url, hosted.publishableKey, { auth: {
-    flowType: 'pkce', persistSession: true, storage: sessionStorage, autoRefreshToken: true, detectSessionInUrl: true,
+    // Supabase's default browser storage shares sign-in and token refresh across tabs.
+    flowType: 'pkce', persistSession: true, autoRefreshToken: true, detectSessionInUrl: true,
   } });
   const service = createHostedService({ client, ...hosted, policyText });
   installBrowserTools(service);

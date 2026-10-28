@@ -18,6 +18,8 @@ Audio uploads automatically save and transcribe after file-signature, size, deco
 
 ## Refresh and privacy
 
+Sign-in is remembered across tabs and browser restarts in the same browser profile using Supabase's standard persistent session. It can last beyond 24 hours until you sign out, clear site data, or the provider ends the session. Sign-out updates other open tabs. Private browsing or blocked browser storage can limit persistence. Existing users may need to sign in once after this change from tab-only storage.
+
 Refresh reconnects to an existing transcription or coaching request without submitting it again. Active microphone recordings keep encrypted, half-second audio checkpoints in this browser. After sign-in, the app restores the saved portion of an interrupted take to the same private recording. The microphone remains stopped after refresh; recording cannot continue while the page is closed. The final uncommitted checkpoint can be lost on an abrupt shutdown.
 
 Draft encryption keys are held by the authenticated backend and expire after 24 hours. Browser storage contains encrypted audio and an authenticated manifest, not the key. Account, project, recording, and request identifiers are checked before decryption or recovery. Guessing another recording ID does not grant access. Signing out clears that account's local drafts and releases in-memory keys. Browser storage eviction or unavailable storage can prevent recovery; the app reports checkpoint failures.
