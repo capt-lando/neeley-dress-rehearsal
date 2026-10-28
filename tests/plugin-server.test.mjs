@@ -181,6 +181,72 @@ test('oversized annotation arrays remain repairable without publishing a partial
   store.dispose();
 });
 
+test('ten-minute coaching retains 75 selective passage-based annotations through the closing repetition', () => {
+  // Repeated wording reproduces the screenshot failure: a model need not count
+  // its global occurrence to address a passage late in a long rehearsal.
+  const phrase = 'Every student deserves support.';
+  const section = `${phrase} Evening tutoring helps workers attend after shifts while trained mentors guide practice and answer questions patiently.`;
+  const text = Array(75).fill(section).join('\n\n');
+  assert.equal(text.split(/\s+/).length, 1500);
+  const { store, rehearsalId, revision } = pending(undefined, { ...input, text, durationSeconds: 600 });
+  try {
+    const { prompt } = store.request(rehearsalId, revision);
+    assert.match(prompt, /up to 75 useful highlights/);
+    const payload = JSON.parse(prompt.slice(prompt.lastIndexOf('\nDATA_JSON:\n') + '\nDATA_JSON:\n'.length));
+    assert.equal(payload.transcriptPassages.map(passage => passage.text).join(''), text);
+    const value = feedback(text);
+    value.annotations = payload.transcriptPassages.flatMap(passage =>
+      [...passage.text.matchAll(/Every student deserves support\./g)].map((_, index) => ({
+        passageId: passage.id, quote: phrase, category: 'thesis', occurrence: index + 1,
+        comment: 'This phrase links the recommendation back to accessible support.',
+      })));
+    assert.equal(value.annotations.length, 75);
+    value.annotations.at(-1).category = 'great';
+    const result = store.submit(rehearsalId, revision, value);
+    const saved = store.get(rehearsalId).report;
+    assert.equal(result.status, 'complete');
+    assert.equal(saved.meta.durationSeconds, 600);
+    assert.equal(saved.transcript, text);
+    assert.deepEqual(saved.analysis.annotations, result.report.analysis.annotations);
+    assert.deepEqual(saved.analysis.annotations.map(item => item.start),
+      [...text.matchAll(/Every student deserves support\./g)].map(match => match.index));
+    assert.equal(saved.analysis.annotations.at(-1).start, text.lastIndexOf(phrase));
+    assert.equal(saved.analysis.annotations.at(-1).category, 'great');
+    assert.ok(saved.analysis.annotations.every(item => text.slice(item.start, item.end) === phrase));
+    assert.ok(saved.analysis.annotations.reduce((total, item) => total + item.quote.split(/\s+/).length, 0) <= 1500 * 0.2,
+      'larger annotation capacity still leaves most words unmarked');
+  } finally { store.dispose(); }
+});
+
+test('invalid passage IDs cannot silently attach later feedback to the opening and remain repairable', () => {
+  const opening = 'We should expand tutoring. Evening sessions help students after work while trained mentors answer questions and guide practice with patience.';
+  const ending = 'Please approve a pilot next term. We can measure attendance and improvement before deciding whether to continue this support program.';
+  const text = `${opening}\n\n${ending}`;
+  for (const invalidId of ['passage-99999', null, 2, 'wrong-valid-passage']) {
+    const { store, rehearsalId, revision } = pending(undefined, { ...input, text });
+    try {
+      const { prompt } = store.request(rehearsalId, revision);
+      const payload = JSON.parse(prompt.slice(prompt.lastIndexOf('\nDATA_JSON:\n') + '\nDATA_JSON:\n'.length));
+      const first = payload.transcriptPassages.find(passage => passage.text.includes('We should expand tutoring.'));
+      const last = payload.transcriptPassages.find(passage => passage.text.includes('Please approve a pilot next term.'));
+      assert.notEqual(first.id, last.id);
+      const value = feedback(text);
+      value.annotations = [{ passageId: invalidId === 'wrong-valid-passage' ? first.id : invalidId,
+        quote: 'Please approve a pilot next term.', category: 'great', comment: 'The closing asks for a concrete action.' }];
+      assert.throws(() => store.submit(rehearsalId, revision, value), error => {
+        assert.equal(error.code, 'INVALID_FEEDBACK');
+        assert.match(error.message, /passageId/);
+        return true;
+      });
+      assert.equal(store.get(rehearsalId).report, null);
+      assert.equal(store.get(rehearsalId).status, 'pending');
+      value.annotations[0].passageId = last.id;
+      const result = store.submit(rehearsalId, revision, value);
+      assert.equal(result.report.analysis.annotations[0].start, text.indexOf('Please approve a pilot next term.'));
+    } finally { store.dispose(); }
+  }
+});
+
 test('annotation replacement wording stays a suggestion and never rewrites the saved transcript', () => {
   const { store, rehearsalId, revision } = pending();
   const value = feedback();

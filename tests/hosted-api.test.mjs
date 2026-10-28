@@ -425,6 +425,56 @@ test('coaching uses saved duration, retains all preparation inputs, and returns 
   const options=f.calls.find(c=>c[0]==='coach')[1];assert.equal(options.apiKey,'private-coach-key');assert.equal(options.browser,false);for(const value of ['Support tutoring.','Hello students.','Next, costs.','Explain the claim.'])assert.ok(options.prompt.includes(value));
   assert.equal((await f.call('/analyze-text',{method:'POST',body:{...body,text:'A changed speech.'}})).status,409);assert.equal(f.debits,1);
 });
+test('ten-minute analysis saves and restores 75 selective passage-based annotations with one paid call',async()=>{
+  const phrase='Every student deserves support.';
+  const section=`${phrase} Evening tutoring helps workers attend after shifts while trained mentors guide practice and answer questions patiently.`;
+  const text=Array(75).fill(section).join('\n\n');
+  assert.equal(text.split(/\s+/).length,1500);
+  let coachCalls=0;
+  const f=fixture({coach:async options=>{
+    coachCalls++;
+    assert.match(options.prompt,/up to 75 useful highlights/);
+    const data=JSON.parse(options.prompt.slice(options.prompt.lastIndexOf('\nDATA_JSON:\n')+'\nDATA_JSON:\n'.length));
+    assert.equal(data.durationSeconds,600);
+    assert.equal(data.transcriptPassages.map(passage=>passage.text).join(''),text);
+    // Use IDs provided to the model, not externally counted global occurrences.
+    const annotations=data.transcriptPassages.flatMap(passage=>
+      [...passage.text.matchAll(/Every student deserves support\./g)].map((_,index)=>({
+        passageId:passage.id,quote:phrase,category:'thesis',occurrence:index+1,
+        comment:'This phrase links the recommendation back to accessible support.',
+      })));
+    assert.equal(annotations.length,75);
+    annotations.at(-1).category='great';
+    return {thesis:{summary:'Expand access to tutoring.',clarity:'A clear recommendation.',evidence:[phrase]},
+      rubric:['claim','evidence','structure','audience','conclusion'].map(criterion=>({
+        criterion,score:3,reason:'A grounded coaching observation.',evidence:[phrase],
+      })),annotations};
+  }});
+  Object.assign(f.rows.get(recording),{duration_seconds:600,transcript:text});
+  const body={...analyze.body,text};
+  const response=await f.call('/analyze-text',{method:'POST',body});
+  assert.equal(response.status,200);
+  const report=await response.json();
+  assert.equal(report.meta.coachingStatus,'complete');
+  assert.equal(report.analysis.annotations.length,75);
+  const expectedPositions=[...text.matchAll(/Every student deserves support\./g)].map(match=>match.index);
+  assert.deepEqual(report.analysis.annotations.map(item=>item.start),expectedPositions);
+  assert.equal(report.analysis.annotations.at(-1).category,'great');
+  assert.ok(report.analysis.annotations.every(item=>text.slice(item.start,item.end)===phrase));
+  assert.ok(report.analysis.annotations.reduce((sum,item)=>sum+item.quote.split(/\s+/).length,0)<=1500*0.2,
+    'the capacity increase does not require blanket highlighting');
+  const saved=(await(await f.call('/recordings/'+recording)).json()).recording.report;
+  const recovered=(await(await f.call('/requests/'+requestId)).json()).result;
+  const replay=await(await f.call('/analyze-text',{method:'POST',body})).json();
+  for(const result of [saved,recovered,replay,f.rows.get(recording).report]) {
+    assert.equal(result.transcript,text);
+    assert.equal(result.meta.durationSeconds,600);
+    assert.deepEqual(result.analysis.annotations,report.analysis.annotations);
+  }
+  assert.equal(coachCalls,1);
+  assert.equal(f.debits,1);
+});
+
 test('assignment instructions survive analysis, private storage, replay and refresh recovery without truncation',async()=>{
   const assignmentInstructions='  '+ 'A'.repeat(39969)+'\nFINAL ASSIGNMENT REQUIREMENT';
   assert.equal(assignmentInstructions.length,40000);

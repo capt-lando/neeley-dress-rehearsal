@@ -71,6 +71,7 @@ test('OpenAI Responses sends private headers, disables storage, and reads text b
   assert.equal(request.url, 'https://api.openai.com/v1/responses');
   assert.equal(request.init.headers.Authorization, `Bearer ${key}`);
   assert.equal(request.body.store, false);
+  assert.equal(request.body.max_output_tokens, 16384, 'a ten-minute rehearsal has room for the expanded annotation budget');
   assert.equal(request.body.input, prompt);
   assert.equal(request.body.reasoning.effort, 'low');
   assert.equal(request.body.temperature, undefined);

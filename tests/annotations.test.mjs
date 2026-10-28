@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeSpeech, buildAnalysisPrompt } from '../lib/analysis.mjs';
-import { MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
+import { annotationBudget, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 import { readFile } from 'node:fs/promises';
 
 function annotationsFor(text, annotations) {
@@ -12,6 +12,11 @@ function annotationsFor(text, annotations) {
       annotations,
     },
   }).analysis.annotations;
+}
+
+function promptPayload(text) {
+  const prompt = buildAnalysisPrompt({ text });
+  return JSON.parse(prompt.slice(prompt.lastIndexOf('DATA_JSON:\n') + 'DATA_JSON:\n'.length));
 }
 
 test('AI annotations retain exact original offsets across Unicode, emoji and line breaks', () => {
@@ -139,6 +144,72 @@ test('later repeated passages stay at their reviewed occurrences without automat
   assert.equal(annotations.at(-1).category, 'great');
 });
 
+test('passage IDs place selected annotations across repeated whole paragraphs without marking unselected copies', () => {
+  const paragraph = 'Hello, I am Morgan. Um, I want to explain our study group idea. Uh, the group would meet on Wednesday. I like working with classmates, and the room looks like a quiet library. The plan is, like, flexible enough for different schedules. I, I think we should begin with one meeting. Um, we do not need a large budget. Uh, we need a clear question and a useful example. Thank you for listening.';
+  const text = Array(5).fill(paragraph).join('\n\n');
+  const quote = 'we should begin with one meeting';
+  const payload = promptPayload(text);
+  assert.equal(payload.transcriptPassages.map(passage => passage.text).join(''), text);
+  let offset = 0;
+  const passages = payload.transcriptPassages.map(passage => {
+    const located = { ...passage, start: offset, end: offset + passage.text.length };
+    offset = located.end;
+    return located;
+  });
+  const selected = [0, 2, 4].map(index => index * (paragraph.length + 2) + paragraph.indexOf(quote));
+  const annotations = annotationsFor(text, selected.map((start, index) => ({
+    passageId: passages.find(passage => passage.start <= start && passage.end >= start + quote.length).id,
+    quote, category: 'thesis', assessment: 'observation', comment: `This selected passage returns to the proposal at stage ${index + 1}.`,
+  })));
+  assert.deepEqual(annotations.map(annotation => annotation.start), selected);
+  assert.equal(annotations.length, 3, 'the two unselected copies must remain unmarked');
+  for (const annotation of annotations) assert.equal(text.slice(annotation.start, annotation.end), quote);
+});
+
+test('a supplied invalid passage ID or a quote outside its passage never falls back to the opening', () => {
+  const first = 'This opening introduces the proposal for a shared study group.';
+  const last = 'This ending invites the audience to choose a useful meeting time.';
+  const text = `${first}\n${last}`;
+  const passages = promptPayload(text).transcriptPassages;
+  const base = { quote: first, category: 'thesis', comment: 'A grounded opening.' };
+  for (const passageId of ['passage-9999', '', null, undefined, 1, {}, [], '__proto__', passages.at(-1).id]) {
+    assert.deepEqual(annotationsFor(text, [{ ...base, passageId }]), [], `invalid scope ${String(passageId)} must not be reassigned`);
+  }
+  assert.deepEqual(annotationsFor(text, [{ ...base, passageId: passages[0].id, quote: `${first}\n${last}` }]), [], 'a quote cannot cross its selected passage boundary');
+  assert.equal(annotationsFor(text, [base])[0].start, 0, 'legacy feedback without passageId remains compatible');
+});
+
+test('occurrence is local to a selected passage and global only for legacy feedback', () => {
+  const sentence = 'We can improve access, and we can improve access.';
+  const text = `${sentence}\n${sentence}`;
+  const passageId = promptPayload(text).transcriptPassages.at(-1).id;
+  const base = { quote: 'improve access', category: 'clarity', comment: 'Clarify the second mention in this passage.' };
+  const [selected] = annotationsFor(text, [{ ...base, passageId, occurrence: 2 }]);
+  assert.equal(selected.start, text.lastIndexOf(base.quote));
+  assert.deepEqual(annotationsFor(text, [{ ...base, passageId, occurrence: 3 }]), []);
+  assert.equal(annotationsFor(text, [{ ...base, occurrence: 2 }])[0].start, sentence.lastIndexOf(base.quote));
+});
+
+test('passage indexing retains Unicode and whitespace and bounds long unpunctuated speech', () => {
+  const text = `Café\u0301s 🚀 need a practical example.\r\n\n${'students can rehearse together '.repeat(90)}closing phrase 🚀`;
+  const passages = promptPayload(text).transcriptPassages;
+  assert.equal(passages.map(passage => passage.text).join(''), text);
+  assert.equal(new Set(passages.map(passage => passage.id)).size, passages.length);
+  assert.ok(passages.every(passage => passage.text.length > 0 && passage.text.length <= 1000));
+  const last = passages.at(-1), quote = 'closing phrase 🚀';
+  const [annotation] = annotationsFor(text, [{ passageId: last.id, quote, category: 'clarity', comment: 'An exact ending quote.' }]);
+  assert.equal(annotation.start, text.lastIndexOf(quote));
+  assert.equal(text.slice(annotation.start, annotation.end), quote);
+  const unicodeToken = `${'x'.repeat(999)}🚀${'y'.repeat(1100)}`;
+  const tokenPassages = promptPayload(unicodeToken).transcriptPassages;
+  assert.equal(tokenPassages.map(passage => passage.text).join(''), unicodeToken);
+  assert.ok(tokenPassages.every(passage => passage.text.length <= 1000 && passage.text.isWellFormed()));
+  const tinySentences = 'A. '.repeat(1000).trim();
+  const tinyPassages = promptPayload(tinySentences).transcriptPassages;
+  assert.ok(tinyPassages.length < 100, 'short fragments are grouped to bound prompt overhead');
+  assert.equal(tinyPassages.map(passage => passage.text).join(''), tinySentences);
+});
+
 test('valid later notes survive a prefix of unusable candidates', () => {
   const text = 'An opening. A middle section. A specific conclusion.';
   const annotations = annotationsFor(text, [
@@ -262,20 +333,29 @@ test('coaching prompt requests grounded annotations and preserves the transcript
 
 test('annotation guidance scales with speech length and remains selective across the full speech', () => {
   const short = buildAnalysisPrompt({ text: 'We should expand tutoring. Please approve the pilot.' });
+  const tenMinuteText = 'Students benefit from deliberate rehearsal time. '.repeat(250).trim();
+  const tenMinute = buildAnalysisPrompt({ text: tenMinuteText });
   const longText = `${'We should expand tutoring for everyone. '.repeat(500)}Final sentence of the speech.`;
   const long = buildAnalysisPrompt({ text: longText });
-  assert.match(short, /length-aware annotation budget for this transcript is up to 6 useful highlights/);
-  assert.match(long, /length-aware annotation budget for this transcript is up to 48 useful highlights/);
+  assert.equal(annotationBudget('A brief idea.'), 12);
+  assert.equal(annotationBudget(tenMinuteText), 75, '1500 spoken words have room for feedback throughout a ten-minute speech');
+  assert.equal(annotationBudget(longText), 120);
+  assert.match(short, /length-aware annotation capacity for this transcript is up to 12 useful highlights/);
+  assert.match(tenMinute, /length-aware annotation capacity for this transcript is up to 75 useful highlights/);
+  assert.match(long, /length-aware annotation capacity for this transcript is up to 120 useful highlights/);
   assert.match(long, /not a quota or a minimum/);
   assert.match(long, /opening, each substantive body section, and the ending/);
   assert.match(long, /phrases that connect back to the actual thesis/);
   assert.match(long, /Leave other text unmarked/);
   assert.match(long, /Keep each annotation comment under 25 words/);
   assert.match(long, /never manufacture praise or require a star/);
-  assert.match(long, /count occurrences throughout the complete transcript/);
-  assert.doesNotMatch(long, /up to 12 useful/);
+  assert.match(long, /Read all transcriptPassages from the opening through the final passage/);
+  assert.match(long, /Copy each selected passageId from transcriptPassages/);
+  assert.match(long, /do not count matches in earlier passages/);
+  assert.doesNotMatch(long, /annotation budget|up to 48 useful|up to 6 useful/);
   const payload = JSON.parse(long.slice(long.lastIndexOf('DATA_JSON:\n') + 'DATA_JSON:\n'.length));
   assert.equal(payload.transcript, longText);
+  assert.equal(payload.transcriptPassages.map(passage => passage.text).join(''), longText);
 });
 
 test('the hosted coaching policy matches the editable local policy', async () => {
