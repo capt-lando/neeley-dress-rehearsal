@@ -50,7 +50,7 @@ function preparation(character) {
 
 // 256 KiB plus the short provider instructions and message framing stays below
 // GPT-6 Luna's 272K-token long-context threshold even at one token per UTF-8 byte.
-// At $0.125/M cache-write input and $0.50/M output (8,192-token cap), that leaves
+// At $0.125/M cache-write input and $0.50/M output (16,384-token cap), that leaves
 // substantial headroom inside the $0.06 reservation. This is not an invoice cap.
 test('serialized multibyte coaching context is rejected before reservation or provider work', async () => {
   const body = preparation('漢');
