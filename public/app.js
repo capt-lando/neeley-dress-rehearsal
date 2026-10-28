@@ -495,7 +495,6 @@ function updateConfig(config) {
   if (state.config.transcriptionModel !== previousSpeechModel && !manualPanelTranscript) resetTranscriptForModelChange();
   $('cloud-recordings-details').hidden = !state.config.hosted;
   $('saved-recordings-details').hidden = Boolean(state.config.hosted);
-  $('history-privacy').textContent = state.config.hosted ? 'Only available to your signed-in account.' : 'Saved only in this browser.';
   $('connection-label').textContent = state.config.hosted
     ? state.config.auth?.signedIn ? 'My account' : 'Sign in'
     : state.config.coachingViaHost ? 'Codex coaching' : 'Connection unavailable';
@@ -1125,7 +1124,6 @@ function renderSavedRecordings() {
   $('saved-recordings-count').textContent = state.unsavedRecordings.size ? `${state.savedRecordings.length} saved · ${state.unsavedRecordings.size} unsaved` : String(state.savedRecordings.length);
   if (!state.config.hosted) {
     $('history-count').textContent = String(records.length);
-    $('history-privacy').textContent = 'Saved only in this browser.';
   }
   for (const [index, record] of records.entries()) {
     const row = addText('div', '', 'saved-recording-row');
