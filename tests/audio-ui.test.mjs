@@ -11,6 +11,8 @@ import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationP
 import { createRehearsalChat } from '../public/rehearsal-chat.js';
 import { analyzeSpeech, sanitizeAiFeedback, MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 import { MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES } from '../lib/recording-limits.mjs';
+import { buildAnalysisPrompt } from '../lib/analysis.mjs';
+import { buildTranscriptPdfDefinition } from '../lib/transcript-pdf.mjs';
 const TEST_MODEL_ID = 'gpt-live-transcribe';
 
 function inspectWav(wav) {
@@ -1729,6 +1731,87 @@ test('annotation validation refuses mismatched ranges, unknown categories and ov
   assert.ok(!JSON.stringify(model).includes('Invented quote') && !JSON.stringify(model).includes('Duplicate excerpt.'));
 });
 
+test('transition proposals flow from grounded AI feedback into unique numbered notes and a verbatim PDF model', () => {
+  const h = harness();
+  const text = 'Café volunteers help.\n\nCosts matter. Benefits matter. Anyway, we should begin.';
+  const prompt = buildAnalysisPrompt({ text });
+  const payload = JSON.parse(prompt.slice(prompt.lastIndexOf('DATA_JSON:\n') + 'DATA_JSON:\n'.length));
+  const proposal = (quote, extra = {}) => ({ quote, category: 'transition', occurrence: 1,
+    passageId: payload.transcriptPassages.find(passage => passage.text.includes(quote)).id,
+    comment: 'Make the relationship between the cost and benefit clearer.',
+    suggestion: 'With that cost in mind, consider the benefit.', ...extra });
+  const report = analyzeSpeech({ text, aiFeedback: { annotations: [
+    { quote: 'Costs matter. Benefits matter.', category: 'clarity', comment: 'Explain what the cost achieves.' },
+    proposal('Benefits matter.', { placement: 'before' }),
+    proposal('Anyway,', { suggestion: 'Given that benefit, we should act.' }),
+  ] } });
+  assert.equal(report.analysis.annotations.length, 3);
+  report.transcript = text;
+  h.renderAnnotatedTranscript(report);
+  const notes = h.get('annotations-notes').children;
+  assert.equal(notes.length, 3, 'splitting a highlighted span must not duplicate its note');
+  assert.deepEqual(notes.map(note => note.id), ['annotation-note-1', 'annotation-note-2', 'annotation-note-3']);
+  assert.match(elementText(notes[1]), /^Suggested transition: .*Suggested wording: With that cost/);
+  assert.equal(notes[1].className, 'annotation-transition');
+  const model = h.buildTranscriptExport(report);
+  assert.equal(exportedTranscript(model), text);
+  assert.doesNotThrow(() => buildTranscriptPdfDefinition(model), 'the real export validator accepts split spans and insertion proof');
+  const { document } = parseHTML('<html><body><div id="transcript"></div></body></html>');
+  const container = document.getElementById('transcript');
+  renderDiscussableTranscript({ document, container, text, segments: h.annotationSegments(text, report.analysis.annotations) });
+  const caret = container.querySelector('.annotation-transition-ref');
+  assert.equal(caret.id, 'annotation-quote-2');
+  assert.equal(caret.getAttribute('href'), '#annotation-note-2');
+  assert.equal(caret.getAttribute('aria-label'), 'Suggested transition note 2');
+  assert.equal(container.querySelectorAll('.annotation-ref').length, 3);
+  assert.equal(container.querySelector('mark.annotation-transition').textContent, 'Anyway,');
+  assert.ok(!container.textContent.includes('With that cost in mind'));
+  assert.ok(!container.textContent.includes('Given that benefit'));
+  for (const reference of container.querySelectorAll('.annotation-ref')) reference.remove();
+  assert.equal(container.textContent, text, 'all original words, Unicode and paragraph breaks survive');
+});
+
+test('the UI refuses forged or duplicated transition gaps and keeps every source character', () => {
+  const h = harness(), text = 'One idea. \n\tAnother idea.';
+  const anchorQuote = 'Another idea.', anchorStart = text.indexOf(anchorQuote), start = text.indexOf(' \n');
+  const valid = { category: 'transition', kind: 'insertion', quote: '', start, end: start,
+    anchorQuote, anchorStart, anchorEnd: text.length, placement: 'before',
+    comment: 'Connect the two ideas.', suggestion: 'With that in mind,', assessment: 'needs_work' };
+  for (const change of [
+    { quote: 'With that in mind,' }, { anchorQuote: 'Imagined evidence.' }, { anchorStart: anchorStart + 1 },
+    { start: start + 1, end: start + 1 }, { placement: 'middle' }, { category: 'structure' },
+    { suggestion: '' }, { kind: 'invented' },
+  ]) {
+    const segments = h.annotationSegments(text, [{ ...valid, ...change }]);
+    assert.equal(segments.map(segment => segment.text).join(''), text);
+    assert.equal(segments.filter(segment => segment.annotation).length, 0);
+  }
+  const segments = h.annotationSegments(text, [valid, { ...valid, comment: 'Duplicate gap.' }]);
+  assert.equal(segments.filter(segment => segment.annotation).length, 1);
+  assert.equal(segments.map(segment => segment.text).join(''), text);
+  const model = h.buildTranscriptExport({ transcript: text, analysis: { method: 'ai', annotations: [valid] } });
+  assert.doesNotThrow(() => buildTranscriptPdfDefinition(model));
+  for (const assessment of ['strength', 'observation', undefined]) {
+    const restored = h.buildTranscriptExport({ transcript: text, analysis: { method: 'ai', annotations: [{ ...valid, assessment }] } });
+    assert.equal(restored.segments.find(segment => segment.annotation).annotation.assessment, 'needs_work');
+    assert.doesNotThrow(() => buildTranscriptPdfDefinition(restored), 'restored insertion assessments cannot break export');
+  }
+});
+
+test('effective transitions remain unchanged when the coach returns no transition suggestion', () => {
+  const h = harness(), text = 'With those costs in mind, consider the benefits.';
+  const report = analyzeSpeech({ text, aiFeedback: { annotations: [
+    { quote: text, category: 'structure', assessment: 'strength', comment: 'The connection makes the comparison clear.' },
+  ] } });
+  report.transcript = text;
+  h.renderAnnotatedTranscript(report);
+  assert.equal(h.get('annotations-notes').children.length, 1);
+  assert.equal(h.get('annotations-notes').children[0].className, 'annotation-structure');
+  const model = h.buildTranscriptExport(report);
+  assert.ok(model.segments.every(segment => segment.annotation?.category !== 'transition'));
+  assert.equal(exportedTranscript(model), text);
+});
+
 test('selective annotations render through the ending beyond the former twelve-note and hundred-candidate limits', () => {
   const h = harness(), quote = 'Practice makes ideas clearer.';
   const paragraphs = Array.from({ length: 240 }, (_, index) => `${quote} Unmarked context for point ${index + 1}.\n`);
@@ -2121,7 +2204,7 @@ test('full browser startup binds existing HTML controls and never references a r
   assert.notEqual(h.get('app-status').className, 'app-status error', 'initial settings must render successfully');
 });
 
-test('header Update feedback refreshes a saved result using current edits and shares busy and empty-transcript guards', async () => {
+test('header Re-run feedback refreshes a saved result using current edits and shares busy and empty-transcript guards', async () => {
   const requests = [], pending = deferred();
   const h = harness(async (path, options) => {
     if (path === '/api/config') return hostedConfig;
@@ -2136,7 +2219,7 @@ test('header Update feedback refreshes a saved result using current edits and sh
   h.window.rehearsalHostedActions.restoreRecording({ ...savedTake('saved-review'), durationSeconds: 15, transcript: original, report });
   assert.equal(h.get('transcript').value, original);
   for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, false, 'saved transcripts can be reviewed again');
-  assert.match(h.get('annotation-status').textContent, /Update feedback for a fresh AI review/);
+  assert.match(h.get('annotation-status').textContent, /Re-run feedback for a fresh AI review/);
   const corrected = 'Our study group gives students a reliable place to practice.';
   h.get('transcript').value = corrected;
   await h.emitElementEvent('transcript', 'input');

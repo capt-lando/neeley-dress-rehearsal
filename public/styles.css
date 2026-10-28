@@ -86,6 +86,7 @@
 .annotation-thesis{background:#f0e9f7;color:#44265c}
 .annotation-evidence{background:#e8f4ea;color:#295c38}
 .annotation-structure{background:#e8f1fa;color:#294f72}
+.annotation-transition{background:#e5f4f3;color:#177c80}
 .annotation-delivery{background:#fbf2dc;color:#745411}
 .annotation-clarity{background:#faeaf0;color:#74364d}
 .annotation-great{background:#fff9ee;color:#6e541b}
@@ -103,6 +104,11 @@
 .annotated-transcript mark.annotation-great.is-selected{filter:none;box-shadow:0 0 0 1px #c69c3f66,0 0 9px #d8ab4c55;text-shadow:0 0 6px #ddb45a60;animation:annotation-great-sweep 8s ease-in-out infinite}
 .annotated-transcript mark[data-assessment="needs_work"].is-selected{filter:none;box-shadow:none;text-decoration-color:#a52e36;text-decoration-thickness:2.5px;animation:none}
 .annotation-ref.is-selected{color:#3b2052;text-decoration:underline;text-underline-offset:3px}
+.annotation-caret{display:inline-block;width:7px;height:7px;border:solid #177c80;border-width:2px 0 0 2px;transform:rotate(45deg);margin:0 4px -2px 1px;flex-shrink:0}
+.annotation-ref.annotation-transition-ref{color:#177c80;background:#e5f4f3;padding:3px 4px;user-select:none}
+.annotation-ref.annotation-transition-ref.is-selected{color:#105b5e;box-shadow:0 0 0 2px #177c8029}
+.annotated-transcript mark.annotation-transition[data-assessment]{background:#e5f4f3;color:#177c80;text-decoration:none}
+.annotated-transcript mark.annotation-transition[data-assessment].is-selected{background:#d4ecea;box-shadow:0 0 0 2px #177c8029;text-decoration:none}
 .annotation-note-suggestion{margin:5px 0 0;font-size:inherit;color:inherit}
 .annotation-bubble{position:fixed;z-index:30;width:340px;max-width:calc(100vw - 24px);padding:17px 18px 18px;background:#fff;border:1px solid #dcd0e5;border-radius:14px;box-shadow:0 9px 32px #3923471f;color:#49394f;animation:annotation-bubble-in .16s ease-out;outline:none}
 .annotation-bubble::before{content:"";position:absolute;left:var(--annotation-tail-left,32px);top:-7px;width:12px;height:12px;background:#fff;border-left:1px solid #dcd0e5;border-top:1px solid #dcd0e5;transform:translateX(-50%) rotate(45deg)}
@@ -112,6 +118,8 @@
 .annotation-bubble-heading .icon-button{flex-shrink:0;width:24px;height:24px;font-size:19px}
 .annotation-bubble[data-category="great"] .annotation-bubble-heading h4{color:#86610c}
 .annotation-bubble[data-category="great"] .annotation-bubble-heading h4::before{content:"★";margin-right:6px;color:#a7770d}
+.annotation-bubble[data-category="transition"] .annotation-bubble-heading h4{color:#177c80}
+.annotation-bubble[data-category="transition"] .annotation-bubble-revision blockquote{background:#e5f4f3;border-color:#177c80}
 .annotation-bubble-content{max-height:min(45vh,310px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .annotation-bubble-content>p{font-size:12px;line-height:1.7;margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .annotation-bubble-revision{border-top:1px solid #ece5f1;margin-top:13px;padding-top:11px}

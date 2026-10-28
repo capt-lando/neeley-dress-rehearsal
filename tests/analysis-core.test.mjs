@@ -24,6 +24,24 @@ test('Node wrapper and browser core use the same current policy and produce iden
   assert.match(buildAnalysisPrompt(input, 'Fresh customized policy.'), /^Fresh customized policy\./);
 });
 
+test('transition prompt keeps suggestions optional, anchored and separate from spoken words', () => {
+  const text = 'Costs matter. Benefits matter.';
+  const prompt = buildAnalysisPrompt({ text, plannedTransitions: 'Now let us discuss the benefits.' }, policy);
+  assert.equal(payload(prompt).transcript, text);
+  assert.match(prompt, /Transition suggestions are optional, never a quota/);
+  assert.match(prompt, /An effective explicit or implicit transition is already good/);
+  assert.match(prompt, /do not force an extra bridge, automatically criticize a topic change/);
+  assert.match(prompt, /Effective transitions can receive structure or great praise/);
+  assert.match(prompt, /To improve an existing spoken transition, quote it and omit placement/);
+  assert.match(prompt, /include passageId and occurrence/);
+  assert.match(prompt, /"placement":"before" or "placement":"after"/);
+  assert.match(prompt, /whitespace between actual spoken words on both sides/);
+  assert.match(prompt, /Put the new bridge only in suggestion; never add words to the transcript, quote, or evidence/);
+  assert.match(prompt, /never return insertion offsets/);
+  assert.match(prompt, /Always use needs_work for transition, with a concrete suggestion/);
+  assert.match(prompt, /do not duplicate suggestions for the same gap/);
+});
+
 test('both mode preserves the complete original script and points but derives only the explicit checklist', () => {
   const input = {
     text: 'We should expand tutoring. Tutoring improves access.',

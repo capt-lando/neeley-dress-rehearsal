@@ -121,7 +121,7 @@ test('the full 240-note definition retains every category, assessment style, des
     assert.ok(row[1].stack[0].text.map(run=>run.text).join('').endsWith(`COMPLETE NOTE ${number}`));
     if((number-1)%3===0)assert.ok(row[1].stack[1].text.map(run=>run.text).join('').endsWith(`COMPLETE SUGGESTION ${number}`));
     const passage=definition.content[2].text.find(run=>run.text===`Passage ${number}. `);
-    if((number-1)%3===0){assert.equal(passage.decoration,'underline');assert.equal(passage.decorationColor,'#c55050');}
+    if((number-1)%3===0&&input.segments[number-1].annotation.category!=='transition'){assert.equal(passage.decoration,'underline');assert.equal(passage.decorationColor,'#c55050');}
     else assert.equal(passage.background,PDF_ANNOTATIONS[input.segments[number-1].annotation.category].background);
   }
   assert.ok(all.every(item=>!Object.hasOwn(item,'link')&&!Object.hasOwn(item,'url')&&!Object.hasOwn(item,'javascript')));
@@ -168,4 +168,100 @@ test('export captures an immutable snapshot before asynchronous font loading and
     const text=pages.map(page=>page.text).join(' ');
     assert.match(text,/ORIGINAL SNAPSHOT/);assert.match(text,/ORIGINAL NOTE/);assert.doesNotMatch(text,/MUTATED/);
   });
+});
+
+function insertionModel({placement='before',splitSpan=false}={}) {
+  const text='  First idea.\n \tSecond idea.  ',offset=text.indexOf('\n');
+  const anchorQuote=placement==='before'?'Second idea.':'First idea.',anchorStart=text.indexOf(anchorQuote),anchorEnd=anchorStart+anchorQuote.length;
+  const insertion={category:'transition',kind:'insertion',quote:'',start:offset,end:offset,anchorQuote,anchorStart,anchorEnd,placement,
+    comment:'Give the audience a bridge between these ideas.',suggestion:'Now let us consider the second idea.',assessment:'needs_work',number:splitSpan?2:1};
+  const span={category:'structure',assessment:'observation',number:1,start:0,end:text.length,quote:text,comment:'These two ideas make a useful comparison.'};
+  return {text,segments:[
+    {text:text.slice(0,offset),...(splitSpan?{annotation:{...span}}:{})},
+    {text:'',annotation:insertion},
+    {text:text.slice(offset),...(splitSpan?{annotation:{...span}}:{})},
+  ]};
+}
+
+test('transition insertion exports one teal caret and note while preserving all source whitespace',()=>{
+  for(const placement of ['before','after']) {
+    const input=insertionModel({placement}),definition=buildTranscriptPdfDefinition(input),runs=definition.content[2].text;
+    assert.equal(runs.filter(run=>!run.linkToDestination).map(run=>run.text).join(''),input.text);
+    const marker=runs.filter(run=>run.linkToDestination);
+    assert.equal(marker.map(run=>run.text).join(''),'^ [1]');
+    assert.ok(marker.every(run=>run.color==='#177c80'&&run.sup===true&&run.decoration===undefined));
+    assert.equal(runs.map(run=>run.text).join(''),input.text.slice(0,input.segments[1].annotation.start)+'^ [1]'+input.text.slice(input.segments[1].annotation.start));
+    assert.ok(!runs.map(run=>run.text).join('').includes(input.segments[1].annotation.suggestion));
+    const rows=definition.content.at(-1).table.body;
+    assert.equal(rows.length,1);assert.equal(rows[0][0].id,'note-1');
+    assert.equal(rows[0][1].fillColor,'#e5f4f3');assert.equal(rows[0][1].color,'#177c80');
+    assert.match(rows[0][1].stack[0].text.map(run=>run.text).join(''),/^Suggested transition: /);
+    assert.equal(rows[0][1].stack[1].text.map(run=>run.text).join(''),'Suggested wording: Now let us consider the second idea.');
+  }
+});
+
+test('an insertion inside a split annotated span retains one reference and one note per annotation',async()=>{
+  const input=insertionModel({splitSpan:true}),definition=buildTranscriptPdfDefinition(input),runs=definition.content[2].text;
+  assert.equal(runs.filter(run=>!run.linkToDestination).map(run=>run.text).join(''),input.text);
+  assert.equal(runs.filter(run=>run.linkToDestination==='note-1').map(run=>run.text).join(''),' [1]');
+  assert.equal(runs.filter(run=>run.linkToDestination==='note-2').map(run=>run.text).join(''),'^ [2]');
+  assert.equal(definition.content.at(-1).table.body.length,2);
+  assert.ok(runs.filter(run=>!run.linkToDestination).every(run=>run.background===PDF_ANNOTATIONS.structure.background));
+  await inspect(await createTranscriptPdf(input),async({document,pages})=>{
+    const key=pages.findIndex(page=>page.text.includes('Color key & coaching notes'));
+    assert.equal(key,1);
+    assert.match(pages[0].text,/First idea/);assert.match(pages[0].text,/Second idea/);assert.match(pages[0].text,/\^/);
+    assert.ok(!pages[0].text.includes(input.segments[1].annotation.suggestion));
+    const links=pages[0].annotations;
+    // PDFMake may create separate link rectangles for the caret, space, and
+    // number. The visible reference and its destination must still be unique.
+    assert.equal(pages[0].text.match(/\[1\]/g)?.length,1);
+    assert.equal(pages[0].text.match(/\[2\]/g)?.length,1);
+    assert.deepEqual(new Set(links.map(link=>link.dest)),new Set(['note-1','note-2']));
+    for(const number of [1,2])assert.ok(await document.getDestination(`note-${number}`));
+    const notesText=pages.slice(key).map(page=>page.text).join(' ');
+    assert.match(notesText,/2 coaching notes/);assert.ok(notesText.includes(input.segments[1].annotation.suggestion));
+    assert.equal(notesText.split(input.segments[0].annotation.comment).length-1,1);
+  });
+});
+
+test('a transition already spoken uses teal highlighting rather than an insertion or red error underline',()=>{
+  const input=model(['First point. ',{text:'With that in mind,',category:'transition',assessment:'needs_work',
+    comment:'This bridge connects the next point.',suggestion:'Building on that point,'},' here is the next point.']);
+  const definition=buildTranscriptPdfDefinition(input),runs=definition.content[2].text;
+  const transition=runs.find(run=>run.text==='With that in mind,');
+  assert.equal(transition.background,'#e5f4f3');assert.equal(transition.color,'#177c80');assert.equal(transition.decoration,undefined);
+  assert.ok(!runs.some(run=>run.text.includes('^')));
+  assert.equal(runs.filter(run=>!run.linkToDestination).map(run=>run.text).join(''),input.text);
+});
+
+test('insertion and split-span validation rejects invented anchors, duplicate gaps, skipped source, and inconsistent notes',()=>{
+  const changes=[
+    input=>{input.segments[1].annotation.anchorQuote='Invented words.';},
+    input=>{input.segments[1].annotation.start++;input.segments[1].annotation.end++;},
+    input=>{input.segments[1].annotation.placement='inside';},
+    input=>{input.segments[1].annotation.suggestion='';},
+    input=>{input.segments[1].annotation.category='clarity';},
+    input=>{input.segments[1].annotation.assessment='strength';},
+    input=>{input.segments[1].annotation.anchorEnd=input.text.length+1;},
+    input=>{input.segments[1].annotation.kind='span';},
+    input=>{input.segments.splice(2,0,{text:'',annotation:{...input.segments[1].annotation,number:2}});},
+  ];
+  for(const change of changes){const input=insertionModel();change(input);assert.throws(()=>buildTranscriptPdfDefinition(input));}
+  for(const change of [
+    input=>{input.segments[2].annotation.comment='Changed note';},
+    input=>{delete input.segments[2].annotation;},
+    input=>{input.segments[2].annotation.start++;},
+  ]){const input=insertionModel({splitSpan:true});change(input);assert.throws(()=>buildTranscriptPdfDefinition(input));}
+  for(const text of [' First idea.','First idea. ','First idea.Second idea.']) {
+    const quote='First idea.',start=text.indexOf(quote),end=start+quote.length,offset=text.startsWith(' ')?0:end;
+    const insertion={...insertionModel().segments[1].annotation,anchorQuote:quote,anchorStart:start,anchorEnd:end,
+      placement:text.startsWith(' ')?'before':'after',start:offset,end:offset};
+    assert.throws(()=>buildTranscriptPdfDefinition({text,segments:[{text:text.slice(0,offset)},{text:'',annotation:insertion},{text:text.slice(offset)}]}));
+  }
+  const punctuation=insertionModel();
+  punctuation.text='...\nSecond idea.';const offset=3,anchorQuote='Second idea.';
+  punctuation.segments=[{text:'...'},{text:'',annotation:{...punctuation.segments[1].annotation,
+    start:offset,end:offset,anchorQuote,anchorStart:4,anchorEnd:punctuation.text.length}},{text:'\nSecond idea.'}];
+  assert.throws(()=>buildTranscriptPdfDefinition(punctuation),'a punctuation-only side is not a gap between spoken ideas');
 });

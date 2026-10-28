@@ -1624,7 +1624,7 @@ async function runAnalysis({ corrected = false, automatic = false } = {}) {
     progress.finish(report.analysis?.method === 'ai' && Number.isFinite(report.analysis.overallRating) ? 'complete' : 'partial', report.analysis?.method === 'ai' && Number.isFinite(report.analysis.overallRating) ? '' : 'Feedback is ready with limitations. Review the notice in your report.');
     window.rehearsalAccount?.track(report.analysis?.method === 'ai' ? 'analysis_completed' : 'analysis_failed');
     window.rehearsalAccount?.refreshHistory();
-    setStatus(state.transcriptText !== text ? 'The transcript changed while feedback was being prepared. Update feedback to analyze your latest corrections.' : '');
+    setStatus(state.transcriptText !== text ? 'The transcript changed while feedback was being prepared. Re-run feedback to analyze your latest corrections.' : '');
     if (state.currentPage === 'rehearse' && viewGeneration === state.viewGeneration) $('summary-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
     progress.finish(error.name === 'AbortError' ? 'cancelled' : 'error', error.name === 'AbortError' ? '' : errorMessage(error));
@@ -1760,44 +1760,66 @@ function renderReport() {
   markPromptStale();
   if ($('prompt-details').open) loadPromptPreview();
 }
-const ANNOTATION_LABELS = Object.freeze({ thesis: 'Thesis', evidence: 'Evidence', structure: 'Structure', delivery: 'Word habits', clarity: 'Clarity', great: 'Great sentence' });
+const ANNOTATION_LABELS = Object.freeze({ thesis: 'Thesis', evidence: 'Evidence', structure: 'Structure', delivery: 'Word habits', clarity: 'Clarity', great: 'Great sentence', transition: 'Suggested transition' });
+function validTransitionInsertion(source, item) {
+  if (item.category !== 'transition' || item.kind !== 'insertion' || item.quote !== '' || item.start !== item.end ||
+      !['before', 'after'].includes(item.placement) || !Number.isInteger(item.anchorStart) || !Number.isInteger(item.anchorEnd) ||
+      item.anchorStart < 0 || item.anchorEnd <= item.anchorStart || item.anchorEnd > source.length ||
+      typeof item.anchorQuote !== 'string' || !item.anchorQuote.trim() || item.anchorQuote.length > 500 ||
+      source.slice(item.anchorStart, item.anchorEnd) !== item.anchorQuote) return false;
+  let gapStart = item.placement === 'before' ? item.anchorStart : item.anchorEnd;
+  while (gapStart > 0 && /\s/u.test(source[gapStart - 1])) gapStart--;
+  let gapEnd = gapStart;
+  while (gapEnd < source.length && /\s/u.test(source[gapEnd])) gapEnd++;
+  return item.start === gapStart && gapEnd > gapStart && /[\p{L}\p{N}]/u.test(source.slice(0, gapStart)) &&
+    /[\p{L}\p{N}]/u.test(source.slice(gapEnd));
+}
 function annotationSegments(text, annotations) {
   const source = String(text || '');
-  const accepted = [];
-  let end = 0;
+  const accepted = [], gaps = new Set();
+  let spanEnd = 0;
   const candidates = Array.isArray(annotations) ? annotations.filter(item => item && typeof item === 'object').slice(0, MAX_TRANSCRIPT_ANNOTATIONS).sort((a, b) => a.start - b.start || a.end - b.end) : [];
   for (const item of candidates) {
     const category = annotationCategory(item);
     if (!Object.hasOwn(ANNOTATION_LABELS, category) || !Number.isInteger(item.start) || !Number.isInteger(item.end) ||
-        item.start < end || item.end <= item.start || item.end > source.length || typeof item.quote !== 'string' ||
-        source.slice(item.start, item.end) !== item.quote || typeof item.comment !== 'string' || !item.comment.trim()) continue;
-    accepted.push({ ...item, category, assessment: annotationAssessment(item), number: accepted.length + 1 });
-    end = item.end;
+        item.start < 0 || item.end > source.length || typeof item.comment !== 'string' || !item.comment.trim()) continue;
+    if (category === 'transition' && (typeof item.suggestion !== 'string' || !item.suggestion.trim() || item.suggestion.length > 500)) continue;
+    if (item.kind === 'insertion') {
+      if (!validTransitionInsertion(source, item) || gaps.has(item.start)) continue;
+      gaps.add(item.start);
+    } else {
+      if (item.kind != null || item.start < spanEnd || item.end <= item.start || typeof item.quote !== 'string' ||
+          source.slice(item.start, item.end) !== item.quote) continue;
+      spanEnd = item.end;
+    }
+    accepted.push({ ...item, category, assessment: category === 'transition' ? 'needs_work' : annotationAssessment(item), number: accepted.length + 1 });
   }
+  const spans = accepted.filter(item => item.kind !== 'insertion');
+  const insertions = new Map(accepted.filter(item => item.kind === 'insertion').map(item => [item.start, item]));
+  const boundaries = [...new Set([0, source.length, ...accepted.flatMap(item => [item.start, item.end])])].sort((a, b) => a - b);
   const segments = [];
-  let position = 0;
-  for (const annotation of accepted) {
-    if (annotation.start > position) segments.push({ text: source.slice(position, annotation.start), annotation: null });
-    segments.push({ text: source.slice(annotation.start, annotation.end), annotation });
-    position = annotation.end;
+  for (let index = 0; index < boundaries.length; index++) {
+    const position = boundaries[index], next = boundaries[index + 1];
+    if (insertions.has(position)) segments.push({ text: '', annotation: insertions.get(position) });
+    if (next > position) segments.push({ text: source.slice(position, next),
+      annotation: spans.find(item => item.start <= position && item.end >= next) || null });
   }
-  if (position < source.length || !segments.length) segments.push({ text: source.slice(position), annotation: null });
+  if (!segments.length) segments.push({ text: source, annotation: null });
   return segments;
 }
 function renderAnnotatedTranscript(report) {
   initializeTranscriptInteractions();
   const text = typeof report.transcript === 'string' ? report.transcript : '';
   const segments = annotationSegments(text, report.analysis?.method === 'ai' ? report.analysis.annotations : []);
-  state.annotationPopover.setAnnotations(segments.filter(segment => segment.annotation).map(segment => segment.annotation));
+  const annotations = [...new Map(segments.filter(segment => segment.annotation).map(segment => [segment.annotation.number, segment.annotation])).values()];
+  state.annotationPopover.setAnnotations(annotations);
   const container = $('annotated-transcript');
   const notes = $('annotations-notes');
   state.summaryTranscript = text;
   container.dataset.empty = String(!text.trim());
   renderDiscussableTranscript({ document, container, text, segments });
   notes.replaceChildren();
-  for (const segment of segments) {
-    if (!segment.annotation) continue;
-    const item = segment.annotation;
+  for (const item of annotations) {
     const note = addText('li', '', `annotation-${item.category}`);
     note.dataset.assessment = item.assessment;
     note.id = `annotation-note-${item.number}`;
@@ -1808,14 +1830,14 @@ function renderAnnotatedTranscript(report) {
     }
     notes.append(note);
   }
-  const count = segments.filter(segment => segment.annotation).length;
+  const count = annotations.length;
   $('annotation-title').textContent = count ? 'Full annotated transcript' : 'Full transcript';
   $('annotation-legend').hidden = !count;
   container.setAttribute('aria-label', count ? 'Original transcript with AI annotations' : 'Original transcript');
   $('annotation-status').dataset.explanation = String(Boolean(count) && !(state.transcriptText && state.transcriptText !== text));
   $('annotation-status').textContent = state.transcriptText && state.transcriptText !== text
-    ? 'Showing the analyzed version. Your edits appear in playback; update feedback to annotate your corrected transcript.'
-    : count ? `${count} AI coaching annotations. Click a marked passage for details. Gold stars recognize great sentences; red underlines show wording to improve. Use Update feedback for a fresh AI review.`
+    ? 'Showing the analyzed version. Your edits appear in playback; re-run feedback to annotate your corrected transcript.'
+    : count ? `${count} AI coaching annotations. Click a marked passage for details. Gold stars recognize great sentences; red underlines show wording to improve. Use Re-run feedback for a fresh AI review.`
       : report.analysis?.method === 'ai' ? 'No grounded annotations were returned for this analysis. Your complete transcript appears below.'
         : ['failed', 'invalid_response'].includes(report.meta?.coachingStatus)
           ? 'AI coaching did not finish, so no color annotations are available. Your complete transcript appears below.'
@@ -1832,6 +1854,7 @@ function buildTranscriptExport(report) {
     if (!item) return { text: segment.text, annotation: null };
     return { text: segment.text, annotation: { start: item.start, end: item.end, quote: item.quote, comment: item.comment,
       category: item.category, assessment: item.assessment, number: item.number,
+      ...(item.kind === 'insertion' ? { kind: 'insertion', placement: item.placement, anchorQuote: item.anchorQuote, anchorStart: item.anchorStart, anchorEnd: item.anchorEnd } : {}),
       ...(typeof item.suggestion === 'string' && item.suggestion.trim() ? { suggestion: item.suggestion.trim() } : {}) } };
   });
   return { text, segments };
