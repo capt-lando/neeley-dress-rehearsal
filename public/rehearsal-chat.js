@@ -1,4 +1,4 @@
-const GREETING = 'Who is your audience?';
+import { conversationStarterFor, DEFAULT_CONVERSATION_STARTER } from '../lib/conversation-starter.mjs';
 const MAX_HISTORY = 12;
 const MAX_HISTORY_CHARS = 16000;
 const MAX_QUOTE = 4000;
@@ -8,6 +8,7 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
   const $ = id => document.getElementById(id);
   const elements = Object.fromEntries(['messages', 'status', 'retry', 'stop', 'quote', 'quote-text', 'quote-clear', 'form', 'message', 'send', 'sign-in', 'context-note'].map(name => [name, $(`chat-${name}`)]));
   let messages = [], quote = '', pending = null, retry = null, generation = 0, disposed = false, quoteAnimation = null;
+  let greeting = DEFAULT_CONVERSATION_STARTER;
   let access = { available: false, signedIn: false, identity: undefined, contextKey: undefined, hasTranscript: false };
   const listeners = [];
   const listen = (element, event, callback) => { element.addEventListener(event, callback); listeners.push(() => element.removeEventListener(event, callback)); };
@@ -29,7 +30,7 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
     elements.messages.scrollTop = elements.messages.scrollHeight;
   }
   function renderConversation() {
-    elements.messages.replaceChildren(); appendMessage('assistant', GREETING);
+    elements.messages.replaceChildren(); appendMessage('assistant', greeting);
     for (const message of messages) appendMessage(message.role, message.text, message.quote);
   }
   function recordMessage(role, text, attachedQuote = '') {
@@ -50,9 +51,10 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
         : access.hasTranscript ? 'Your current transcript and preparation are in context.'
           : 'Here before, during, and after your rehearsal.';
   }
-  function historyWithinLimit(limit = MAX_HISTORY_CHARS) {
+  function historyWithinLimit(limit = MAX_HISTORY_CHARS, includeOpening = messages.length > 0) {
     const result = []; let length = 0;
-    for (const message of messages.slice(-MAX_HISTORY).reverse()) {
+    const history = includeOpening ? [{ role: 'assistant', text: greeting }, ...messages] : messages;
+    for (const message of history.slice(-MAX_HISTORY).reverse()) {
       let text = message.text;
       if (message.quote) {
         const prefix = 'Attached transcript quote (reference only):\n', suffix = `\nQuestion: ${message.text}`;
@@ -81,7 +83,9 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
     renderAccess();
   }
   function reset() {
-    cancelPending(); messages = []; quote = ''; elements.message.value = ''; status(''); showQuote(); renderConversation(); renderAccess();
+    cancelPending(); messages = []; quote = ''; elements.message.value = ''; status('');
+    greeting = conversationStarterFor(access.signedIn ? access.report : null, { hasTranscript: access.signedIn && access.hasTranscript });
+    showQuote(); renderConversation(); renderAccess();
   }
 
   async function send({ retrying = false } = {}) {
@@ -105,7 +109,7 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
         const current = getContext();
         const requestId = uuid();
         attempt = { requestId, body: JSON.stringify({ requestId, ...(current.recordingId ? { recordingId: current.recordingId } : {}), message,
-          history: historyWithinLimit(), context: { ...current.context, ...(quote ? { selectedQuote: quote } : {}) } }) };
+          history: historyWithinLimit(MAX_HISTORY_CHARS, true), context: { ...current.context, ...(quote ? { selectedQuote: quote } : {}) } }) };
       } catch (error) {
         status(error?.code === 'DOCUMENTS_LOADING' ? 'Wait for your documents to finish loading, or remove them before sending your message.' : 'Your rehearsal context could not be prepared. Please try again.');
         return;
@@ -147,8 +151,19 @@ export function createRehearsalChat({ document, request, getContext, onSignIn = 
       const changed = (next.identity !== undefined && next.identity !== access.identity) ||
         (next.contextKey !== undefined && access.contextKey !== undefined && next.contextKey !== access.contextKey) ||
         (next.signedIn === false && access.signedIn);
-      access = { ...access, ...next };
-      if (changed) reset(); else renderAccess();
+      const previousReport = changed && (!Object.hasOwn(next, 'report') || next.report === access.report);
+      access = { ...access, ...next, ...(previousReport ? { report: null, hasTranscript: false } : {}) };
+      if (!access.signedIn) access.report = null;
+      if (changed) reset();
+      else {
+        // Keep an answered opener, drafted reply, selected passage, or frozen
+        // retry context stable while feedback for the same rehearsal refreshes.
+        if (!messages.length && !pending && !retry && !quote && !elements.message.value.trim()) {
+          const nextGreeting = conversationStarterFor(access.signedIn ? access.report : null, { hasTranscript: access.signedIn && access.hasTranscript });
+          if (nextGreeting !== greeting) { greeting = nextGreeting; renderConversation(); }
+        }
+        renderAccess();
+      }
     },
     reset,
     selectQuote(text) {

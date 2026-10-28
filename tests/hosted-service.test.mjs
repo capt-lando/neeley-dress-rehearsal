@@ -114,6 +114,44 @@ test('authentication refresh does not start paid speech compute', async () => {
   assert.equal(f.calls.length, 0);
 });
 
+test('current work survives a same-tab service restart without any paid or cloud request', async () => {
+  const original = fixture(); await original.service.getIdentity();
+  const snapshot = { ownerId: userId, recordingId: randomUUID(), transcript: 'An edited transcript.', transcriptBasis: 'Original transcript.', targetScript: 'A draft plan.' };
+  assert.equal(original.service.saveCurrentRehearsal(snapshot), true);
+  const refreshed = fixture({ recoveryStorage: original.recoveryStorage }); await refreshed.service.getIdentity();
+  assert.equal(refreshed.service.readCurrentRehearsal().recordingId, snapshot.recordingId);
+  assert.equal(refreshed.service.readCurrentRehearsal().transcript, snapshot.transcript);
+  assert.equal(refreshed.service.readCurrentRehearsal().transcriptBasis, snapshot.transcriptBasis);
+  assert.equal(original.calls.length + refreshed.calls.length, 0);
+  assert.equal(refreshed.service.saveCurrentRehearsal({ ...snapshot, ownerId: secondSession.user.id }), false);
+});
+
+test('current rehearsal clears on confirmed sign-out, account switch, explicit reset and matching deletion', async () => {
+  for (const mode of ['signout', 'account', 'reset', 'delete']) {
+    const f = fixture(); f.service.onAuthChange(() => {}); await f.service.getIdentity();
+    const recordingId = randomUUID();
+    f.service.saveCurrentRehearsal({ ownerId: userId, recordingId, transcript: 'Private current work.' });
+    if (mode === 'signout') await f.service.signOut();
+    if (mode === 'account') f.authChange(secondSession);
+    if (mode === 'reset') f.service.clearCurrentRehearsal();
+    if (mode === 'delete') {
+      await f.service.request(`/api/recordings/${randomUUID()}`, { method: 'DELETE' });
+      assert.equal(f.service.readCurrentRehearsal().recordingId, recordingId);
+      await f.service.request(`/api/recordings/${recordingId}`, { method: 'DELETE' });
+    }
+    assert.equal(f.service.readCurrentRehearsal(), null);
+    assert.equal(f.recoveryStorage.getItem(`neeley-current:${url}:${userId}`), null);
+  }
+});
+
+test('failed sign-out leaves the current work available to its still-signed-in owner', async () => {
+  const f = fixture(); await f.service.getIdentity();
+  f.service.saveCurrentRehearsal({ ownerId: userId, recordingId: randomUUID(), transcript: 'Keep my work.' });
+  f.client.auth.signOut = async () => ({ error: new Error('Network unavailable') });
+  await assert.rejects(f.service.signOut(), /Sign-out could not finish/);
+  assert.equal(f.service.readCurrentRehearsal().transcript, 'Keep my work.');
+});
+
 test('opt-in progress delivers ordered server milestones and the unchanged final result', async () => {
   const final = { analysis: { method: 'ai', overallRating: 80 }, transcript: 'Café practice.' };
   for (const cached of [false, true]) {

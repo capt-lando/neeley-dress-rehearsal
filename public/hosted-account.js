@@ -28,12 +28,38 @@ export function installHostedAccount(service, actions) {
   const $ = id => document.getElementById(id);
   const dialog = $('account-dialog');
   let user = null, generation = 0, busy = null, disposed = false, signingIn = false, signingOut = false, liveTranscription = false, historyRequest = null;
+  let currentSession = null;
   const analytics = createUsageAnalytics({ send: (events, { signal }) => service.request('/api/events', { method: 'POST', body: { events }, signal }) });
   const consentKey = () => user ? `neeley-usage-consent:${user.id}` : '';
   const readConsent = () => { try { return localStorage.getItem(consentKey()) === 'yes'; } catch { return false; } };
   const status = message => { $('account-status').textContent = message; };
   const show = () => { status(''); dialog.showModal(); };
   const close = () => dialog.close();
+  function saveCurrentRehearsal() {
+    if (disposed || signingOut || !user || currentSession?.ownerId !== user.id || !currentSession.ready || currentSession.restoring) return false;
+    const snapshot = actions.captureCurrentRehearsal?.();
+    return snapshot?.ownerId === user.id ? service.saveCurrentRehearsal?.(snapshot) === true : false;
+  }
+  function clearCurrentRehearsal() {
+    service.clearCurrentRehearsal?.();
+    if (currentSession) { currentSession.snapshot = null; currentSession.ready = true; }
+  }
+  async function restoreCurrentRehearsal() {
+    const pending = currentSession;
+    if (disposed || !user || !pending || pending.ownerId !== user.id || pending.ready) return;
+    if (pending.restoring) return pending.restoring;
+    if (!pending.snapshot || !actions.restoreCurrentRehearsal) { pending.ready = true; return; }
+    const restoring = (async () => {
+      const restored = await actions.restoreCurrentRehearsal(pending.snapshot);
+      if (disposed || currentSession !== pending || user?.id !== pending.ownerId) return;
+      // A failed connection or unresolved request can retry the same snapshot.
+      // Intentional new work abandons the old restore and returns true instead.
+      if (restored !== false) { pending.ready = true; pending.snapshot = null; }
+    })();
+    pending.restoring = restoring;
+    try { return await restoring; }
+    finally { if (pending.restoring === restoring) pending.restoring = null; }
+  }
   const historyCount = count => {
     const badge = $('history-count');
     if (badge) { badge.textContent = String(count); badge.hidden = !user; }
@@ -66,6 +92,12 @@ export function installHostedAccount(service, actions) {
         actions.accountChanged(identity?.id || '');
       }
       user = identity;
+      if (!user) currentSession = null;
+      else if (currentSession?.ownerId !== user.id) {
+        // Capture draft edits before recovery can restore a newer cloud report.
+        const saved = service.readCurrentRehearsal?.();
+        currentSession = { ownerId: user.id, snapshot: saved?.ownerId === user.id ? saved : null, ready: false, restoring: null };
+      }
       if (!user) historyCount(0);
       else if ($('history-count')) $('history-count').hidden = false;
       syncHistoryControls();
@@ -86,6 +118,8 @@ export function installHostedAccount(service, actions) {
         + 'Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.';
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
       await actions.recoverPending?.();
+      if (own !== generation || disposed) return;
+      await restoreCurrentRehearsal();
       if (own !== generation || disposed) return;
       if (user) await refreshHistory(); else { $('cloud-recordings-list').replaceChildren(); historyCount(0); }
     } catch (error) {
@@ -204,15 +238,18 @@ export function installHostedAccount(service, actions) {
     analytics.setView({ section, visible: !document.hidden && Boolean(visible[0]?.area), focused: document.hasFocus() });
   };
   const activity = () => { analytics.activity(); updateView(); };
-  const visibility = () => { updateView(); if (document.hidden) analytics.flush(); };
+  const visibility = () => { updateView(); if (document.hidden) { saveCurrentRehearsal(); analytics.flush(); } };
   const events = ['pointerdown', 'click', 'keydown', 'scroll'];
   events.forEach(name => window.addEventListener(name, activity, { passive: true }));
   window.addEventListener('focus', activity); window.addEventListener('blur', updateView);
   document.addEventListener('visibilitychange', visibility);
   const timer = setInterval(() => { updateView(); analytics.flush(); }, 15_000);
   const unsubscribe = service.onAuthChange(refresh);
-  window.rehearsalAccount = { open: show, refresh: () => refresh(), refreshHistory, track: name => { analytics.track(name); analytics.flush(); } };
+  window.rehearsalAccount = { open: show, refresh: () => refresh(), refreshHistory,
+    saveCurrentRehearsal, clearCurrentRehearsal, restoreCurrentRehearsal,
+    track: name => { analytics.track(name); analytics.flush(); } };
   window.addEventListener('pagehide', event => {
+    saveCurrentRehearsal();
     if (event.persisted) { analytics.setView({ visible: false }); analytics.flush(); return; }
     disposed = true; generation++; clearInterval(timer); unsubscribe(); analytics.dispose();
     events.forEach(name => window.removeEventListener(name, activity));

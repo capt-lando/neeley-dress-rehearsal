@@ -11,7 +11,8 @@ const accountSource = (await readFile(new URL('../public/hosted-account.js', imp
   .replace(/^import .*\r?\n/gm, '').replace(/^export /gm, '').replaceAll('import.meta.env', 'undefined');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), prepareSpeech, recoverPending, configurationFailed, configurationReady, analyticsFactory = createUsageAnalytics } = {}) {
+function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), prepareSpeech, recoverPending, configurationFailed, configurationReady, analyticsFactory = createUsageAnalytics,
+  currentSnapshot = null, captureCurrentRehearsal, restoreCurrentRehearsal } = {}) {
   class Element {
     constructor(tagName = 'DIV') { this.tagName = tagName; this.listeners = new Map(); this.children = []; this.attributes = new Map(); this.disabled = false; this.textContent = ''; }
     addEventListener(name, callback) { this.listeners.set(name, callback); }
@@ -27,11 +28,15 @@ function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription:
   }
   const elements = new Map(), get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const histories = [], signouts = [], opens = [], deletes = [], restored = [], restoreOptions = [], deleted = [], oauth = [], settings = deferred();
+  const currentSaves = [], currentRestores = []; let storedCurrent = currentSnapshot, currentClears = 0;
   let replaceAllowed = true, viewGeneration = 0;
   let settingsCalls = 0;
   let identity = { id: 'first-user' }, authChanged;
   const service = {
     prepareSpeech,
+    readCurrentRehearsal: () => storedCurrent ? structuredClone(storedCurrent) : null,
+    saveCurrentRehearsal(value) { storedCurrent = structuredClone(value); currentSaves.push(storedCurrent); return true; },
+    clearCurrentRehearsal() { storedCurrent = null; currentClears++; },
     getIdentity: () => getIdentity(identity),
     request(path, options) {
       if (path === '/api/config') return getConfig();
@@ -54,9 +59,12 @@ function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription:
   vm.createContext(context);
   vm.runInContext(`${accountSource}\nglobalThis.install = installHostedAccount;`, context);
   context.install(service, { accountChanged() {}, updateConfig() {}, recoverPending, configurationFailed, configurationReady,
+    captureCurrentRehearsal,
+    async restoreCurrentRehearsal(value) { currentRestores.push(value); return restoreCurrentRehearsal?.(value); },
     canReplaceAudio: () => replaceAllowed, captureViewGeneration: () => viewGeneration, isViewGenerationCurrent: value => value === viewGeneration,
     restoreRecording(value, options) { restored.push(value); restoreOptions.push(options); }, recordingDeleted: id => deleted.push(id) });
-  return { get, window, histories, signouts, opens, deletes, restored, restoreOptions, deleted, oauth, settings,
+  return { get, window, document, histories, signouts, opens, deletes, restored, restoreOptions, deleted, oauth, settings, currentSaves, currentRestores,
+    get currentClears() { return currentClears; }, get storedCurrent() { return storedCurrent; },
     setReplaceAllowed(value) { replaceAllowed = value; }, changeView() { viewGeneration++; },
     get settingsCalls() { return settingsCalls; }, changeUser(id) { identity = id ? { id } : null; return authChanged(identity); } };
 }
@@ -216,6 +224,83 @@ test('signed-in startup automatically reconciles pending work before refreshing 
   pending.resolve(); await turn();
   assert.equal(h.histories.length, 1);
   h.histories[0].resolve({ recordings: [] }); await turn();
+});
+
+test('startup restores the pre-recovery editor snapshot and suppresses blank saves until restoration finishes', async () => {
+  const recovered = deferred(), restored = deferred(), events = [];
+  const snapshot = { ownerId: 'first-user', recordingId: 'saved-take', transcript: 'My unsent correction.', transcriptBasis: 'The analyzed transcript.' };
+  let current = { ownerId: 'first-user', recordingId: '', transcript: '' };
+  const h = accountHarness({ currentSnapshot: snapshot, captureCurrentRehearsal: () => current,
+    recoverPending: async () => { events.push('recover'); await recovered.promise; },
+    restoreCurrentRehearsal: async value => { events.push('restore'); assert.deepEqual(value, snapshot); await restored.promise; } });
+  await turn();
+  assert.deepEqual(events, ['recover']);
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), false);
+  assert.deepEqual(h.storedCurrent, snapshot);
+  recovered.resolve(); await turn();
+  assert.deepEqual(events, ['recover', 'restore']);
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), false);
+  assert.equal(h.histories.length, 0);
+  restored.resolve(); await turn();
+  assert.equal(h.histories.length, 1);
+  current = { ...snapshot, transcript: 'A later correction.' };
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), true);
+  assert.equal(h.storedCurrent.transcript, current.transcript);
+  h.histories[0].resolve({ recordings: [] }); await turn();
+});
+
+test('restoration coalesces retries and keeps failed snapshots until a successful retry', async () => {
+  let blocked = true;
+  const pending = deferred(), snapshot = { ownerId: 'first-user', recordingId: 'saved-take', transcript: 'Keep this draft.' };
+  const h = accountHarness({ currentSnapshot: snapshot, captureCurrentRehearsal: () => ({ ownerId: 'first-user', transcript: '' }),
+    restoreCurrentRehearsal: async () => { if (blocked) { await pending.promise; return false; } } });
+  await turn();
+  const retries = Array.from({ length: 10 }, () => h.window.rehearsalAccount.restoreCurrentRehearsal());
+  assert.equal(h.currentRestores.length, 1);
+  pending.resolve(); await Promise.all(retries); await turn();
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), false);
+  assert.deepEqual(h.storedCurrent, snapshot);
+  blocked = false; await h.window.rehearsalAccount.restoreCurrentRehearsal();
+  assert.equal(h.currentRestores.length, 2);
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), true);
+});
+
+test('explicit reset abandons deferred restore without resurrecting the saved rehearsal', async () => {
+  const h = accountHarness({ currentSnapshot: { ownerId: 'first-user', recordingId: 'saved-take' },
+    captureCurrentRehearsal: () => ({ ownerId: 'first-user', recordingId: '', plannedIntroduction: 'My new draft.' }),
+    restoreCurrentRehearsal: async () => false });
+  await turn();
+  h.window.rehearsalAccount.clearCurrentRehearsal();
+  assert.equal(h.currentClears, 1); assert.equal(h.storedCurrent, null);
+  await h.window.rehearsalAccount.restoreCurrentRehearsal();
+  assert.equal(h.currentRestores.length, 1);
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), true);
+  assert.equal(h.storedCurrent.plannedIntroduction, 'My new draft.');
+});
+
+test('page hiding flushes current edits and restored accounts do not reopen work on ordinary account refresh', async () => {
+  let current = { ownerId: 'first-user', recordingId: 'saved-take', transcript: 'Initial edit.' };
+  const h = accountHarness({ currentSnapshot: current, captureCurrentRehearsal: () => current }); await turn();
+  h.histories[0].resolve({ recordings: [] }); await turn();
+  const refresh = h.window.rehearsalAccount.refresh(); await turn();
+  h.histories[1].resolve({ recordings: [] }); await refresh;
+  assert.equal(h.currentRestores.length, 1);
+  current = { ...current, transcript: 'Latest edit before refresh.' };
+  h.document.hidden = true; h.document.listeners.get('visibilitychange')();
+  assert.equal(h.storedCurrent.transcript, current.transcript);
+  h.window.listeners.get('pagehide')({ persisted: false });
+  assert.equal(h.currentSaves.length, 2);
+});
+
+test('a different account never receives the prior owner snapshot or accepts a stale owner capture', async () => {
+  const h = accountHarness({ currentSnapshot: { ownerId: 'first-user', recordingId: 'private-take' },
+    captureCurrentRehearsal: () => ({ ownerId: 'first-user', transcript: 'Old private text.' }) });
+  await turn(); h.histories[0].resolve({ recordings: [] }); await turn();
+  const switched = h.changeUser('second-user'); await turn();
+  h.histories[1].resolve({ recordings: [] }); await switched;
+  assert.equal(h.currentRestores.length, 1, 'the previous owner snapshot must not be passed to the new account UI');
+  assert.equal(h.window.rehearsalAccount.saveCurrentRehearsal(), false);
+  assert.equal(h.currentSaves.length, 0);
 });
 
 test('signed-in speech startup runs without blocking recovery or history', async () => {

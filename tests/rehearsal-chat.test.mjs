@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRehearsalChat } from '../public/rehearsal-chat.js';
+import { DEFAULT_CONVERSATION_STARTER } from '../lib/conversation-starter.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
@@ -29,8 +30,8 @@ function harness(options = {}) {
   return { ui, get, calls, pending, respond, submit, text, get signIns() { return signIns; }, setContext(value) { context = value; }, ready() { ui.update({ available: true, signedIn: true, identity: 'student-a', contextKey: 1 }); } };
 }
 
-test('the initial audience question and every context update stay local', () => {
-  const h = harness(); assert.deepEqual(h.text(), ['Who is your audience?']);
+test('the warm initial question and every context update stay local', () => {
+  const h = harness(); assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
   h.ready(); h.ui.update({ hasTranscript: true }); h.ui.update({ available: true });
   assert.equal(h.calls.length, 0); assert.equal(h.get('chat-send').disabled, true);
   assert.match(h.get('chat-context-note').textContent, /current transcript/);
@@ -48,7 +49,7 @@ test('loading documents keeps the typed message local and shows only the approve
   assert.equal(h.calls.length, 0); assert.equal(h.get('chat-message').value, 'How should I approach this assignment?');
   assert.match(h.get('chat-status').textContent, /documents to finish loading/);
   assert.doesNotMatch(h.get('chat-status').textContent, /Private file details/);
-  assert.deepEqual(h.text(), ['Who is your audience?']);
+  assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
 });
 
 test('selecting a quote only attaches context and preserves the typed question', async () => {
@@ -69,9 +70,10 @@ test('sent passages remain visible beside their question and reach later follow-
   assert.equal(user.children[1].children[1].textContent, 'Everyone should practice more.');
   h.respond(0); await tick(); h.submit('Why?');
   const next = JSON.parse(h.calls[1].body);
-  assert.match(next.history[0].text, /Attached transcript quote \(reference only\):/);
-  assert.match(next.history[0].text, /Everyone should practice more\./);
-  assert.match(next.history[0].text, /Question: How do I improve this\?/);
+  const earlierQuestion = next.history.find(message => message.role === 'user').text;
+  assert.match(earlierQuestion, /Attached transcript quote \(reference only\):/);
+  assert.match(earlierQuestion, /Everyone should practice more\./);
+  assert.match(earlierQuestion, /Question: How do I improve this\?/);
   assert.equal(next.context.selectedQuote, undefined); h.respond(1); await tick();
 });
 
@@ -81,7 +83,7 @@ test('long attached quotes stay whole in the current request and bounded in futu
   assert.equal(JSON.parse(h.calls[0].body).context.selectedQuote, passage);
   h.respond(0); await tick(); h.submit('Explain');
   const history = JSON.parse(h.calls[1].body).history;
-  assert.ok(history.every(message => message.text.length <= 4000)); assert.ok(history[0].text.endsWith(question));
+  assert.ok(history.every(message => message.text.length <= 4000)); assert.ok(history.find(message => message.role === 'user').text.endsWith(question));
   assert.ok(h.ui.getRehearsalContext().length <= 12000); h.respond(1); await tick();
 });
 
@@ -94,7 +96,8 @@ test('quote removal never sends an AI request and oversized passages are rejecte
 
 test('a sent message uses a frozen preparation context and safe plain text', async () => {
   const h = harness(); h.ready(); h.submit('My class <img src=x onerror=alert(1)>');
-  const input = JSON.parse(h.calls[0].body); assert.equal(input.context.phase, 'prepare'); assert.equal(input.recordingId, undefined); assert.deepEqual(input.history, []);
+  const input = JSON.parse(h.calls[0].body); assert.equal(input.context.phase, 'prepare'); assert.equal(input.recordingId, undefined);
+  assert.deepEqual(input.history, [{ role: 'assistant', text: DEFAULT_CONVERSATION_STARTER }]);
   h.setContext({ recordingId: 'new-recording', context: { phase: 'review', text: 'New transcript' } });
   h.respond(0, '<script>alert(1)</script>'); await tick();
   assert.equal(h.text().at(-1), '<script>alert(1)</script>');
@@ -109,7 +112,7 @@ test('recording and transcript changes preserve the conversation and pending ans
   assert.equal(h.calls[0].signal.aborted, false);
   h.respond(0); await tick(); h.submit('Explain the closing.');
   const next = JSON.parse(h.calls[1].body); assert.equal(next.recordingId, 'take-one'); assert.equal(next.context.phase, 'recording');
-  assert.equal(next.history[0].text, 'My audience is my finance professor.');
+  assert.equal(next.history.find(message => message.role === 'user').text, 'My audience is my finance professor.');
   h.respond(1); await tick();
 });
 
@@ -117,12 +120,12 @@ test('an account change clears private messages, draft, quote and late replies',
   const h = harness(); h.ready(); h.submit('Private goal'); h.get('chat-message').value = 'Private draft'; h.ui.selectQuote('Private quote');
   h.ui.update({ identity: 'student-b' });
   assert.equal(h.calls[0].signal.aborted, true); assert.equal(h.get('chat-message').value, ''); assert.equal(h.get('chat-quote').hidden, true);
-  h.respond(0, 'Private late reply'); await tick(); assert.deepEqual(h.text(), ['Who is your audience?']); assert.equal(h.ui.getRehearsalContext(), '');
+  h.respond(0, 'Private late reply'); await tick(); assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]); assert.equal(h.ui.getRehearsalContext(), '');
 });
 
 test('opening another saved rehearsal resets private chat, while ordinary update does not', async () => {
   const h = harness(); h.ready(); h.submit('Review this take'); h.respond(0); await tick();
-  h.ui.update({ contextKey: 2 }); assert.deepEqual(h.text(), ['Who is your audience?']);
+  h.ui.update({ contextKey: 2 }); assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
   h.ui.update({ signedIn: false, identity: null }); assert.equal(h.get('chat-sign-in').hidden, false);
 });
 
@@ -185,4 +188,79 @@ test('mismatched or oversized responses are not added to conversation', async ()
   const h = harness(); h.ready(); h.submit('Help'); h.pending[0].resolve({ requestId: 'another', reply: 'Wrong reply' }); await tick();
   assert.equal(h.text().length, 2); assert.equal(h.get('chat-retry').hidden, false);
   h.get('chat-retry').dispatch('click'); h.respond(1, 'x'.repeat(4001)); await tick(); assert.equal(h.text().length, 2);
+});
+
+const reportWithStarter = conversationStarter => ({ transcript: 'We should expand tutoring.', analysis: { method: 'ai', conversationStarter } });
+const firstStarter = 'Your tutoring proposal is clear. What example could make its benefit more concrete?';
+const nextStarter = 'Your revised ending asks for a pilot. How would you make that next step easier to act on?';
+
+test('fresh feedback replaces only the untouched opener and includes that exact question on the first send', async () => {
+  const h = harness(); h.ready(); h.ui.update({ hasTranscript: true, report: reportWithStarter(firstStarter) });
+  assert.deepEqual(h.text(), [firstStarter]); assert.equal(h.calls.length, 0);
+  assert.equal(h.ui.getRehearsalContext(), '', 'an unanswered generated question is not student preparation');
+  h.submit('I could describe a student working an evening shift.');
+  assert.deepEqual(JSON.parse(h.calls[0].body).history, [{ role: 'assistant', text: firstStarter }]);
+  h.respond(0); await tick();
+  assert.match(h.ui.getRehearsalContext(), /What example could make its benefit/);
+});
+
+test('updated reports preserve a conversation and its pending response instead of replacing its opening', async () => {
+  const h = harness(); h.ready(); h.ui.update({ report: reportWithStarter(firstStarter) });
+  h.submit('I will use the evening-shift example.');
+  h.ui.update({ report: reportWithStarter(nextStarter), hasTranscript: true });
+  assert.equal(h.calls[0].signal.aborted, false); assert.equal(h.text()[0], firstStarter);
+  h.respond(0); await tick(); h.ui.update({ report: reportWithStarter(nextStarter) });
+  assert.equal(h.text()[0], firstStarter); assert.equal(h.text().length, 3);
+  h.submit('How can I introduce it?');
+  assert.equal(JSON.parse(h.calls[1].body).history[0].text, firstStarter);
+  h.respond(1); await tick();
+});
+
+test('feedback arriving while a student drafts or selects a passage does not change the question being answered', () => {
+  const h = harness(); h.ready(); h.ui.update({ report: reportWithStarter(firstStarter) });
+  h.get('chat-message').value = 'My draft'; h.ui.update({ report: reportWithStarter(nextStarter) });
+  assert.equal(h.text()[0], firstStarter); assert.equal(h.get('chat-message').value, 'My draft');
+  h.get('chat-message').value = ''; h.ui.selectQuote('We should expand tutoring.');
+  h.ui.update({ report: reportWithStarter(nextStarter) }); assert.equal(h.text()[0], firstStarter);
+  h.get('chat-quote-clear').dispatch('click'); h.ui.update({ report: reportWithStarter(nextStarter) });
+  assert.equal(h.text()[0], nextStarter); assert.equal(h.calls.length, 0);
+});
+
+test('feedback refresh leaves an uncertain retry payload and its original opening untouched', async () => {
+  const h = harness(); h.ready(); h.ui.update({ report: reportWithStarter(firstStarter) }); h.submit('An evening-shift example.');
+  h.pending[0].reject(new Error('Connection interrupted.')); await tick();
+  h.ui.update({ report: reportWithStarter(nextStarter) });
+  assert.equal(h.text()[0], firstStarter); assert.equal(h.get('chat-retry').hidden, false);
+  h.get('chat-retry').dispatch('click'); assert.equal(h.calls[1].body, h.calls[0].body);
+  h.respond(1); await tick();
+});
+
+test('opening another saved take uses its own opener and account changes remove private report context', () => {
+  const h = harness(); h.ready(); h.ui.update({ report: reportWithStarter(firstStarter), hasTranscript: true });
+  h.ui.update({ contextKey: 2, report: reportWithStarter(nextStarter), hasTranscript: true });
+  assert.deepEqual(h.text(), [nextStarter]); assert.equal(h.calls.length, 0);
+  h.ui.update({ identity: 'student-b' }); assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
+  h.ui.update({ available: true }); assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
+  h.ui.update({ report: reportWithStarter(firstStarter) });
+  h.ui.update({ signedIn: false, report: reportWithStarter(firstStarter) });
+  assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
+});
+
+test('old report feedback generates a local specific question and invalid generated markup never becomes HTML', () => {
+  const h = harness(); h.ready();
+  h.ui.update({ report: { analysis: { method: 'ai', conversationStarter: '<img src=x onerror=bad()>?', improvements: ['Use a concrete example of the evening schedule.'] } } });
+  assert.match(h.text()[0], /concrete example of the evening schedule/);
+  assert.doesNotMatch(h.text()[0], /img|audience/); assert.equal(h.calls.length, 0);
+});
+
+test('a context reset cannot briefly reuse the previous report before the app finishes restoring or clearing it', () => {
+  const h = harness(); h.ready(); const oldReport = reportWithStarter(firstStarter);
+  h.ui.update({ report: oldReport, hasTranscript: true });
+  h.ui.update({ contextKey: 2, report: oldReport, hasTranscript: true });
+  assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
+  h.ui.update({ report: null, hasTranscript: false }); assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
+  h.ui.update({ report: reportWithStarter(nextStarter), hasTranscript: true }); assert.deepEqual(h.text(), [nextStarter]);
+  h.ui.update({ report: oldReport });
+  h.ui.update({ identity: 'student-b', report: oldReport, hasTranscript: true });
+  assert.deepEqual(h.text(), [DEFAULT_CONVERSATION_STARTER]);
 });

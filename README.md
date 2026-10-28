@@ -22,11 +22,15 @@ Sign-in is remembered across tabs and browser restarts in the same browser profi
 
 Refresh reconnects to an existing transcription or coaching request without submitting it again. Active microphone recordings keep encrypted, half-second audio checkpoints in this browser. After sign-in, the app restores the saved portion of an interrupted take to the same private recording. The microphone remains stopped after refresh; recording cannot continue while the page is closed. The final uncommitted checkpoint can be lost on an abrupt shutdown.
 
+The current saved rehearsal also reopens after a refresh, including its completed feedback, without uploading or analyzing again. This tab keeps account-scoped preparation text and transcript edits in session storage; audio and completed reports stay in private cloud storage. Signing out, switching accounts, deleting the take, or explicitly clearing it removes that tab's resume state. Original document files must be chosen again for visual previews. While analysis runs, a buffering arc in the annotated transcript makes progress visible even below the main tracker.
+
 Draft encryption keys are held by the authenticated backend and expire after 24 hours. Browser storage contains encrypted audio and an authenticated manifest, not the key. Account, project, recording, and request identifiers are checked before decryption or recovery. Guessing another recording ID does not grant access. Signing out clears that account's local drafts and releases in-memory keys. Browser storage eviction or unavailable storage can prevent recovery; the app reports checkpoint failures.
 
 Recordings, transcripts, and reports are private to the signed-in account. **My saved rehearsals** can reopen, download, or delete them. Provider credentials remain on the server. Optional analytics contain usage events, not recordings, transcripts, scripts, rubrics, assignment instructions, or chat text.
 
 Luna chat uses the current transcript and preparation, including attached assignment instructions. Selecting a sentence or passage attaches it to the composer; only **Send** requests a reply. Chat stays in the current tab and clears on refresh or sign-out. It is not saved with the report. Assignment directions establish the task requirements; rubric criteria guide feedback priorities. Neither can override the coaching policy or turn planned content into evidence of what was spoken.
+
+Each analysis can include a brief observation and open-ended question to start the coaching conversation. Saved reports without that field use their existing improvement notes or grounded annotations. Opening chat never makes an extra AI request, and a new analysis does not replace an ongoing conversation or drafted reply.
 
 ## Feedback
 

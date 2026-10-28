@@ -117,6 +117,17 @@ test('missing, duplicate, unsupported, or invented rubric entries never publish 
   }
 });
 
+test('the optional chat starter survives the plugin feedback contract and invalid text is omitted', () => {
+  const starter = 'Your tutoring pilot has a clear purpose. What result would show that it helped working students?';
+  for (const value of [starter, '<script>bad()</script>?']) {
+    const { store, rehearsalId, revision } = pending();
+    const result = store.submit(rehearsalId, revision, { ...feedback(), conversationStarter: value });
+    assert.equal(result.report.analysis.conversationStarter, value === starter ? starter : undefined);
+    assert.equal(result.status, 'complete');
+    assert.equal(result.report.transcript, input.text);
+  }
+});
+
 test('annotations must be present and every submitted highlight must survive exact grounding', () => {
   for (const mutation of [
     value => { delete value.annotations; },

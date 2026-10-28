@@ -13,7 +13,7 @@ const state = {
   recording: false, recordingPaused: false, startingRecording: false, recordingSampleRate: 0, requestingMic: false, preparingAudio: false, samples: [], sampleCount: 0, timer: null, meterFrame: null,
   audioBlob: null, audioURL: null, audioDuration: 0, duration: 0, report: null, busy: false, requestController: null,
   inputDevice: '', micGeneration: 0, inputListGeneration: 0, inputsNamed: false, analysisGeneration: 0, promptGeneration: 0,
-  audioGeneration: 0, transcriptText: '', transcriptGeneration: -1, transcriptModel: '', transcriptPromise: null, transcriptController: null,
+  audioGeneration: 0, transcriptText: '', transcriptBasis: '', transcriptGeneration: -1, transcriptModel: '', transcriptPromise: null, transcriptController: null,
   transcriptionAttempted: false, transcriptWords: [], activeWordIndex: -1, playbackFrame: null, scrubbing: false,
   liveTake: null, livePromise: null, liveFailure: '',
   waveformBars: [], waveformPhase: 0, pendingSeek: null,
@@ -22,11 +22,12 @@ const state = {
   assignmentLoading: false, assignmentGeneration: 0, assignmentFileName: '', assignmentPendingName: '',
   assignmentPreview: null, assignmentPreviewController: null, assignmentPage: 0, assignmentPageGeneration: 0,
   audioSave: null, pendingAudioSaves: new Set(), unsavedRecordings: new Map(), savedRecordings: [], libraryGeneration: 0, libraryOpenGeneration: 0, libraryBusy: false, libraryFocus: null,
-  cloudRecordingId: '', accountId: '', recoveryController: null, recoveryPending: Boolean(window.rehearsalService?.hosted), recoveryNeedsConfig: false,
+  cloudRecordingId: '', accountId: '', recoveryController: null, recoveryPending: Boolean(window.rehearsalService?.hosted), recoveryNeedsConfig: false, recoveringAnalysis: false,
   audioPreparationGeneration: 0, audioMetadataCancel: null, processing: null,
   cancelRestartPending: false, cancelConfirmation: null,
   currentPage: 'rehearse', viewGeneration: 0,
   chat: null, chatContextKey: 0, summaryTranscript: '', transcriptSelectionAttached: false, annotationPopover: null,
+  annotationLoading: false, annotationReadyView: null,
 };
 
 function getChatContext() {
@@ -47,7 +48,7 @@ function getChatContext() {
 function syncChat() {
   state.chat?.update({ available: Boolean(state.config.hosted && state.config.chatConfigured !== false),
     signedIn: Boolean(state.config.auth?.signedIn), identity: state.accountId,
-    contextKey: state.chatContextKey, hasTranscript: Boolean(state.summaryTranscript.trim()) });
+    contextKey: state.chatContextKey, hasTranscript: Boolean(state.summaryTranscript.trim()), report: state.report });
 }
 function renderSummaryDraft(text = '', live = false) {
   initializeTranscriptInteractions(); state.annotationPopover.setAnnotations([]);
@@ -68,10 +69,12 @@ function renderSummaryDraft(text = '', live = false) {
   $('speech-analysis-content').hidden = true; $('analysis-disclaimer').hidden = true; $('coaching-notice').hidden = true;
   $('transcript-details').hidden = !hasText || live; $('prompt-details').hidden = !hasText;
   $('download-transcript').disabled = !hasText;
+  syncAnnotationLoading({ viewUpdated: true });
   syncAnalysisControls();
   syncChat();
 }
 function attachTranscriptSelection(event = {}) {
+  if (state.annotationLoading) { event.preventDefault?.(); return; }
   if (event.type === 'click' && state.transcriptSelectionAttached) { event.preventDefault?.(); state.transcriptSelectionAttached = false; return; }
   const container = $('annotated-transcript');
   const selected = event.type === 'keydown' ? '' : selectedTranscriptQuote(container, window.getSelection?.());
@@ -92,6 +95,34 @@ function attachTranscriptSelection(event = {}) {
       sentence.classList.add('is-attached');
       sentence.addEventListener('animationend', () => sentence.classList.remove('is-attached'), { once: true });
     }
+  }
+}
+
+function syncAnnotationLoading({ viewUpdated = false } = {}) {
+  const loading = Boolean(state.recoveringAnalysis || state.busy && state.requestController && !state.requestController.signal.aborted);
+  const wasLoading = state.annotationLoading;
+  const container = $('annotated-transcript'), panel = $('annotation-panel'), placeholder = $('annotation-loading');
+  if (loading && (!wasLoading || viewUpdated)) {
+    state.annotationReadyView = { status: $('annotation-status').textContent, legendHidden: $('annotation-legend').hidden,
+      downloadDisabled: $('download-transcript').disabled };
+  }
+  state.annotationLoading = loading;
+  panel.setAttribute('aria-busy', String(loading));
+  placeholder.hidden = !loading; container.hidden = loading; $('annotations-notes').hidden = loading;
+  if (loading) {
+    const focusInTranscript = container.contains(document.activeElement) || $('annotation-bubble').contains(document.activeElement);
+    state.annotationPopover?.close();
+    $('annotation-legend').hidden = true; $('download-transcript').disabled = true;
+    $('annotation-status').textContent = 'AI review in progress. Your annotations will appear here when it finishes.';
+    if (focusInTranscript) placeholder.focus({ preventScroll: true });
+  } else if (wasLoading) {
+    if (!viewUpdated && state.annotationReadyView) {
+      $('annotation-status').textContent = state.annotationReadyView.status;
+      $('annotation-legend').hidden = state.annotationReadyView.legendHidden;
+      $('download-transcript').disabled = state.annotationReadyView.downloadDisabled;
+    }
+    state.annotationReadyView = null;
+    if (document.activeElement === placeholder) container.focus({ preventScroll: true });
   }
 }
 
@@ -157,6 +188,7 @@ function showPage(page, { focus = true, updateHash = true, initial = false } = {
     else $('rehearse-tab').focus({ preventScroll: true });
     $(`${next}-page`).scrollIntoView({ block: 'start' });
   }
+  window.rehearsalAccount?.saveCurrentRehearsal?.();
   return true;
 }
 function startNewRehearsal(event = {}) {
@@ -180,6 +212,7 @@ function beginProcessing({ analysis = false, needsTranscript = true, signal } = 
 }
 function setBusy(busy, message = '') {
   state.busy = busy;
+  syncAnnotationLoading();
   syncRecordingControls();
   syncCancelControls();
   syncAnalysisControls();
@@ -252,6 +285,7 @@ async function confirmCancelRestart(event = {}) {
     state.audioPreparationGeneration++; state.audioMetadataCancel?.(); state.preparingAudio = false;
     cleanupMic();
     discardAudio(); state.livePromise = null; state.requestController = null;
+    window.rehearsalAccount?.clearCurrentRehearsal?.();
     state.recoveryController = null; state.recoveryPending = false;
     document.querySelector('.record-panel').classList.remove('recording', 'recording-paused');
     $('mic-icon').removeAttribute('hidden'); $('stop-icon').hidden = true;
@@ -301,6 +335,7 @@ function setTargetView(view) {
   $('talking-points-field').hidden = scriptVisible;
   $('target-view-script').setAttribute('aria-pressed', String(scriptVisible));
   $('target-view-points').setAttribute('aria-pressed', String(!scriptVisible));
+  window.rehearsalAccount?.saveCurrentRehearsal?.();
 }
 function updateTargetHint() {
   const talkingPoints = $('target-talking-points').value.split(/\n/).map((x) => x.trim()).filter(Boolean);
@@ -481,7 +516,7 @@ function resetTranscriptForModelChange() {
   state.transcriptController?.abort();
   state.requestController?.abort();
   state.transcriptController = null; state.transcriptPromise = null; state.requestController = null;
-  state.transcriptGeneration = -1; state.transcriptModel = ''; state.transcriptText = ''; state.transcriptionAttempted = false;
+  state.transcriptGeneration = -1; state.transcriptModel = ''; state.transcriptText = ''; state.transcriptBasis = ''; state.transcriptionAttempted = false;
   state.report = null;
   $('transcript').value = '';
   renderFollowTranscript('');
@@ -966,7 +1001,7 @@ function discardAudio(reset = true) {
   state.transcriptController?.abort();
   state.requestController?.abort();
   state.transcriptController = null; state.transcriptPromise = null;
-  state.transcriptGeneration = -1; state.transcriptModel = ''; state.transcriptText = ''; state.transcriptionAttempted = false;
+  state.transcriptGeneration = -1; state.transcriptModel = ''; state.transcriptText = ''; state.transcriptBasis = ''; state.transcriptionAttempted = false;
   state.report = null; state.pendingSeek = null; state.scrubbing = false;
   state.chat?.selectQuote('');
   stopPlaybackLoop();
@@ -1318,9 +1353,10 @@ function showTranscriptReadyState() {
   $('follow-transcript-connect').textContent = 'Create transcript';
   $('follow-transcript-connect').hidden = false;
 }
-function cacheTranscript(text, generation = state.audioGeneration) {
+function cacheTranscript(text, generation = state.audioGeneration, { edited = false } = {}) {
   if (generation !== state.audioGeneration) return false;
   state.transcriptText = String(text);
+  if (!edited) state.transcriptBasis = state.transcriptText;
   state.liveFailure = '';
   state.transcriptGeneration = generation;
   state.transcriptModel = state.config.transcriptionModel;
@@ -1486,6 +1522,7 @@ function markPromptStale() {
   state.promptGeneration++;
   $('coaching-prompt').value = '';
   if ($('prompt-details').open) $('prompt-status').textContent = 'Your text changed. Refresh the preview or choose Copy prompt to prepare the latest version.';
+  window.rehearsalAccount?.saveCurrentRehearsal?.();
 }
 async function loadPromptPreview() {
   if (state.rubricLoading || state.assignmentLoading) { $('prompt-status').textContent = 'Wait for your documents to finish loading, or remove them before preparing a prompt.'; return ''; }
@@ -1532,6 +1569,7 @@ async function runAnalysis({ corrected = false } = {}) {
   window.rehearsalAccount?.track('analysis_requested');
   state.requestController = new AbortController();
   const signal = state.requestController.signal;
+  signal.addEventListener('abort', () => syncAnnotationLoading(), { once: true });
   const generation = ++state.analysisGeneration;
   const audioGeneration = state.audioGeneration;
   const viewGeneration = state.viewGeneration;
@@ -1541,7 +1579,7 @@ async function runAnalysis({ corrected = false } = {}) {
     let text;
     if (corrected) {
       text = $('transcript').value;
-      cacheTranscript(text, audioGeneration);
+      cacheTranscript(text, audioGeneration, { edited: true });
     } else text = await ensureTranscript(progress);
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration || signal.aborted || state.cancelRestartPending) throw supersededAudioError();
     if (state.rubricLoading || state.assignmentLoading) throw new Error('A document is still loading. When it is ready, choose Analyze again to include its text.');
@@ -1751,6 +1789,7 @@ function renderAnnotatedTranscript(report) {
           ? 'AI coaching did not finish, so no color annotations are available. Your complete transcript appears below.'
           : 'Your complete transcript appears below. Connect an AI coach above, then analyze it for color annotations.';
   $('download-transcript').disabled = !text.trim();
+  syncAnnotationLoading({ viewUpdated: true });
   syncAnalysisControls();
   syncChat();
 }
@@ -1790,6 +1829,58 @@ async function downloadReport() {
 
 window.rehearsalHostedActions = {
   updateConfig,
+  captureCurrentRehearsal() {
+    if (!state.accountId || !state.config.hosted) return null;
+    return { ownerId: state.accountId, recordingId: state.cloudRecordingId,
+      transcript: $('transcript').value, transcriptBasis: state.report?.transcript || state.transcriptBasis,
+      reportGeneratedAt: state.report?.meta?.generatedAt || '', targetMode: state.targetView,
+      targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value,
+      plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value,
+      instructorRubric: $('instructor-rubric').value, rubricFileName: state.rubricFileName,
+      assignmentInstructions: $('assignment-instructions').value, assignmentFileName: state.assignmentFileName,
+      page: state.currentPage };
+  },
+  async restoreCurrentRehearsal(snapshot) {
+    if (!snapshot || snapshot.ownerId !== state.accountId) return true;
+    const owner = state.accountId, view = captureViewGeneration(), draftGeneration = state.promptGeneration;
+    if (state.recoveryController || await window.rehearsalService?.getPendingRequest?.()) return false;
+    if (owner !== state.accountId || !isViewGenerationCurrent(view) || draftGeneration !== state.promptGeneration) return true;
+    if (!canReplaceCurrentAudio() || state.audioBlob && state.cloudRecordingId !== snapshot.recordingId) return true;
+    if (snapshot.recordingId && !state.audioBlob) {
+      setStatus('Restoring your saved rehearsal and feedback…');
+      let record;
+      try { record = await window.rehearsalService.openRecording(snapshot.recordingId, { signal: AbortSignal.timeout(30000) }); }
+      catch (error) {
+        if (owner !== state.accountId || !isViewGenerationCurrent(view) || draftGeneration !== state.promptGeneration) return true;
+        if (error.status === 404 || error.status === 410) {
+          window.rehearsalAccount?.clearCurrentRehearsal?.();
+          setStatus('That saved rehearsal is no longer available. You can open another take from My saved rehearsals.');
+          return true;
+        }
+        setStatus('Your rehearsal is still saved, but it could not be reopened. Check your connection and refresh, or open it from My saved rehearsals.', 'error');
+        return false;
+      }
+      if (owner !== state.accountId || !isViewGenerationCurrent(view) || draftGeneration !== state.promptGeneration || !canReplaceCurrentAudio()) return true;
+      window.rehearsalHostedActions.restoreRecording(record);
+    }
+    const source = state.report?.transcript || state.transcriptBasis;
+    // Draft edits apply only to the transcript they came from. Fresh recovery
+    // may have finished a transcription after the snapshot was last saved.
+    const restoreDraft = !snapshot.recordingId || snapshot.transcriptBasis === source || snapshot.transcript === source;
+    removeRubric(); removeAssignment();
+    for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric'], ['assignment-instructions', 'assignmentInstructions']]) $(field).value = snapshot[key] || '';
+    state.rubricFileName = snapshot.rubricFileName || '';
+    state.assignmentFileName = snapshot.assignmentFileName || '';
+    setTargetView(snapshot.targetMode); updateTargetHint(); updateRubricControls(); preparationDocuments.assignment.updateControls();
+    $('remove-transitions').hidden = !$('planned-transitions').value;
+    if (snapshot.instructorRubric) $('rubric-status').textContent = 'Your rubric text was restored. Choose the original file to view its pages again.';
+    if (snapshot.assignmentInstructions) $('assignment-status').textContent = 'Your assignment text was restored. Choose the original file to view its pages again.';
+    if (restoreDraft) cacheTranscript(snapshot.transcript, state.audioGeneration, { edited: true });
+    if (state.report) renderAnnotatedTranscript(state.report);
+    showPage(snapshot.page, { focus: false });
+    setStatus(snapshot.recordingId ? 'Your rehearsal, transcript, and saved feedback were restored. No new analysis was needed.' : 'Your preparation was restored.');
+    return true;
+  },
   configurationReady() { state.recoveryNeedsConfig = false; },
   configurationFailed(message) {
     state.recoveryNeedsConfig = true;
@@ -1805,6 +1896,7 @@ window.rehearsalHostedActions = {
     const account = state.accountId;
     const generation = state.audioGeneration;
     const idle = !state.recording && !state.startingRecording && !state.busy && !state.requestingMic && !state.transcriptPromise && !state.liveTake && !state.livePromise;
+    let recovered = false;
     const controller = new AbortController();
     state.recoveryController = controller;
     state.recoveryPending = true;
@@ -1821,9 +1913,11 @@ window.rehearsalHostedActions = {
       }
       $('cloud-recovery').hidden = false;
       $('cloud-recovery-cancel').hidden = false;
+      state.recoveringAnalysis = marker.kind === 'coach'; syncAnnotationLoading();
       const result = await window.rehearsalService.recoverPending(marker, { signal: controller.signal,
         onProgress: message => { if (current()) $('cloud-recovery-message').textContent = message; } });
       if (!current()) return;
+      recovered = true;
       state.recoveryPending = false;
       if (result.record) window.rehearsalHostedActions.restoreRecording(result.record);
       $('cloud-recovery-message').textContent = result.message;
@@ -1837,8 +1931,10 @@ window.rehearsalHostedActions = {
       }
     } finally {
       if (state.recoveryController === controller) {
-        state.recoveryController = null; state.recoveryPending = false;
+        state.recoveryController = null; state.recoveryPending = false; state.recoveringAnalysis = false;
+        syncAnnotationLoading();
         syncRecordingControls(); syncAnalysisControls();
+        if (recovered) await window.rehearsalAccount?.restoreCurrentRehearsal?.();
       }
     }
   },
@@ -1852,6 +1948,7 @@ window.rehearsalHostedActions = {
     syncChat();
     state.cancelConfirmation = null; $('cancel-restart-dialog').close();
     state.recoveryController?.abort(); state.recoveryController = null;
+    state.recoveringAnalysis = false;
     state.recoveryNeedsConfig = false;
     state.recoveryPending = Boolean(id && window.rehearsalService?.getPendingRequest);
     $('cloud-recovery').hidden = true;
@@ -1890,6 +1987,7 @@ window.rehearsalHostedActions = {
     $('record-title').textContent = 'Live Transcript';
     setStatus('Saved rehearsal opened. Replay does not upload or reprocess the recording.');
     if (showRehearse) showPage('rehearse');
+    window.rehearsalAccount?.saveCurrentRehearsal?.();
   },
   recordingDeleted(id) {
     if (state.cloudRecordingId !== id) return;
@@ -1934,7 +2032,7 @@ $('prompt-details').addEventListener('toggle', () => { if ($('prompt-details').o
 $('refresh-prompt').addEventListener('click', loadPromptPreview);
 $('copy-prompt').addEventListener('click', copyPrompt);
 $('transcript').addEventListener('input', () => {
-  cacheTranscript($('transcript').value);
+  cacheTranscript($('transcript').value, state.audioGeneration, { edited: true });
   if (state.report) renderAnnotatedTranscript(state.report);
 });
 $('target-script').addEventListener('input', markPromptStale);
@@ -1978,7 +2076,7 @@ $('playback').addEventListener('play', () => { stopPlaybackLoop(); playbackLoop(
 for (const name of ['pause', 'ended']) $('playback').addEventListener(name, () => { stopPlaybackLoop(); updatePlaybackUI(); });
 $('playback').addEventListener('error', () => { stopPlaybackLoop(); if (state.audioBlob) setStatus('The recording could not be played. Try uploading it again.', 'error'); });
 $('follow-transcript-connect').addEventListener('click', () => ensureTranscript().catch(() => {}));
-$('discard-audio').addEventListener('click', () => discardAudio());
+$('discard-audio').addEventListener('click', () => { discardAudio(); window.rehearsalAccount?.clearCurrentRehearsal?.(); });
 $('download-audio').addEventListener('click', downloadCurrentAudio);
 $('saved-recordings-details').addEventListener('toggle', () => { if ($('saved-recordings-details').open) refreshSavedRecordings(); });
 $('upload-button').addEventListener('click', () => {
@@ -2021,6 +2119,7 @@ window.rehearsalService?.setProgressHandler?.((message) => {
 window.rehearsalService?.setRecordingSavedHandler?.((blob, id) => {
   if (state.audioBlob !== blob) return;
   state.cloudRecordingId = id;
+  window.rehearsalAccount?.saveCurrentRehearsal?.();
   $('audio-save-status').textContent = 'Saved privately to your account. Transcription and coaching can be retried without uploading again.';
   window.rehearsalAccount?.refreshHistory();
 });

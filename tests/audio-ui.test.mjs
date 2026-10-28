@@ -1890,10 +1890,21 @@ test('header Update feedback refreshes a saved result using current edits and sh
   await h.emitElementEvent('transcript', 'input');
   const updating = h.get('refresh-annotations').click();
   assert.equal(requests.length, 1); assert.equal(requests[0].input.text, corrected);
+  assert.equal(h.get('annotation-loading').hidden, false);
+  assert.equal(h.get('annotation-panel').getAttribute('aria-busy'), 'true');
+  assert.equal(h.get('annotated-transcript').hidden, true);
+  assert.equal(h.get('annotations-notes').hidden, true);
+  assert.equal(h.get('annotation-legend').hidden, true);
+  assert.equal(h.get('download-transcript').disabled, true);
   for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
   pending.resolve(analyzeSpeech({ text: corrected, durationSeconds: 15 }));
   await updating;
   assert.equal(h.state.report.transcript, corrected);
+  assert.equal(h.get('annotation-loading').hidden, true);
+  assert.equal(h.get('annotation-panel').getAttribute('aria-busy'), 'false');
+  assert.equal(h.get('annotated-transcript').hidden, false);
+  assert.equal(h.get('annotations-notes').hidden, false);
+  assert.equal(h.get('download-transcript').disabled, false);
   for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, false);
   h.state.rubricLoading = true; h.setBusy(false);
   for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
@@ -1901,6 +1912,57 @@ test('header Update feedback refreshes a saved result using current edits and sh
   h.get('transcript').value = '   ';
   await h.emitElementEvent('transcript', 'input');
   for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
+});
+
+test('transcript loading suspends old annotations and restores them on failed or canceled analysis', async () => {
+  for (const outcome of ['failure', 'cancel']) {
+    const pending = deferred(), h = harness(() => pending.promise);
+    h.updateConfig(hostedConfig);
+    const text = 'Our group gives students a reliable place to practice.';
+    const report = { ...analyzeSpeech({ text, durationSeconds: 15, aiFeedback: { annotations: [{ quote: text, category: 'great', comment: 'Your purpose is clear and specific.' }] } }), transcript: text };
+    h.state.report = report; h.state.transcriptText = text; h.get('transcript').value = text; h.renderReport();
+    const originalStatus = h.get('annotation-status').textContent;
+    const note = h.get('annotations-notes').children[0];
+    const sentence = h.get('annotated-transcript').children[0];
+    const mark = h.createdElements.find(node => node.tagName === 'MARK');
+    h.state.annotationPopover.open(1, mark);
+    assert.equal(h.get('annotation-bubble').hidden, false);
+    const selectedQuotes = []; h.state.chat = { selectQuote: quote => selectedQuotes.push(quote), getRehearsalContext: () => '', update() {} };
+    const updating = h.runAnalysis({ corrected: true });
+    assert.equal(h.get('annotation-loading').hidden, false);
+    assert.equal(h.get('annotation-bubble').hidden, true);
+    assert.equal(h.document.activeElement, h.get('annotation-loading'));
+    assert.match(h.get('annotation-status').textContent, /AI review in progress/);
+    assert.equal(h.get('annotations-notes').children[0], note, 'loading preserves the previous report in place');
+    h.attachTranscriptSelection({ type: 'click', target: { closest: selector => selector === '.transcript-sentence' ? sentence : null } });
+    assert.deepEqual(selectedQuotes, [], 'hidden annotations cannot attach a stale quote to chat');
+    if (outcome === 'cancel') {
+      h.state.requestController.abort();
+      assert.equal(h.get('annotation-loading').hidden, true, 'abort releases the transcript panel immediately');
+      pending.reject(new DOMException('Stopped', 'AbortError'));
+    } else pending.reject(new Error('Coaching temporarily unavailable.'));
+    await updating;
+    assert.equal(h.state.report, report);
+    assert.equal(h.get('annotation-loading').hidden, true);
+    assert.equal(h.get('annotation-panel').getAttribute('aria-busy'), 'false');
+    assert.equal(h.get('annotated-transcript').hidden, false);
+    assert.equal(h.get('annotations-notes').hidden, false);
+    assert.equal(h.get('annotation-legend').hidden, false);
+    assert.equal(h.get('annotations-notes').children[0], note);
+    assert.equal(h.get('annotation-status').textContent, originalStatus);
+    assert.equal(h.document.activeElement, h.get('annotated-transcript'));
+  }
+});
+
+test('unrelated audio preparation and document loading never replace the transcript with the annotation spinner', () => {
+  const h = harness(); h.renderSummaryDraft('A draft stays available.');
+  h.state.preparingAudio = true; h.setBusy(true);
+  assert.equal(h.get('annotation-loading').hidden, true);
+  assert.equal(h.get('annotated-transcript').hidden, false);
+  h.state.preparingAudio = false; h.state.rubricLoading = true; h.setBusy(false);
+  assert.equal(h.get('annotation-loading').hidden, true);
+  assert.equal(h.get('annotation-panel').getAttribute('aria-busy'), 'false');
+  assert.equal(elementText(h.get('annotated-transcript')), 'A draft stays available.');
 });
 
 test('transcription progress and cancellation reach the recording service', async () => {
@@ -2583,19 +2645,115 @@ test('stopping coaching ignores late progress and a late successful payload from
   assert.equal(h.state.busy, false);
 });
 
-test('refresh recovery locks new work, restores saved transcript, and then releases controls', async () => {
+test('current rehearsal reopens saved feedback and preserves preparation and transcript edits without new processing', async () => {
+  const requests = [];
+  const source = harness(async path => { requests.push(path); assert.equal(path, '/api/config'); return hostedConfig; }, { startup: true });
+  await nextTurn();
+  source.window.rehearsalHostedActions.accountChanged('saved-owner'); source.updateConfig(hostedConfig);
+  const original = 'Our study group gives every student a place to practice.';
+  const edited = 'Our weekly study group gives every student a place to practice.';
+  const report = { ...analyzeSpeech({ text: original, durationSeconds: 15, aiFeedback: { annotations: [annotation(original, original, 'great', 'Your purpose is clear and specific.')] } }), transcript: original };
+  const reportBefore = JSON.stringify(report);
+  const record = { ...savedTake('current-saved'), durationSeconds: 15, transcript: original, report };
+  source.window.rehearsalHostedActions.restoreRecording(record);
+  const preparation = {
+    'target-script': 'Current full script.', 'target-talking-points': 'Current checklist.',
+    'planned-introduction': 'Introduce the group.', 'planned-transitions': 'Now consider the benefits.',
+    'instructor-rubric': 'Use specific evidence.', 'assignment-instructions': 'Present for three minutes.',
+  };
+  for (const [field, value] of Object.entries(preparation)) source.get(field).value = value;
+  source.state.rubricFileName = 'rubric.pdf'; source.state.assignmentFileName = 'assignment.docx';
+  source.setTargetView('script'); source.showPage('history');
+  source.get('transcript').value = edited; await source.emitElementEvent('transcript', 'input');
+  const snapshot = source.window.rehearsalHostedActions.captureCurrentRehearsal();
+  assert.equal(snapshot.ownerId, 'saved-owner'); assert.equal(snapshot.recordingId, record.id);
+  assert.equal(snapshot.transcript, edited); assert.equal(snapshot.transcriptBasis, original);
+  assert.equal(source.state.transcriptBasis, original, 'editing keeps the source transcript used to match the draft');
+  assert.equal('blob' in snapshot, false); assert.equal('report' in snapshot, false);
+
+  const h = harness(path => { requests.push(path); throw new Error('Restoration must not process audio or feedback'); });
+  h.window.rehearsalHostedActions.accountChanged('saved-owner'); h.updateConfig(hostedConfig);
+  const opened = [];
+  h.window.rehearsalService.openRecording = async (id, { signal }) => { opened.push(id); assert.equal(signal.aborted, false); return record; };
+  assert.equal(await h.window.rehearsalHostedActions.restoreCurrentRehearsal(snapshot), true);
+  assert.deepEqual(opened, [record.id]); assert.deepEqual(requests, ['/api/config']);
+  assert.equal(h.state.audioBlob, record.blob); assert.equal(h.state.cloudRecordingId, record.id);
+  assert.equal(h.state.report, report); assert.equal(JSON.stringify(report), reportBefore, 'saved feedback and annotation offsets remain unchanged');
+  assert.equal(h.get('transcript').value, edited); assert.equal(h.state.transcriptText, edited); assert.equal(h.state.transcriptBasis, original);
+  assert.equal(exportedTranscript(h.buildAnnotatedDocument(h.state.report)), original);
+  assert.match(elementText(h.get('annotations-notes')), /Your purpose is clear and specific/);
+  assert.match(h.get('annotation-status').textContent, /analyzed version/);
+  for (const [field, value] of Object.entries(preparation)) assert.equal(h.get(field).value, value);
+  assert.equal(h.state.rubricFileName, 'rubric.pdf'); assert.equal(h.state.assignmentFileName, 'assignment.docx');
+  assert.equal(h.state.targetView, 'script'); assert.equal(h.state.currentPage, 'history');
+  assert.equal(h.get('annotation-loading').hidden, true); assert.equal(h.get('refresh-annotations').disabled, false);
+});
+
+test('a delayed current rehearsal reopen cannot replace a newer take, preparation edit, or account', async () => {
+  for (const change of ['take', 'preparation', 'account']) {
+    const pending = deferred(), h = harness(async path => { assert.equal(path, '/api/config'); return hostedConfig; }, { startup: true });
+    await nextTurn();
+    h.window.rehearsalHostedActions.accountChanged('first-owner'); h.updateConfig(hostedConfig);
+    let opens = 0; h.window.rehearsalService.openRecording = async () => { opens++; return pending.promise; };
+    const restoring = h.window.rehearsalHostedActions.restoreCurrentRehearsal({ ownerId: 'first-owner', recordingId: 'older-take', transcript: 'Older words.', transcriptBasis: 'Older words.', targetScript: 'Older preparation.' });
+    await nextTurn(); assert.equal(opens, 1);
+    const newerAudio = new Blob(['newer audio']);
+    if (change === 'take') h.setAudio(newerAudio, 3, 'Newer take');
+    else if (change === 'account') h.window.rehearsalHostedActions.accountChanged('second-owner');
+    h.get('target-script').value = 'Newer preparation.';
+    if (change === 'preparation') {
+      const generation = h.state.promptGeneration;
+      await h.emitElementEvent('target-script', 'input');
+      assert.ok(h.state.promptGeneration > generation, 'the real preparation input invalidates the pending draft restore');
+    }
+    pending.resolve({ id: 'older-take', blob: new Blob(['older audio']), durationSeconds: 3, transcript: 'Older words.', report: { private: true } });
+    assert.equal(await restoring, true);
+    assert.equal(h.state.audioBlob, change === 'take' ? newerAudio : null);
+    assert.equal(h.state.cloudRecordingId, ''); assert.equal(h.state.report, null); assert.equal(h.state.transcriptText, '');
+    assert.equal(h.get('target-script').value, 'Newer preparation.');
+  }
+});
+
+test('a preparation-only current rehearsal restores with an empty transcript and no recording request', async () => {
+  const h = harness();
+  assert.equal(h.window.rehearsalHostedActions.captureCurrentRehearsal(), null);
+  h.window.rehearsalHostedActions.accountChanged('prep-owner'); h.updateConfig(hostedConfig);
+  h.get('target-talking-points').value = 'Explain the problem. Offer one practical next step.';
+  h.get('planned-introduction').value = 'Start with a question.';
+  const snapshot = h.window.rehearsalHostedActions.captureCurrentRehearsal();
+  assert.equal(snapshot.recordingId, ''); assert.equal(snapshot.transcript, ''); assert.equal(snapshot.transcriptBasis, '');
+  h.get('target-talking-points').value = ''; h.get('planned-introduction').value = '';
+  let opens = 0; h.window.rehearsalService.openRecording = async () => { opens++; throw new Error('No recording to open'); };
+  assert.equal(await h.window.rehearsalHostedActions.restoreCurrentRehearsal(snapshot), true);
+  assert.equal(opens, 0); assert.equal(h.state.audioBlob, null); assert.equal(h.state.report, null);
+  assert.equal(h.get('target-talking-points').value, snapshot.targetTalkingPoints);
+  assert.equal(h.get('planned-introduction').value, snapshot.plannedIntroduction);
+  assert.equal(h.get('transcript').value, ''); assert.equal(h.get('refresh-annotations').disabled, true);
+  assert.equal(h.get('annotation-loading').hidden, true);
+});
+
+test('refresh recovery locks new work, preserves newer transcription over a stale draft, and releases controls', async () => {
   const h = harness(); h.updateConfig(hostedConfig);
   const pending = deferred(), marker = { recordingId: 'recover-id', kind: 'transcribe' };
-  h.window.rehearsalService.getPendingRequest = async () => marker;
+  let requestPending = true, restoredDrafts = 0;
+  h.window.rehearsalService.getPendingRequest = async () => requestPending ? marker : null;
   h.window.rehearsalService.recoverPending = async (_marker, options) => { options.onProgress('Still transcribing…'); return pending.promise; };
+  h.window.rehearsalAccount = { refreshHistory() {}, async restoreCurrentRehearsal() {
+    restoredDrafts++;
+    return h.window.rehearsalHostedActions.restoreCurrentRehearsal({ ownerId: 'first-user', recordingId: 'recover-id', transcript: 'Partial words.', transcriptBasis: 'Partial words.', targetTalkingPoints: 'Keep this plan.' });
+  } };
   h.window.rehearsalHostedActions.accountChanged('first-user');
   const recovery = h.window.rehearsalHostedActions.recoverPending(); await nextTurn();
   assert.equal(h.get('record-button').disabled, true);
   assert.equal(h.window.rehearsalHostedActions.canReplaceAudio(), false);
   assert.equal(h.get('cloud-recovery-message').textContent, 'Still transcribing…');
+  assert.equal(h.get('annotation-loading').hidden, true, 'transcription recovery does not show an analysis spinner');
+  requestPending = false;
   pending.resolve({ record: { id: 'recover-id', blob: new Blob(['saved audio']), durationSeconds: 1, transcript: 'Recovered words.' }, message: 'Transcript restored.' });
   await recovery;
   assert.equal(h.state.transcriptText, 'Recovered words.'); assert.equal(h.state.cloudRecordingId, 'recover-id');
+  assert.equal(h.get('transcript').value, 'Recovered words.'); assert.equal(h.state.transcriptBasis, 'Recovered words.');
+  assert.equal(restoredDrafts, 1); assert.equal(h.get('target-talking-points').value, 'Keep this plan.');
   assert.equal(h.get('record-button').disabled, false); assert.equal(h.state.recoveryController, null);
   assert.equal(h.get('cloud-recovery-message').textContent, 'Transcript restored.');
 });
@@ -2631,8 +2789,12 @@ test('an old account recovery can never restore private audio, text, report, or 
   h.window.rehearsalService.recoverPending = async (_marker, { signal }) => { recoverySignal = signal; return pending.promise; };
   h.window.rehearsalHostedActions.accountChanged('first-user');
   const recovery = h.window.rehearsalHostedActions.recoverPending(); await nextTurn();
+  assert.equal(h.get('annotation-loading').hidden, false, 'recovering analysis also shows activity in the transcript panel');
+  assert.equal(h.get('annotation-panel').getAttribute('aria-busy'), 'true');
   h.window.rehearsalHostedActions.accountChanged('second-user');
   assert.equal(recoverySignal.aborted, true);
+  assert.equal(h.get('annotation-loading').hidden, true);
+  assert.equal(h.get('annotation-panel').getAttribute('aria-busy'), 'false');
   pending.resolve({ record: { id: 'private-a', blob: new Blob(['private audio']), durationSeconds: 1, transcript: 'Private words.', report: { private: true, meta: { targetScript: 'Private preparation' } } }, message: 'Private result' });
   await recovery;
   assert.equal(h.state.audioBlob, null); assert.equal(h.state.transcriptText, ''); assert.equal(h.state.report, null);

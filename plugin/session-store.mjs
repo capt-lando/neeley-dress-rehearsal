@@ -9,7 +9,7 @@ export const INPUT_LIMITS = Object.freeze({
 });
 export const MAX_FEEDBACK_BYTES = 2 * 1024 * 1024;
 const CRITERIA = ['claim', 'evidence', 'structure', 'audience', 'conclusion'];
-const FEEDBACK_KEYS = new Set(['thesis', 'strengths', 'improvements', 'rhetoric', 'rubric', 'targetCoverage', 'annotations']);
+const FEEDBACK_KEYS = new Set(['thesis', 'strengths', 'improvements', 'rhetoric', 'rubric', 'targetCoverage', 'annotations', 'conversationStarter']);
 const INPUT_KEYS = new Set([...Object.keys(INPUT_LIMITS), 'targetMode', 'durationSeconds', 'useAI']);
 
 export class RehearsalError extends Error {
