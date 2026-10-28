@@ -186,7 +186,6 @@ function showPage(page, { focus = true, updateHash = true, initial = false } = {
   if (focus) {
     if (next === 'history') $('history-heading').focus({ preventScroll: true });
     else $('rehearse-tab').focus({ preventScroll: true });
-    $(`${next}-page`).scrollIntoView({ block: 'start' });
   }
   window.rehearsalAccount?.saveCurrentRehearsal?.();
   return true;
