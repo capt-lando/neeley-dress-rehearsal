@@ -68,6 +68,7 @@ function renderSummaryDraft(text = '', live = false) {
   $('speech-analysis-content').hidden = true; $('analysis-disclaimer').hidden = true; $('coaching-notice').hidden = true;
   $('transcript-details').hidden = !hasText || live; $('prompt-details').hidden = !hasText;
   $('download-transcript').disabled = !hasText;
+  syncAnalysisControls();
   syncChat();
 }
 function attachTranscriptSelection(event = {}) {
@@ -205,7 +206,7 @@ function syncCancelControls() {
 function syncAnalysisControls() {
   const blocked = state.busy || state.recoveryPending || state.cancelRestartPending || state.rubricLoading || state.assignmentLoading || state.startingRecording || state.recording || state.requestingMic || Boolean(state.liveTake);
   $('analyze-button').disabled = blocked;
-  $('reanalyze-button').disabled = blocked;
+  for (const id of ['reanalyze-button', 'refresh-annotations']) $(id).disabled = blocked || !$('transcript').value.trim();
   $('coaching-action').disabled = blocked;
   $('coaching-settings').disabled = blocked;
   $('analyze-button').textContent = state.busy ? 'Working on your feedback…' : state.rubricLoading || state.assignmentLoading ? 'Reading documents…' : state.liveTake ? 'Finishing your transcript…' : 'Analyze rehearsal ↗';
@@ -1328,6 +1329,7 @@ function cacheTranscript(text, generation = state.audioGeneration) {
   if (!state.report) renderSummaryDraft(state.transcriptText);
   $('follow-transcript-status').textContent = state.transcriptText.trim() ? 'Your recorded words · edit the transcript below after analysis if recognition missed something.' : 'Your transcript is empty. Add the words you actually spoke before updating feedback.';
   $('follow-transcript-connect').hidden = Boolean(state.transcriptText.trim());
+  syncAnalysisControls();
   markPromptStale();
   return true;
 }
@@ -1743,12 +1745,13 @@ function renderAnnotatedTranscript(report) {
   container.setAttribute('aria-label', count ? 'Original transcript with AI annotations' : 'Original transcript');
   $('annotation-status').textContent = state.transcriptText && state.transcriptText !== text
     ? 'Showing the analyzed version. Your edits appear in playback; update feedback to annotate your corrected transcript.'
-    : count ? `${count} AI coaching annotations. Click a marked passage for an explanation. Gold stars recognize great sentences; red underlines show wording to improve.`
+    : count ? `${count} AI coaching annotations. Click a marked passage for details. Gold stars recognize great sentences; red underlines show wording to improve. Use Update feedback for a fresh AI review.`
       : report.analysis?.method === 'ai' ? 'No grounded annotations were returned for this analysis. Your complete transcript appears below.'
         : ['failed', 'invalid_response'].includes(report.meta?.coachingStatus)
           ? 'AI coaching did not finish, so no color annotations are available. Your complete transcript appears below.'
           : 'Your complete transcript appears below. Connect an AI coach above, then analyze it for color annotations.';
   $('download-transcript').disabled = !text.trim();
+  syncAnalysisControls();
   syncChat();
 }
 function escapeHtml(value) {
@@ -1985,7 +1988,7 @@ $('upload-button').addEventListener('click', () => {
 $('audio-upload').addEventListener('change', () => uploadAudio($('audio-upload').files[0]));
 $('analyze-button').addEventListener('click', () => runAnalysis());
 $('live-transcription-cancel').addEventListener('click', () => { cancelLiveSession(); showLiveFallback('Live transcription was canceled. Retry the complete recording after you stop.'); });
-$('reanalyze-button').addEventListener('click', () => runAnalysis({ corrected: true }));
+for (const id of ['reanalyze-button', 'refresh-annotations']) $(id).addEventListener('click', () => runAnalysis({ corrected: true }));
 $('download-report').addEventListener('click', downloadReport);
 $('download-transcript').addEventListener('click', downloadAnnotatedTranscript);
 $('print-report').addEventListener('click', () => window.print());

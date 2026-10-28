@@ -1864,9 +1864,43 @@ test('full browser startup binds existing HTML controls and never references a r
   for (const [id, event] of [
     ['record-button', 'click'], ['pause-recording', 'click'], ['playback-toggle', 'click'],
     ['playback-scrub', 'input'], ['playback-scrub', 'keydown'], ['playback', 'timeupdate'],
-    ['transcript', 'input'], ['download-transcript', 'click'], ['analyze-button', 'click'],
+    ['transcript', 'input'], ['download-transcript', 'click'], ['analyze-button', 'click'], ['refresh-annotations', 'click'],
   ]) assert.ok(h.get(id).listeners.get(event)?.length, `${id} must bind its ${event} action`);
   assert.notEqual(h.get('app-status').className, 'app-status error', 'initial settings must render successfully');
+});
+
+test('header Update feedback refreshes a saved result using current edits and shares busy and empty-transcript guards', async () => {
+  const requests = [], pending = deferred();
+  const h = harness(async (path, options) => {
+    if (path === '/api/config') return hostedConfig;
+    requests.push({ path, input: JSON.parse(options.body) });
+    assert.equal(path, '/api/analyze-text', 'refreshing feedback must reuse the transcript without transcribing audio');
+    return pending.promise;
+  }, { startup: true });
+  await nextTurn();
+  for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
+  const original = 'A saved rehearsal with an earlier review.';
+  const report = { ...analyzeSpeech({ text: original, durationSeconds: 15, aiFeedback: { annotations: [{ quote: original, category: 'clarity', comment: 'Make your purpose specific.' }] } }), transcript: original };
+  h.window.rehearsalHostedActions.restoreRecording({ ...savedTake('saved-review'), durationSeconds: 15, transcript: original, report });
+  assert.equal(h.get('transcript').value, original);
+  for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, false, 'saved transcripts can be reviewed again');
+  assert.match(h.get('annotation-status').textContent, /Update feedback for a fresh AI review/);
+  const corrected = 'Our study group gives students a reliable place to practice.';
+  h.get('transcript').value = corrected;
+  await h.emitElementEvent('transcript', 'input');
+  const updating = h.get('refresh-annotations').click();
+  assert.equal(requests.length, 1); assert.equal(requests[0].input.text, corrected);
+  for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
+  pending.resolve(analyzeSpeech({ text: corrected, durationSeconds: 15 }));
+  await updating;
+  assert.equal(h.state.report.transcript, corrected);
+  for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, false);
+  h.state.rubricLoading = true; h.setBusy(false);
+  for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
+  h.state.rubricLoading = false;
+  h.get('transcript').value = '   ';
+  await h.emitElementEvent('transcript', 'input');
+  for (const id of ['reanalyze-button', 'refresh-annotations']) assert.equal(h.get(id).disabled, true);
 });
 
 test('transcription progress and cancellation reach the recording service', async () => {

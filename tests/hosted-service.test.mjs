@@ -321,8 +321,90 @@ test('definite failed jobs require a new request ID on the next explicit retry; 
   await service.request('/api/analyze-text', { body }); await service.request('/api/analyze-text', { body });
   await service.request('/api/analyze-text', { body: { ...body, text: 'Practice helps everyone.' } });
   const coaching = calls.filter(call => call.path === '/analyze-text');
-  assert.equal(coaching[0].body.requestId, coaching[1].body.requestId);
+  assert.notEqual(coaching[0].body.requestId, coaching[1].body.requestId);
   assert.notEqual(coaching[1].body.requestId, coaching[2].body.requestId);
+});
+
+test('updating unchanged text after a completed report requests fresh coaching in JSON and streaming modes', async () => {
+  for (const streaming of [false, true]) {
+    const completed = new Map();
+    const f = fixture({ handle: call => {
+      if (call.path !== '/analyze-text') return;
+      const cached = completed.has(call.body.requestId);
+      if (!cached) completed.set(call.body.requestId, { transcript: call.body.text,
+        analysis: { method: 'ai', reviewNumber: completed.size + 1 } });
+      const result = completed.get(call.body.requestId);
+      return streaming ? ndjson([...progressFrames(cached ? ['cached_result'] : coachStages), { type: 'result', data: result }]) : response(result);
+    } });
+    const options = { body: { recordingId: randomUUID(), text: 'The same recorded rehearsal.' }, ...(streaming ? { onProgress() {} } : {}) };
+    const first = await f.service.request('/api/analyze-text', options);
+    const refreshed = await f.service.request('/api/analyze-text', options);
+    assert.equal(first.analysis.reviewNumber, 1);
+    assert.equal(refreshed.analysis.reviewNumber, 2, 'an explicit Update must not replay the saved report');
+    assert.notEqual(f.calls[0].body.requestId, f.calls[1].body.requestId);
+    assert.equal(await f.service.getPendingRequest(), null);
+  }
+});
+
+test('a lost coaching response retries the same completed job before a later explicit update starts fresh', async () => {
+  const completed = new Map(); let first = true;
+  const f = fixture({ handle: call => {
+    if (call.path !== '/analyze-text') return;
+    if (!completed.has(call.body.requestId)) completed.set(call.body.requestId,
+      { analysis: { method: 'ai', reviewNumber: completed.size + 1 } });
+    if (first) { first = false; throw new TypeError('The completed response was lost'); }
+    return response(completed.get(call.body.requestId));
+  } });
+  const options = { body: { recordingId: randomUUID(), text: 'The same rehearsal.' } };
+  await assert.rejects(f.service.request('/api/analyze-text', options), /response was lost/);
+  const recovered = await f.service.request('/api/analyze-text', options);
+  const refreshed = await f.service.request('/api/analyze-text', options);
+  assert.equal(f.calls[0].body.requestId, f.calls[1].body.requestId, 'uncertain completion must not start duplicate paid work');
+  assert.equal(recovered.analysis.reviewNumber, 1);
+  assert.notEqual(f.calls[1].body.requestId, f.calls[2].body.requestId);
+  assert.equal(refreshed.analysis.reviewNumber, 2);
+});
+
+test('an in-flight retry keeps its request ID until the completed result is acknowledged', async () => {
+  const entered = deferred(), finish = deferred(); let attempts = 0;
+  const f = fixture({ handle: async call => {
+    if (call.path !== '/analyze-text') return;
+    attempts++;
+    if (attempts === 1) { entered.resolve(); await finish.promise; }
+    else if (attempts === 2) return response({ error: 'This request is still processing.' }, 409);
+    return response({ analysis: { method: 'ai' } });
+  } });
+  const options = { body: { recordingId: randomUUID(), text: 'The same rehearsal.' } };
+  const original = f.service.request('/api/analyze-text', options);
+  await entered.promise;
+  await assert.rejects(f.service.request('/api/analyze-text', options), { status: 409 });
+  assert.equal(f.calls[0].body.requestId, f.calls[1].body.requestId);
+  finish.resolve(); await original;
+  await f.service.request('/api/analyze-text', options);
+  assert.notEqual(f.calls[0].body.requestId, f.calls[2].body.requestId);
+});
+
+test('same-tab recovery retires a terminal coaching request before updating unchanged text', async () => {
+  for (const state of ['completed', 'failed', 'expired', 'cancelled']) {
+    const recordingId = randomUUID(), audioUrl = `${url}/storage/v1/object/sign/recordings/${userId}/${recordingId}/audio.wav`;
+    let lost = true;
+    const f = fixture({ handle: call => {
+      if (call.path === '/analyze-text' && lost) { lost = false; throw new TypeError('Response lost'); }
+      if (call.path.startsWith('/requests/')) return response({ requestId: call.path.split('/')[2], recordingId, kind: 'coach', state,
+        ...(state === 'completed' ? { result: { transcript: 'Practice.', analysis: { method: 'ai' } } } : {}) });
+      if (call.path === `/recordings/${recordingId}`) return response({ audioUrl, recording: { id: recordingId, transcript: 'Practice.', report: null } });
+      if (call.path === audioUrl) return new Response(wav());
+    } });
+    const options = { body: { recordingId, text: 'Practice.' } };
+    await assert.rejects(f.service.request('/api/analyze-text', options), /Response lost/);
+    const marker = await f.service.getPendingRequest();
+    const recovered = await f.service.recoverPending(marker);
+    assert.equal(recovered.state, state);
+    await f.service.request('/api/analyze-text', options);
+    const requests = f.calls.filter(call => call.path === '/analyze-text');
+    assert.equal(requests.length, 2);
+    assert.notEqual(requests[0].body.requestId, requests[1].body.requestId, `${state} recovery must retire the acknowledged ID`);
+  }
 });
 
 test('explicit retries rotate IDs only for confirmed terminal failures, including a busy speech provider', async () => {
