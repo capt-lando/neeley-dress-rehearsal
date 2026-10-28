@@ -108,7 +108,7 @@ function deferred() {
 
 function response(value) { return value; }
 
-function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, hosted = false, initialHash = '', extractRubric = async () => { throw new Error('Unexpected document extraction'); }, prepareRubricPreview, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
+function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, hosted = false, initialHash = '', extractRubric = async () => { throw new Error('Unexpected document extraction'); }, prepareRubricPreview, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()), createPdf = async () => new Blob(['%PDF-1.7\nPDF fixture\n%%EOF'], { type: 'application/pdf' }) } = {}) {
   const elements = new Map();
   const missingIds = [];
   let ownerDocument;
@@ -138,7 +138,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
   let blobCounter = 0;
   let progressHandler = () => {}, recordingSavedHandler = () => {};
   const revoked = [];
-  const objectUrls = new Map(), createdElements = [], timers = [];
+  const objectUrls = new Map(), createdElements = [], timers = [], pdfExports = [];
   const savedRecords = new Map(), storageCalls = { save: [], get: [], remove: [], list: 0 };
   const recordingStore = {
     async save(record) { storageCalls.save.push({ ...record }); savedRecords.set(record.id, { ...record }); },
@@ -149,6 +149,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
   };
   const mediaEvents = new Element(), windowEvents = new Element(), documentEvents = new Element();
   const context = {
+    createTranscriptPdf: async model => { pdfExports.push(model); return createPdf(model); },
     createProcessingProgress, validateAudioUploadHeader: validateUploadHeader, MAX_TRANSCRIPT_ANNOTATIONS, MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES,
     document: {
       getElementById: id => {
@@ -199,14 +200,14 @@ globalThis.audioTest = {
   state, updateConfig, openSettings, enableMic, enumerateInputs, openInputSelector, cleanupMic, initializeInputDetection, meterLoop, resetMeter,
   startRecording, stopRecording, captureRecordingSamples, toggleRecordingPause, uploadAudio, cancelLiveSession, openCancelRestart, confirmCancelRestart, closeCancelRestart,
   wordIndexAtTime, seekPlayback, ensureTranscript, setAudio, discardAudio, renderFollowTranscript, renderSummaryDraft, attachTranscriptSelection, getChatContext,
-  runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
+  runAnalysis, renderReport, annotationSegments, buildTranscriptExport, renderAnnotatedTranscript, downloadAnnotatedTranscript,
   analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, openRubricPreview, showRubricPage, importAssignment, removeAssignment, preparationDocuments, setBusy,
   autosaveRecording, refreshSavedRecordings, renderSavedRecordings, openSavedRecording, deleteSavedRecording,
   downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving, showPage, startNewRehearsal, captureViewGeneration, isViewGenerationCurrent
 };`, context);
   const emit = async (target, type, event = {}) => Promise.all((target.listeners.get(type) || []).map(handler => handler({ type, ...event })));
   return { ...context.audioTest, get, revoked, missingIds, document: context.document, navigator: context.navigator, window: context.window,
-    objectUrls, createdElements, storageCalls, savedRecords, recordingStore, flushTimers: () => { while (timers.length) timers.shift()(); },
+    objectUrls, createdElements, storageCalls, savedRecords, recordingStore, pdfExports, flushTimers: () => { while (timers.length) timers.shift()(); },
     emitMediaEvent: (type, event) => emit(mediaEvents, type, event),
     emitWindowEvent: (type, event) => emit(windowEvents, type, event),
     emitDocumentEvent: (type, event) => emit(documentEvents, type, event),
@@ -1581,11 +1582,10 @@ function annotation(text, quote, category = 'thesis', comment = 'Review this pas
   return { quote, category, comment, start, end: start + quote.length };
 }
 
-function exportedTranscript(html) {
-  const transcript = parseHTML(html).document.querySelector('.transcript');
-  assert.ok(transcript, 'download must contain the transcript');
-  transcript.querySelectorAll('.annotation-ref').forEach(reference => reference.remove());
-  return transcript.textContent;
+function exportedTranscript(model) {
+  assert.equal(typeof model.text, 'string');
+  assert.equal(model.segments.map(segment => segment.text).join(''), model.text, 'PDF segments must preserve the complete original transcript');
+  return model.text;
 }
 
 test('hostile report fields, rubric names and saved captions never reach HTML sinks', async () => {
@@ -1697,10 +1697,9 @@ test('annotation segments and download preserve original Unicode, newlines and u
   for (const segment of marked) {
     assert.equal(text.slice(segment.annotation.start, segment.annotation.end), segment.text);
   }
-  const html = h.buildAnnotatedDocument({ transcript: text, analysis: { method: 'ai', annotations } });
-  assert.equal(exportedTranscript(html), text);
-  assert.match(html, /charset="utf-8"/);
-  assert.match(html, /white-space:pre-wrap/);
+  const model = h.buildTranscriptExport({ transcript: text, analysis: { method: 'ai', annotations } });
+  assert.equal(exportedTranscript(model), text);
+  assert.equal(model.segments.filter(segment => segment.annotation).length, 2);
 });
 
 test('annotation validation refuses mismatched ranges, unknown categories and overlapping highlights', () => {
@@ -1725,14 +1724,14 @@ test('annotation validation refuses mismatched ranges, unknown categories and ov
   assert.equal(marked.length, 2);
   assert.ok(marked[0].annotation.end <= marked[1].annotation.start);
   assert.equal(segments.map(segment => segment.text).join(''), text);
-  const html = h.buildAnnotatedDocument({ transcript: text, analysis: { method: 'ai', annotations: candidates } });
-  assert.equal((html.match(/<mark\b/g) || []).length, 2);
-  assert.ok(!html.includes('Invented quote') && !html.includes('Duplicate excerpt.'));
+  const model = h.buildTranscriptExport({ transcript: text, analysis: { method: 'ai', annotations: candidates } });
+  assert.equal(model.segments.filter(segment => segment.annotation).length, 2);
+  assert.ok(!JSON.stringify(model).includes('Invented quote') && !JSON.stringify(model).includes('Duplicate excerpt.'));
 });
 
 test('selective annotations render through the ending beyond the former twelve-note and hundred-candidate limits', () => {
   const h = harness(), quote = 'Practice makes ideas clearer.';
-  const paragraphs = Array.from({ length: 121 }, (_, index) => `${quote} Unmarked context for point ${index + 1}.\n`);
+  const paragraphs = Array.from({ length: 240 }, (_, index) => `${quote} Unmarked context for point ${index + 1}.\n`);
   const text = paragraphs.join('');
   let start = 0;
   const annotations = paragraphs.map((paragraph, index) => {
@@ -1745,15 +1744,15 @@ test('selective annotations render through the ending beyond the former twelve-n
   assert.equal(h.get('annotations-notes').children.length, paragraphs.length);
   const marks = h.createdElements.filter(node => node.tagName === 'MARK');
   assert.equal(marks.length, paragraphs.length);
-  assert.equal(marks.at(-1).id, 'annotation-quote-121');
+  assert.equal(marks.at(-1).id, 'annotation-quote-240');
   assert.equal(marks.at(-1).className, 'annotation-great');
   const segments = h.annotationSegments(text, annotations);
   assert.equal(segments.map(segment => segment.text).join(''), text);
   assert.equal(segments.filter(segment => !segment.annotation).map(segment => segment.text).join(''), paragraphs.map(paragraph => paragraph.slice(quote.length)).join(''));
-  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
-  assert.equal(exported.querySelectorAll('.transcript mark').length, paragraphs.length);
-  assert.equal(exported.querySelector('.transcript mark:last-of-type').className, 'annotation-great');
-  assert.equal(exportedTranscript(html), text);
+  const model = h.buildTranscriptExport(report), exported = model.segments.filter(segment => segment.annotation);
+  assert.equal(exported.length, paragraphs.length);
+  assert.equal(exported.at(-1).annotation.category, 'great'); assert.equal(exported.at(-1).annotation.number, 240);
+  assert.equal(exportedTranscript(model), text);
 });
 
 test('legacy impact passages merge into great sentences while needs-work markers stay distinct in the page and export', () => {
@@ -1775,17 +1774,14 @@ test('legacy impact passages merge into great sentences while needs-work markers
   assert.deepEqual(marks.map(node => node.dataset.assessment), expected);
   assert.equal(marks[2].className, 'annotation-great');
   assert.equal(h.createdElements.filter(node => node.className === 'annotation-star').length, 2);
-  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
-  assert.deepEqual([...exported.querySelectorAll('.transcript mark')].map(mark => mark.dataset.assessment), expected);
-  assert.match(exported.querySelector('style').textContent, /mark\[data-assessment="needs_work"\][^{]*\{background:transparent;text-decoration-line:underline/);
-  assert.match(exported.querySelector('style').textContent, /mark\.annotation-great\{[^}]*box-shadow:[^}]*animation:annotation-great-sweep 8s ease-in-out infinite/);
-  assert.equal(exported.querySelectorAll('.transcript .annotation-great').length, 2);
-  assert.equal(exported.querySelectorAll('.transcript .annotation-star').length, 2);
-  assert.doesNotMatch(html, /annotation-impact|Impact sentence/);
+  const model = h.buildTranscriptExport(report), exported = Array.from(model.segments.filter(segment => segment.annotation), segment => segment.annotation);
+  assert.deepEqual(exported.map(item => item.assessment), expected);
+  assert.equal(exported.filter(item => item.category === 'great').length, 2);
+  assert.equal(exported.filter(item => item.assessment === 'needs_work').length, 2);
+  assert.equal(exported[3].suggestion, 'It gives students a reliable place to study.');
+  assert.ok(exported.every(item => item.category !== 'impact'));
   assert.doesNotMatch(appHtml, /annotation-impact|Impact sentence/);
-  assert.match(exported.querySelector('style').textContent, /prefers-reduced-motion:reduce/);
-  assert.equal(exported.querySelector('.legend-needs-work').textContent, 'Needs work');
-  assert.equal(exportedTranscript(html), text);
+  assert.equal(exportedTranscript(model), text);
 });
 
 test('great sentences show an accessible star and explanatory note without adding icon text to selected quotes', () => {
@@ -1809,11 +1805,10 @@ test('great sentences show an accessible star and explanatory note without addin
   assert.equal(container.querySelector('mark').parentElement.dataset.quote, quote);
   assert.equal(selectedTranscriptQuote(container, { isCollapsed: false, rangeCount: 1, anchorNode: container.firstChild, focusNode: container.lastChild,
     getRangeAt: () => ({ cloneContents: () => container.cloneNode(true) }) }), text.trim());
-  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
-  assert.equal(exported.querySelector('.transcript .annotation-star').textContent, '★');
-  assert.equal(exported.querySelector('.transcript .annotation-ref').getAttribute('aria-label'), 'Read great sentence annotation 1');
-  assert.equal(exported.querySelector('#note-1').textContent, `Great sentence: ${comment}`);
-  assert.equal(exportedTranscript(html), text);
+  const model = h.buildTranscriptExport(report), exported = model.segments.find(segment => segment.annotation).annotation;
+  assert.equal(exported.category, 'great'); assert.equal(exported.assessment, 'strength'); assert.equal(exported.number, 1);
+  assert.equal(exported.comment, comment);
+  assert.equal(exportedTranscript(model), text);
   assert.equal(parseHTML(appHtml).document.querySelector('#annotation-legend .annotation-star').parentElement.textContent, '★Great sentence');
 });
 
@@ -1824,10 +1819,9 @@ test('great sentence annotations keep hostile quote and encouragement content in
   h.renderAnnotatedTranscript(report);
   assert.equal(elementText(h.get('annotations-notes').children[0]), `Great sentence: ${comment}`);
   assert.ok(h.createdElements.every(node => !['SCRIPT', 'IMG'].includes(node.tagName)));
-  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
-  assert.equal(exported.querySelectorAll('script,img').length, 0);
-  assert.equal(exported.querySelector('#note-1').textContent, `Great sentence: ${comment}`);
-  assert.equal(exportedTranscript(html), text);
+  const model = h.buildTranscriptExport(report), exported = model.segments.find(segment => segment.annotation).annotation;
+  assert.equal(exported.comment, comment); assert.equal(exported.quote, text);
+  assert.equal(exportedTranscript(model), text);
 });
 
 function annotationBubbleFixture() {
@@ -1932,16 +1926,16 @@ test('annotation bubble clears on outside interaction, scroll, resize and transc
   f.controller.dispose(); assert.equal(f.events.size, 0);
 });
 
-test('suggested wording stays separate and safely escaped in notes and downloads without changing analyzed text', () => {
+test('suggested wording stays separate and literal in PDF data without changing analyzed text', () => {
   const h = harness(), text = 'The plan is sort of useful.';
   const suggestion = '<img src=x onerror="alert(1)"> Our plan gives students a reliable place to study.';
   const report = { transcript: text, analysis: { method: 'ai', annotations: [{ ...annotation(text, text, 'clarity', 'Name the useful result.'), suggestion }] } };
   h.renderAnnotatedTranscript(report);
   assert.ok(elementText(h.get('annotations-notes')).includes(`Suggested wording: ${suggestion}`));
-  const html = h.buildAnnotatedDocument(report), exported = parseHTML(html).document;
-  assert.equal(exportedTranscript(html), text);
-  assert.equal(exported.querySelector('.annotation-note-suggestion').textContent, `Suggested wording: ${suggestion}`);
-  assert.equal(exported.querySelectorAll('script,img').length, 0);
+  const model = h.buildTranscriptExport(report), exported = model.segments.find(segment => segment.annotation).annotation;
+  assert.equal(exportedTranscript(model), text);
+  assert.equal(exported.suggestion, suggestion); assert.equal(exported.quote, text);
+  assert.ok(!model.text.includes(suggestion));
 });
 
 test('hostile transcript and comment markup remain inert text in the page and downloaded document', () => {
@@ -1950,13 +1944,11 @@ test('hostile transcript and comment markup remain inert text in the page and do
   const comment = '</li><script>alert("key")</script><a href="javascript:alert(1)">click</a> & \'quoted\'';
   const quote = '<script>globalThis.pwned = true</script>';
   const report = { transcript: text, analysis: { method: 'ai', annotations: [annotation(text, quote, 'clarity', comment)] } };
-  const html = h.buildAnnotatedDocument(report);
-  assert.equal(exportedTranscript(html), text, 'literal entities must not be double-decoded');
-  assert.doesNotMatch(html, /<script\b|<img\b|<[^>]*\b(?:href="javascript:|onerror=)/i);
-  assert.ok(html.includes('&lt;script&gt;globalThis.pwned = true&lt;/script&gt;'));
-  assert.ok(html.includes('&lt;a href=&quot;javascript:alert(1)&quot;&gt;click&lt;/a&gt;'));
-  assert.match(html, /Content-Security-Policy/);
-  assert.match(html, /default-src 'none'/);
+  const model = h.buildTranscriptExport(report);
+  assert.equal(exportedTranscript(model), text, 'literal entities must not be decoded or encoded as HTML');
+  assert.equal(model.segments.find(segment => segment.annotation).annotation.comment, comment);
+  assert.deepEqual(Object.keys(model).sort(), ['segments', 'text']);
+  assert.doesNotMatch(appSource, /function escapeHtml|text\/html;charset=utf-8|<!doctype html>/);
   h.renderAnnotatedTranscript(report);
   const marks = h.createdElements.filter(child => child.tagName === 'MARK');
   assert.equal(marks.map(mark => mark.textContent).join(''), quote);
@@ -1969,9 +1961,10 @@ test('local reports never display or export AI highlights even if stale annotati
   const annotations = [annotation(text, text, 'thesis', 'Stale API comment.')];
   for (const method of ['local', 'rules', undefined]) {
     const report = { transcript: text, analysis: { method, annotations } };
-    const html = h.buildAnnotatedDocument(report);
-    assert.equal(exportedTranscript(html), text);
-    assert.doesNotMatch(html, /<mark\b|Stale API comment\./);
+    const model = h.buildTranscriptExport(report);
+    assert.equal(exportedTranscript(model), text);
+    assert.equal(model.segments.filter(segment => segment.annotation).length, 0);
+    assert.ok(!JSON.stringify(model).includes('Stale API comment.'));
     h.renderAnnotatedTranscript(report);
     assert.equal(h.get('annotations-notes').children.length, 0);
     assert.equal(h.get('annotated-transcript').children.length, 1);
@@ -1991,13 +1984,119 @@ test('annotation display and export keep the analyzed version while textarea cor
   h.state.report = report;
   h.state.transcriptText = correction;
   h.get('transcript').value = correction;
-  const html = h.buildAnnotatedDocument(report);
+  const model = h.buildTranscriptExport(report);
   h.renderAnnotatedTranscript(report);
-  assert.equal(exportedTranscript(html), original);
-  assert.ok(!html.includes(correction));
+  assert.equal(exportedTranscript(model), original);
+  assert.ok(!JSON.stringify(model).includes(correction));
   assert.equal(h.get('transcript').value, correction);
   assert.match(h.get('annotation-status').textContent, /analyzed version/);
   assert.equal(JSON.stringify(report), snapshot, 'rendering and downloading must not mutate the report');
+});
+
+test('transcript download produces a PDF from the analyzed snapshot without sending any service request', async () => {
+  const h = harness(), downloads = [];
+  const original = 'Original words. Café volunteers help. 🚀\n';
+  const report = { transcript: original, analysis: { method: 'ai', annotations: [
+    { ...annotation(original, 'Café volunteers help.', 'great', 'Keep this concrete example.'), suggestion: 'Do not substitute this wording.', unused: '<script>ignored</script>' },
+  ] } };
+  h.state.report = report; h.state.transcriptText = 'Pending corrections that are not analyzed.';
+  h.get('transcript').value = h.state.transcriptText; h.renderReport();
+  h.window.rehearsalDownloads = { download: async (blob, name) => downloads.push({ blob, name }) };
+  await h.downloadAnnotatedTranscript();
+  assert.equal(h.pdfExports.length, 1); assert.equal(exportedTranscript(h.pdfExports[0]), original);
+  const item = h.pdfExports[0].segments.find(segment => segment.annotation).annotation;
+  assert.equal(item.suggestion, 'Do not substitute this wording.'); assert.equal(item.unused, undefined);
+  assert.notEqual(item, report.analysis.annotations[0], 'export data is a separate annotation snapshot');
+  assert.equal(downloads.length, 1); assert.equal(downloads[0].blob.type, 'application/pdf');
+  assert.match(await downloads[0].blob.text(), /^%PDF-/);
+  assert.match(downloads[0].name, /^dress-rehearsal-transcript-\d{4}-\d{2}-\d{2}\.pdf$/);
+  assert.equal(h.get('download-transcript').disabled, false); assert.equal(h.get('download-transcript').textContent, 'Download transcript PDF');
+  assert.equal(h.get('download-transcript').getAttribute('aria-busy'), 'false');
+  assert.equal(h.get('transcript').value, 'Pending corrections that are not analyzed.');
+});
+
+test('plain transcript PDF uses the browser download path and releases its object URL', async () => {
+  const h = harness(), text = '  Plain unreviewed transcript.\nLiteral <script> and &lt;text&gt;.  ';
+  h.renderSummaryDraft(text);
+  await h.downloadAnnotatedTranscript();
+  assert.equal(exportedTranscript(h.pdfExports[0]), text);
+  assert.ok(h.pdfExports[0].segments.every(segment => segment.annotation === null));
+  const anchors = h.createdElements.filter(element => element.tagName === 'A' && element.download);
+  assert.equal(anchors.length, 1); assert.equal(anchors[0].clicked, true); assert.match(anchors[0].download, /\.pdf$/);
+  assert.equal(h.objectUrls.get(anchors[0].href).type, 'application/pdf');
+  h.flushTimers(); assert.ok(h.revoked.includes(anchors[0].href));
+  h.discardAudio(); await h.downloadAnnotatedTranscript();
+  assert.equal(h.pdfExports.length, 1, 'empty transcripts do not begin PDF generation');
+});
+
+test('duplicate PDF clicks share one generation and transcript rerendering cannot unlock its button', async () => {
+  const pending = deferred(), downloads = [], h = harness(undefined, { createPdf: () => pending.promise });
+  h.state.report = { transcript: 'One snapshot.', analysis: { method: 'ai', annotations: [] } }; h.renderReport();
+  h.window.rehearsalDownloads = { download: async (blob, name) => downloads.push({ blob, name }) };
+  const exporting = h.downloadAnnotatedTranscript();
+  await Promise.all([h.downloadAnnotatedTranscript(), h.downloadAnnotatedTranscript(), h.downloadAnnotatedTranscript()]);
+  assert.equal(h.pdfExports.length, 1); assert.equal(h.get('download-transcript').disabled, true);
+  assert.equal(h.get('download-transcript').textContent, 'Preparing PDF…'); assert.equal(h.get('download-transcript').getAttribute('aria-busy'), 'true');
+  h.renderAnnotatedTranscript(h.state.report);
+  assert.equal(h.get('download-transcript').disabled, true);
+  pending.resolve(new Blob(['%PDF-1.7\nfixture'], { type: 'application/pdf' })); await exporting;
+  assert.equal(downloads.length, 1); assert.equal(h.state.transcriptExport, null); assert.equal(h.get('download-transcript').disabled, false);
+});
+
+test('changed account, audio, report or draft text suppresses stale PDF results and errors', async () => {
+  for (const change of ['account', 'audio', 'report', 'draft']) for (const fails of [false, true]) {
+    const pending = deferred(), downloads = [], h = harness(undefined, { createPdf: () => pending.promise });
+    h.state.accountId = 'original-owner';
+    if (change === 'draft') h.renderSummaryDraft('Original draft.');
+    else { h.state.report = { transcript: 'Private original report.', analysis: { method: 'ai' } }; h.renderReport(); }
+    h.window.rehearsalDownloads = { download: async (blob, name) => downloads.push({ blob, name }) };
+    const exporting = h.downloadAnnotatedTranscript();
+    if (change === 'account') h.window.rehearsalHostedActions.accountChanged('new-owner');
+    if (change === 'audio') h.setAudio(new Blob(['new audio']), 1, 'New take');
+    if (change === 'report') { h.state.report = { transcript: 'New report.' }; h.renderReport(); }
+    if (change === 'draft') h.renderSummaryDraft('New draft.');
+    h.get('app-status').textContent = 'Current context message';
+    if (fails) pending.reject(new Error('Private old export failure')); else pending.resolve(new Blob(['%PDF-1.7'], { type: 'application/pdf' }));
+    await exporting;
+    assert.equal(downloads.length, 0, `${change}, failure=${fails}`);
+    assert.equal(h.get('app-status').textContent, 'Current context message');
+    assert.equal(h.state.transcriptExport, null); assert.equal(h.get('download-transcript').textContent, 'Download transcript PDF');
+    assert.equal(h.get('download-transcript').disabled, change === 'account' || change === 'audio');
+  }
+});
+
+test('an obsolete PDF finishing cannot unlock or download in place of a newer export', async () => {
+  const first = deferred(), second = deferred(), downloads = []; let generations = 0;
+  const h = harness(undefined, { createPdf: () => ++generations === 1 ? first.promise : second.promise });
+  h.window.rehearsalDownloads = { download: async (blob, name) => downloads.push({ blob, name }) };
+  h.state.report = { transcript: 'Old report.' }; h.renderReport(); const older = h.downloadAnnotatedTranscript();
+  h.state.report = { transcript: 'New report.' }; h.renderReport(); const newer = h.downloadAnnotatedTranscript();
+  assert.equal(h.pdfExports.length, 2);
+  first.resolve(new Blob(['%PDF-1.7 old'], { type: 'application/pdf' })); await older;
+  assert.equal(downloads.length, 0); assert.equal(h.get('download-transcript').disabled, true);
+  assert.equal(h.get('download-transcript').textContent, 'Preparing PDF…');
+  second.resolve(new Blob(['%PDF-1.7 new'], { type: 'application/pdf' })); await newer;
+  assert.equal(downloads.length, 1); assert.match(await downloads[0].blob.text(), /new$/);
+  assert.equal(h.get('download-transcript').disabled, false);
+});
+
+test('PDF generation and host download failures restore controls and allow a deliberate retry', async () => {
+  for (const failure of ['generate', 'invalid', 'download']) {
+    let attempt = 0;
+    const h = harness(undefined, { createPdf: async () => {
+      if (++attempt === 1 && failure === 'generate') throw new Error('PDF generation failed.');
+      return new Blob(['%PDF-1.7 fixture'], { type: attempt === 1 && failure === 'invalid' ? 'text/html' : 'application/pdf' });
+    } });
+    h.renderSummaryDraft('Retain this transcript.');
+    let downloads = 0;
+    h.window.rehearsalDownloads = { download: async () => { if (++downloads === 1 && failure === 'download') throw new Error('Download denied.'); } };
+    await h.downloadAnnotatedTranscript();
+    assert.match(h.get('app-status').textContent, /PDF generation failed|PDF could not be prepared|Download denied/);
+    assert.equal(h.get('download-transcript').disabled, false); assert.equal(h.state.transcriptExport, null);
+    assert.equal(h.state.summaryTranscript, 'Retain this transcript.');
+    await h.downloadAnnotatedTranscript();
+    assert.equal(h.pdfExports.length, 2); assert.equal(downloads, failure === 'download' ? 2 : 1);
+  }
 });
 
 test('full browser startup binds existing HTML controls and never references a removed element', async () => {
@@ -2833,7 +2932,7 @@ test('current rehearsal reopens saved feedback and preserves preparation and tra
   assert.equal(h.state.audioBlob, record.blob); assert.equal(h.state.cloudRecordingId, record.id);
   assert.equal(h.state.report, report); assert.equal(JSON.stringify(report), reportBefore, 'saved feedback and annotation offsets remain unchanged');
   assert.equal(h.get('transcript').value, edited); assert.equal(h.state.transcriptText, edited); assert.equal(h.state.transcriptBasis, original);
-  assert.equal(exportedTranscript(h.buildAnnotatedDocument(h.state.report)), original);
+  assert.equal(exportedTranscript(h.buildTranscriptExport(h.state.report)), original);
   assert.match(elementText(h.get('annotations-notes')), /Your purpose is clear and specific/);
   assert.match(h.get('annotation-status').textContent, /analyzed version/);
   for (const [field, value] of Object.entries(preparation)) assert.equal(h.get(field).value, value);

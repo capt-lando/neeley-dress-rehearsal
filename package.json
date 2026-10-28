@@ -18,7 +18,8 @@
     "@supabase/supabase-js": "2.118.0",
     "docx-preview": "0.4.1",
     "fflate": "0.8.3",
-    "pdfjs-dist": "6.4.299"
+    "pdfjs-dist": "6.4.299",
+    "pdfmake": "0.3.13"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

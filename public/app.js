@@ -6,6 +6,7 @@ import { createRehearsalChat } from './rehearsal-chat.js';
 import { renderDiscussableTranscript, selectedTranscriptQuote, createAnnotationPopover, annotationAssessment, annotationCategory } from '../lib/transcript-discussion.mjs';
 import { MAX_TRANSCRIPT_ANNOTATIONS } from '../lib/analysis-core.mjs';
 import { MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES } from '../lib/recording-limits.mjs';
+import { createTranscriptPdf } from '../lib/transcript-pdf.mjs';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -29,7 +30,7 @@ const state = {
   cancelRestartPending: false, cancelConfirmation: null,
   currentPage: 'rehearse', viewGeneration: 0,
   chat: null, chatContextKey: 0, summaryTranscript: '', transcriptSelectionAttached: false, annotationPopover: null,
-  annotationLoading: false, annotationReadyView: null,
+  annotationLoading: false, annotationReadyView: null, transcriptExport: null,
 };
 
 function getChatContext() {
@@ -106,8 +107,7 @@ function syncAnnotationLoading({ viewUpdated = false } = {}) {
   const wasLoading = state.annotationLoading;
   const container = $('annotated-transcript'), panel = $('annotation-panel'), placeholder = $('annotation-loading');
   if (loading && (!wasLoading || viewUpdated)) {
-    state.annotationReadyView = { status: $('annotation-status').textContent, explanation: $('annotation-status').dataset.explanation || 'false', legendHidden: $('annotation-legend').hidden,
-      downloadDisabled: $('download-transcript').disabled };
+    state.annotationReadyView = { status: $('annotation-status').textContent, explanation: $('annotation-status').dataset.explanation || 'false', legendHidden: $('annotation-legend').hidden };
   }
   state.annotationLoading = loading;
   panel.setAttribute('aria-busy', String(loading));
@@ -124,11 +124,11 @@ function syncAnnotationLoading({ viewUpdated = false } = {}) {
       $('annotation-status').textContent = state.annotationReadyView.status;
       $('annotation-status').dataset.explanation = state.annotationReadyView.explanation;
       $('annotation-legend').hidden = state.annotationReadyView.legendHidden;
-      $('download-transcript').disabled = state.annotationReadyView.downloadDisabled;
     }
     state.annotationReadyView = null;
     if (document.activeElement === placeholder) container.focus({ preventScroll: true });
   }
+  syncTranscriptDownload();
 }
 
 function initializeTranscriptInteractions() {
@@ -1826,31 +1826,50 @@ function renderAnnotatedTranscript(report) {
   syncAnalysisControls();
   syncChat();
 }
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
-}
-function buildAnnotatedDocument(report) {
+function buildTranscriptExport(report) {
   const text = typeof report?.transcript === 'string' ? report.transcript : '';
-  const segments = annotationSegments(text, report?.analysis?.method === 'ai' ? report.analysis.annotations : []);
-  const annotations = segments.filter(segment => segment.annotation).map(segment => segment.annotation);
-  const star = '<span class="annotation-star" aria-hidden="true">★</span>';
-  const transcript = segments.map(segment => {
+  const segments = annotationSegments(text, report?.analysis?.method === 'ai' ? report.analysis.annotations : []).map(segment => {
     const item = segment.annotation;
-    if (!item) return escapeHtml(segment.text);
-    const label = item.category === 'great' ? `Read great sentence annotation ${item.number}` : `Read annotation ${item.number}`;
-    return `<mark class="annotation-${item.category}" data-assessment="${item.assessment}" aria-describedby="note-${item.number}">${escapeHtml(segment.text)}</mark><a class="annotation-ref" href="#note-${item.number}" aria-label="${label}">${item.category === 'great' ? star : ''}[${item.number}]</a>`;
-  }).join('');
-  const notes = annotations.map(item => `<li class="annotation-${item.category}" id="note-${item.number}"><strong>${escapeHtml(ANNOTATION_LABELS[item.category])}:</strong> ${escapeHtml(item.comment)}${typeof item.suggestion === 'string' && item.suggestion.trim() ? `<p class="annotation-note-suggestion"><strong>Suggested wording:</strong> ${escapeHtml(item.suggestion.trim())}</p>` : ''}</li>`).join('');
-  const legend = Object.entries(ANNOTATION_LABELS).map(([category, label]) => `<span class="annotation-${category}">${category === 'great' ? `${star} ` : ''}${escapeHtml(label)}</span>`).join(' ') + ' <span class="legend-needs-work">Needs work</span>';
-  const markerStyles = `.transcript mark{box-decoration-break:clone;-webkit-box-decoration-break:clone}.annotation-great{background:#fff9ee}.transcript .annotation-star{animation:annotation-star-glow 8s ease-in-out infinite}.transcript mark.annotation-great{background:linear-gradient(100deg,transparent 25%,#f3c76922 39%,#f3c76999 50%,#f3c76922 61%,transparent 75%) 180% 0/260% 100% no-repeat;background-color:#fff9ee;text-shadow:0 0 6px #ddb45a40;box-shadow:0 0 0 1px #d5ae5538,0 0 6px #d8ab4c25;padding:2px 0;animation:annotation-great-sweep 8s ease-in-out infinite}.transcript mark[data-assessment="needs_work"],.legend-needs-work{background:transparent;text-decoration-line:underline;text-decoration-color:#c55050;text-decoration-thickness:1.5px;text-underline-offset:4px}.annotation-note-suggestion{margin:6px 0 0;color:inherit}@keyframes annotation-star-glow{0%,100%{text-shadow:0 0 2px #e2b54160}50%{text-shadow:0 0 7px #dba120d9;color:#b47c05}}@keyframes annotation-great-sweep{0%,12%{background-position:180% 0}75%,100%{background-position:-80% 0}}@media(prefers-reduced-motion:reduce){.transcript .annotation-star{animation:none}.transcript mark.annotation-great{animation:none;background-image:none;text-shadow:none}}@media print{.transcript .annotation-star{animation:none;text-shadow:none}.transcript mark.annotation-great{animation:none;background-image:none;text-shadow:none;box-shadow:0 0 0 1px #d5ae5538}}`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"><title>Dress Rehearsal — annotated transcript</title><style>body{font:16px/1.65 system-ui,sans-serif;color:#29262d;max-width:850px;margin:48px auto;padding:0 24px}h1{font-size:28px;line-height:1.2}p{color:#655f6b}.legend{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0}.legend>span,mark{padding:2px 5px;border-radius:4px;color:inherit}.transcript{white-space:pre-wrap;font-size:19px;line-height:1.9;overflow-wrap:anywhere}.annotation-thesis{background:#f0e9f7}.annotation-evidence{background:#e8f4ea}.annotation-structure{background:#e8f1fa}.annotation-delivery{background:#fbf2dc}.annotation-clarity{background:#faeaf0}.annotation-star{color:#a7770d;font-size:1.2em;line-height:1}.annotation-ref .annotation-star{margin-right:3px}.annotation-ref{font-size:11px;vertical-align:super;color:#5d347c;text-decoration:none;margin:0 3px;white-space:nowrap}li{padding:8px;margin:0 0 4px;overflow-wrap:anywhere}footer{font-size:13px;color:#655f6b;margin-top:32px}@media print{body{margin:0;max-width:none}mark,.legend>span,li,.annotation-star{print-color-adjust:exact;-webkit-print-color-adjust:exact}}${markerStyles}</style></head><body><h1>${annotations.length ? 'Full annotated transcript' : 'Full transcript'}</h1><p>${annotations.length ? 'AI coaching notes on selected passages. Stars recognize great sentences.' : 'Original transcript. No grounded AI coaching annotations were available.'} The text below preserves the analyzed transcript; suggestions are separate.</p><div class="legend" aria-label="Annotation categories">${legend}</div><div class="transcript">${transcript}</div>${notes ? `<h2>Coaching notes</h2><ol>${notes}</ol>` : ''}<footer>Dress Rehearsal · Neeley presentation practice. Annotations are coaching suggestions, not an academic grade. Speech recognition can make mistakes.</footer></body></html>`;
+    if (!item) return { text: segment.text, annotation: null };
+    return { text: segment.text, annotation: { start: item.start, end: item.end, quote: item.quote, comment: item.comment,
+      category: item.category, assessment: item.assessment, number: item.number,
+      ...(typeof item.suggestion === 'string' && item.suggestion.trim() ? { suggestion: item.suggestion.trim() } : {}) } };
+  });
+  return { text, segments };
+}
+function transcriptExportText() {
+  return typeof state.report?.transcript === 'string' ? state.report.transcript : state.summaryTranscript || state.transcriptText;
+}
+function currentTranscriptExport(operation) {
+  return state.transcriptExport === operation && operation.account === state.accountId && operation.audio === state.audioGeneration &&
+    operation.report === state.report && operation.text === transcriptExportText();
+}
+function syncTranscriptDownload() {
+  if (state.transcriptExport && !currentTranscriptExport(state.transcriptExport)) state.transcriptExport = null;
+  const preparing = Boolean(state.transcriptExport);
+  const button = $('download-transcript');
+  button.disabled = preparing || state.annotationLoading || !transcriptExportText().trim();
+  button.textContent = preparing ? 'Preparing PDF…' : 'Download transcript PDF';
+  button.setAttribute('aria-busy', String(preparing));
 }
 async function downloadAnnotatedTranscript() {
-  const report = state.report || { transcript: state.summaryTranscript || state.transcriptText };
-  if (!report.transcript?.trim()) return;
-  const blob = new Blob([buildAnnotatedDocument(report)], { type: 'text/html;charset=utf-8' });
-  try { await downloadBlob(blob, `dress-rehearsal-transcript-${new Date().toISOString().slice(0, 10)}.html`); }
-  catch (error) { setStatus(errorMessage(error), 'error'); }
+  syncTranscriptDownload();
+  if ($('download-transcript').disabled) return;
+  const model = buildTranscriptExport(state.report || { transcript: transcriptExportText() });
+  if (!model.text.trim()) return;
+  const operation = { account: state.accountId, audio: state.audioGeneration, report: state.report, text: model.text };
+  state.transcriptExport = operation;
+  syncTranscriptDownload();
+  try {
+    const blob = await createTranscriptPdf(model);
+    if (!currentTranscriptExport(operation)) return;
+    if (!(blob instanceof Blob) || blob.type !== 'application/pdf' || !blob.size) throw new Error('The transcript PDF could not be prepared. Please try again.');
+    await downloadBlob(blob, `dress-rehearsal-transcript-${new Date().toISOString().slice(0, 10)}.pdf`);
+  } catch (error) {
+    if (currentTranscriptExport(operation)) setStatus(errorMessage(error), 'error');
+  } finally {
+    if (state.transcriptExport === operation) { state.transcriptExport = null; syncTranscriptDownload(); }
+  }
 }
 async function downloadReport() {
   if (!state.report) return;

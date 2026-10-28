@@ -1,0 +1,81 @@
+diff --git a/build/pdfmake.js b/build/pdfmake.js
+index 91467a02f93bcdeaf06f1775be3a53836b16f409..aa472ab612d9e86527ff5eb0819ca62c852002b8 100644
+--- a/build/pdfmake.js
++++ b/build/pdfmake.js
+@@ -35705,6 +35705,10 @@ class StyleContextStack {
+  * @param {boolean} breakAll
+  * @returns {Array}
+  */
++// Preserve grapheme clusters when wrapping long PDF text; UTF-16 splitting corrupts emoji.
++const breakAllGraphemes = typeof Intl === 'object' && typeof Intl.Segmenter === 'function'
++  ? new Intl.Segmenter('en', { granularity: 'grapheme' }) : null;
++
+ const splitWords = function (text, noWrap, breakAll) {
+   if (breakAll === void 0) {
+     breakAll = false;
+@@ -35722,8 +35726,9 @@ const splitWords = function (text, noWrap, breakAll) {
+     return words;
+   }
+   if (breakAll) {
+-    return text.split('').map(c => {
+-      if (c.match(/^\n$|^\r$/)) {
++    if (!breakAllGraphemes) throw new Error('PDF text wrapping requires a browser with Intl.Segmenter. Update your browser and try again.');
++    return Array.from(breakAllGraphemes.segment(text), item => item.segment).map(c => {
++      if (c.match(/^\r\n$|^\n$|^\r$/)) {
+         // new line
+         return {
+           text: '',
+diff --git a/js/TextBreaker.js b/js/TextBreaker.js
+index 4f4de831272299822f81e98946e06fb8e6ce2904..093b318660e2aee6b51d181f6d74e32846a93ccd 100644
+--- a/js/TextBreaker.js
++++ b/js/TextBreaker.js
+@@ -12,6 +12,10 @@ function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e
+  * @param {boolean} breakAll
+  * @returns {Array}
+  */
++// Preserve grapheme clusters when wrapping long PDF text; UTF-16 splitting corrupts emoji.
++const breakAllGraphemes = typeof Intl === 'object' && typeof Intl.Segmenter === 'function'
++  ? new Intl.Segmenter('en', { granularity: 'grapheme' }) : null;
++
+ const splitWords = (text, noWrap, breakAll = false) => {
+   let words = [];
+   if (text === undefined || text === null) {
+@@ -26,8 +30,9 @@ const splitWords = (text, noWrap, breakAll = false) => {
+     return words;
+   }
+   if (breakAll) {
+-    return text.split('').map(c => {
+-      if (c.match(/^\n$|^\r$/)) {
++    if (!breakAllGraphemes) throw new Error('PDF text wrapping requires a browser with Intl.Segmenter. Update your browser and try again.');
++    return Array.from(breakAllGraphemes.segment(text), item => item.segment).map(c => {
++      if (c.match(/^\r\n$|^\n$|^\r$/)) {
+         // new line
+         return {
+           text: '',
+diff --git a/src/TextBreaker.js b/src/TextBreaker.js
+index beb72458103521a9644845aeef8487ca6ab7a774..4bc2f0f15c1a66825df307cef5aeabb97f2b69a1 100644
+--- a/src/TextBreaker.js
++++ b/src/TextBreaker.js
+@@ -8,6 +8,10 @@ import StyleContextStack from './StyleContextStack';
+  * @param {boolean} breakAll
+  * @returns {Array}
+  */
++// Preserve grapheme clusters when wrapping long PDF text; UTF-16 splitting corrupts emoji.
++const breakAllGraphemes = typeof Intl === 'object' && typeof Intl.Segmenter === 'function'
++  ? new Intl.Segmenter('en', { granularity: 'grapheme' }) : null;
++
+ const splitWords = (text, noWrap, breakAll = false) => {
+ 	let words = [];
+ 	if (text === undefined || text === null) {
+@@ -21,8 +25,9 @@ const splitWords = (text, noWrap, breakAll = false) => {
+ 		return words;
+ 	}
+ 	if (breakAll) {
+-		return text.split('').map(c => {
+-			if(c.match(/^\n$|^\r$/)) { // new line
++		if (!breakAllGraphemes) throw new Error('PDF text wrapping requires a browser with Intl.Segmenter. Update your browser and try again.');
++		return Array.from(breakAllGraphemes.segment(text), item => item.segment).map(c => {
++			if(c.match(/^\r\n$|^\n$|^\r$/)) { // new line
+ 				return { text: '', lineEnd: true };
+ 			}
+ 			return { text: c };

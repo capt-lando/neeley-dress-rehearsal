@@ -1,0 +1,2 @@
+patchedDependencies:
+  pdfmake@0.3.13: patches/pdfmake@0.3.13.patch

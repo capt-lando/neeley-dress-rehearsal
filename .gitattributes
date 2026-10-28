@@ -1,0 +1,5 @@
+# Keep dependency patch hashes stable across Windows and Linux checkouts.
+patches/*.patch text eol=lf whitespace=-space-before-tab
+# Preserve upstream license text, including its original trailing spaces.
+lib/pdf-font-assets/OFL-*.txt whitespace=-blank-at-eol
+lib/pdf-font-assets/vfs.mjs whitespace=-blank-at-eol
