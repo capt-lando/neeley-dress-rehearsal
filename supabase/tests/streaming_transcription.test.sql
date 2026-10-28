@@ -48,28 +48,33 @@ select is(public.rehearsal_stream_finalize('e1111111-1111-4111-8111-111111111111
 select is((select transcript from public.rehearsal_recordings where id='e3333333-3333-4333-8333-333333333333'),'Later batch transcript','later transcript is preserved');
 select is((select report from public.rehearsal_recordings where id='e3333333-3333-4333-8333-333333333333'),'{"saved":true}'::jsonb,'later report is preserved');
 
--- Five110-second segments plus a50-second tail exactly cover ten minutes.
-select is(public.rehearsal_stream_start('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666','Ten minutes',repeat('b',64),300000)->>'status','active','second owner starts an independent stream');
-do $$begin for i in 0..4 loop
+-- Eight110-second segments plus a20-second tail exactly cover fifteen minutes.
+select is(public.rehearsal_stream_start('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666','Fifteen minutes',repeat('b',64),300000)->>'status','active','second owner starts an independent stream');
+do $$begin for i in 0..7 loop
   perform public.rehearsal_stream_claim('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',i);
   perform public.rehearsal_stream_finish('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',i,'Part '||i,2640000);
 end loop;end$$;
-select is(public.rehearsal_stream_claim('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',5)->>'maxSamples','1200000','final segment cannot exceed remaining fifty seconds');
-select throws_ok($$select public.rehearsal_stream_finish('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',5,'Over',1200001)$$,'P0001','live_order','actual audio cannot exceed the remaining reservation');
-select is(public.rehearsal_stream_finish('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',5,'Last',1200000)->>'consumedSamples','14400000','total stream is capped at ten minutes');
-select throws_ok($$select public.rehearsal_stream_claim('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',6)$$,'P0001','live_duration','no seventh connection after the audio cap');
-select throws_ok($$select public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',599,19168044)$$,'P0001','live_duration','saved audio duration must match actual streamed samples');
-select is(public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',600,19200044)->>'text','Part 0 Part 1 Part 2 Part 3 Part 4 Last','final transcript is assembled only from server segments');
-select is(public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',600,19200044)->>'complete','true','lost final acknowledgment can be safely retried');
-select is((select transcript from public.rehearsal_recordings where id='e5555555-5555-4555-8555-555555555555'),'Part 0 Part 1 Part 2 Part 3 Part 4 Last','completed stream is privately saved');
+select is(public.rehearsal_stream_claim('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',8)->>'maxSamples','480000','final segment cannot exceed remaining twenty seconds');
+select throws_ok($$select public.rehearsal_stream_finish('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',8,'Over',480001)$$,'P0001','live_order','actual audio cannot exceed the remaining reservation');
+select is(public.rehearsal_stream_finish('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',8,'Last',480000)->>'consumedSamples','21600000','total stream is capped at fifteen minutes');
+select throws_ok($$select public.rehearsal_stream_claim('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555','e6666666-6666-4666-8666-666666666666',9)$$,'P0001','live_duration','no tenth connection after the audio cap');
+select throws_ok($$select public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',900.0000625,28800046)$$,'P0001','invalid_request','finalization rejects one saved audio sample beyond fifteen minutes');
+select throws_ok($$select public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',899,28768044)$$,'P0001','live_duration','saved audio duration must match actual streamed samples');
+select ok((select draft_key is not null from rehearsal_private.live_sessions where recording_id='e5555555-5555-4555-8555-555555555555'),'rejected maximum-length finalization retains the draft recovery key');
+select is(public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',900,28800044)->>'text','Part 0 Part 1 Part 2 Part 3 Part 4 Part 5 Part 6 Part 7 Last','final transcript is assembled only from server segments');
+select is(public.rehearsal_stream_finalize('e2222222-2222-4222-8222-222222222222','e5555555-5555-4555-8555-555555555555',900,28800044)->>'complete','true','lost final acknowledgment can be safely retried');
+select is((select transcript from public.rehearsal_recordings where id='e5555555-5555-4555-8555-555555555555'),'Part 0 Part 1 Part 2 Part 3 Part 4 Part 5 Part 6 Part 7 Last','completed stream is privately saved');
+select ok((select duration_seconds=900 and size_bytes=28800044 from public.rehearsal_recordings where id='e5555555-5555-4555-8555-555555555555'),'exact fifteen-minute WAV metadata remains saved after replay');
+select ok((select draft_key is null and draft_key_expires_at is null from rehearsal_private.live_sessions where recording_id='e5555555-5555-4555-8555-555555555555'),'successful maximum-length finalization erases the draft recovery key');
+select is((select request_count from rehearsal_private.user_daily_usage where user_id='e2222222-2222-4222-8222-222222222222' and day=(now() at time zone 'UTC')::date),1,'fifteen-minute segment rotations and finalization replay retain one AI admission');
 
 -- Empty wall-clock rotations remain bounded without inventing speech.
 select is(public.rehearsal_stream_start('e1111111-1111-4111-8111-111111111111','e7777777-7777-4777-8777-777777777777','e8888888-8888-4888-8888-888888888888','Paused stream',repeat('c',64),300000)->>'status','active','new take is admitted after cancellation');
-do $$begin for i in 0..11 loop
+do $$begin for i in 0..17 loop
   perform public.rehearsal_stream_claim('e1111111-1111-4111-8111-111111111111','e7777777-7777-4777-8777-777777777777','e8888888-8888-4888-8888-888888888888',i);
   perform public.rehearsal_stream_finish('e1111111-1111-4111-8111-111111111111','e7777777-7777-4777-8777-777777777777','e8888888-8888-4888-8888-888888888888',i,'',0);
 end loop;end$$;
-select throws_ok($$select public.rehearsal_stream_claim('e1111111-1111-4111-8111-111111111111','e7777777-7777-4777-8777-777777777777','e8888888-8888-4888-8888-888888888888',12)$$,'P0001','invalid_request','connection count remains bounded even for silent/paused rotations');
+select throws_ok($$select public.rehearsal_stream_claim('e1111111-1111-4111-8111-111111111111','e7777777-7777-4777-8777-777777777777','e8888888-8888-4888-8888-888888888888',18)$$,'P0001','invalid_request','connection count remains bounded even for silent/paused rotations');
 select is((select stream_samples from rehearsal_private.live_sessions where recording_id='e7777777-7777-4777-8777-777777777777'),0,'empty rotations never invent sampled audio');
 select * from finish();
 rollback;

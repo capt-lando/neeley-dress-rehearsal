@@ -31,7 +31,7 @@ test('validated gateway stores only canonical audio and derives authoritative me
   assert.deepEqual(f.calls.slice(0,3),[['admit',undefined],['admit',owner],['upload',f.row.storage_path]]);
 });
 test('fake WAV, compressed, alternate format and trailing data are rejected before storage',async()=>{
-  const payloads=[Buffer.from('<script>alert(1)</script>'),Buffer.from('ID3not decoded MP3'),Buffer.from('PK\u0003\u0004zip'),Buffer.concat([wav(),Buffer.from('hidden metadata')]),wav(.25),wav(601)];
+  const payloads=[Buffer.from('<script>alert(1)</script>'),Buffer.from('ID3not decoded MP3'),Buffer.from('PK\u0003\u0004zip'),Buffer.concat([wav(),Buffer.from('hidden metadata')]),wav(.25),wav(900+1/16000)];
   for(const [offset,value,wide] of [[20,3,false],[22,2,false],[24,48000,true],[28,64000,true],[32,4,false],[34,32,false],[40,1,true],[4,10,true]]) {
     const bytes=wav();wide?bytes.writeUInt32LE(value,offset):bytes.writeUInt16LE(value,offset);payloads.push(bytes);
   }
@@ -52,11 +52,21 @@ test('lost upload acknowledgement retries identical bytes without replacing a ta
 });
 test('concurrent identical uploads converge on one immutable stored recording',async()=>{
   const f=fixture(),responses=await Promise.all([f.upload(),f.upload(),f.upload()]);
-  assert.deepEqual(responses.map(r=>r.status),[201,201,429]);assert.equal(f.stored.size,1);
+  assert.deepEqual(responses.map(r=>r.status),[201,429,429]);assert.equal(f.stored.size,1);
   assert.equal(responses[2].headers.get('retry-after'),'2');
   assert.equal((await f.upload()).status,201);
 });
 test('upload endpoint rejects rate-limited submissions before reading or saving audio',async()=>{
   const f=fixture({deny:true}),response=await f.upload();
   assert.equal(response.status,429);assert.equal(response.headers.get('retry-after'),'60');assert.equal(f.stored.size,0);assert.deepEqual(f.calls,[['admit',undefined]]);
+});
+
+test('a complete fifteen-minute recording is stored intact with authoritative duration',async()=>{
+  const f=fixture(),bytes=wav(900);
+  bytes.writeInt16LE(1234,bytes.length-2);
+  const response=await f.upload(bytes);
+  assert.equal(response.status,201);
+  assert.deepEqual(await response.json(),{id,stored:true,durationSeconds:900,sizeBytes:28_800_044});
+  assert.equal(f.row.duration_seconds,900);
+  assert.deepEqual(Buffer.from(await f.stored.get(f.row.storage_path).arrayBuffer()),bytes);
 });

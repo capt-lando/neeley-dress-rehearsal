@@ -281,8 +281,37 @@ test('the live backlog and total recording duration are explicitly bounded', asy
   assert.throws(() => backlog.session.push(new Float32Array(24_000 * 31)), { code: 'LIVE_BACKLOG_LIMIT' });
   await tick(); assert.equal(backlog.sockets.length, 0); assert.equal(backlog.calls.length, 0);
   const duration = fixture();
-  assert.throws(() => duration.session.push(new Float32Array(24_000 * 600 + 1)), { code: 'LIVE_AUDIO_LIMIT' });
+  assert.throws(() => duration.session.push(new Float32Array(24_000 * 900 + 1)), { code: 'LIVE_AUDIO_LIMIT' });
   await tick(); assert.equal(duration.calls.length, 0);
+});
+
+test('fifteen minutes stream across ordinary segment rotations without dropped samples', async () => {
+  const f = fixture(), frame = new Float32Array(24_000).fill(0.25);
+  for (let second = 0; second < 900; second++) {
+    f.session.push(frame);
+    await tick();
+  }
+  assert.equal(f.session.getState().audioSeconds, 900);
+  assert.equal((await f.session.finish(new Blob())).complete, true);
+  assert.equal(f.sockets.reduce((sum, socket) => sum + socket.samples, 0), 21_600_000);
+  assert.equal(f.session.getState().completedSeconds, 900);
+  assert.equal(f.sockets.length, 9);
+  assert.equal(f.saves, 1);
+  assert.ok(f.sockets.every(socket => socket.readyState === 3));
+});
+
+test('capture-only recovery retains fifteen minutes after a stream failure and rejects one extra sample', async () => {
+  let checkpointSamples = 0;
+  const f = fixture({ checkpoint: bytes => { checkpointSamples += bytes.byteLength / 2; }, checkpointFlush: async () => {} });
+  const frame = new Float32Array(24_000);
+  f.session.push(frame); await tick();
+  f.sockets[0].serverMessage({ type: 'error', message: 'Synthetic connection failure.' });
+  for (let second = 1; second < 900; second++) f.session.captureRemaining(frame);
+  assert.equal(f.session.getState().audioSeconds, 900);
+  assert.throws(() => f.session.captureRemaining(new Float32Array(1)), { code: 'LIVE_AUDIO_LIMIT' });
+  assert.equal((await f.session.finish(new Blob())).complete, false);
+  assert.equal(checkpointSamples, 21_600_000);
+  assert.equal(f.sockets.length, 1);
 });
 
 test('observer errors cannot prevent microphone streaming or final save', async () => {

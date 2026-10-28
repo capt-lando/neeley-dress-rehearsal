@@ -102,10 +102,10 @@ test('save validates the audio, identifier, duration, caption and date before op
     [entry('bad', { blob: new Blob([], { type: 'audio/wav' }) }), 'RECORDING_AUDIO'],
     [entry('bad', { blob: new Blob(['not audio'], { type: 'text/plain' }) }), 'RECORDING_AUDIO'],
     [entry('bad', { blob: { size: 12, type: 'audio/wav' } }), 'RECORDING_AUDIO'],
-    [entry('bad', { blob: new Blob([new Uint8Array(20 * 1024 * 1024 + 1)], { type: 'audio/wav' }) }), 'RECORDING_AUDIO'],
+    [entry('bad', { blob: new Blob([new Uint8Array(30 * 1024 * 1024 + 1)], { type: 'audio/wav' }) }), 'RECORDING_AUDIO'],
     [entry('../bad'), 'RECORDING_ID'], [entry('__proto__'), 'RECORDING_ID'],
     [entry('bad\nkey'), 'RECORDING_ID'], [entry('x'.repeat(129)), 'RECORDING_ID'],
-    [entry('bad', { duration: 0.49 }), 'RECORDING_DURATION'], [entry('bad', { duration: 601 }), 'RECORDING_DURATION'],
+    [entry('bad', { duration: 0.49 }), 'RECORDING_DURATION'], [entry('bad', { duration: 900 + 1 / 16000 }), 'RECORDING_DURATION'],
     [entry('bad', { duration: NaN }), 'RECORDING_DURATION'],
     [entry('bad', { caption: 'x'.repeat(256) }), 'RECORDING_CAPTION'], [entry('bad', { caption: 'two\nlines' }), 'RECORDING_CAPTION'],
     [entry('bad', { createdAt: Infinity }), 'RECORDING_DATE'], [entry('bad', { createdAt: '2026-10-20' }), 'RECORDING_DATE'],
@@ -114,11 +114,13 @@ test('save validates the audio, identifier, duration, caption and date before op
   assert.equal(opened, false);
 });
 
-test('valid duration boundaries and 255-character captions are accepted', async () => {
+test('fifteen-minute and 30 MiB boundaries and 255-character captions survive browser storage', async () => {
   const store = createRecordingStore({ indexedDB: new IDBFactory(), dbName: DB });
   await store.save(entry('minimum', { duration: 0.5, caption: 'x'.repeat(255) }));
-  await store.save(entry('maximum', { duration: 600.05 }));
+  await store.save(entry('maximum', { duration: 900, blob: new Blob([new Uint8Array(30 * 1024 * 1024)], { type: 'audio/wav' }) }));
   assert.equal((await store.list()).length, 2);
+  const maximum = await store.get('maximum');
+  assert.equal(maximum.duration, 900); assert.equal(maximum.blob.size, 30 * 1024 * 1024);
   store.close();
 });
 

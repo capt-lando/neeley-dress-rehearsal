@@ -73,11 +73,11 @@ test('an empty segment finishes without sending an invalid empty provider commit
 });
 
 test('a sub-100ms tail is padded only upstream, while actual sample counts stay exact',async()=>{
-  const f=fixture({claim:{consumedSamples:14399976,maxSamples:24}});await f.ready();f.socket.emit(audio(24));await f.final('');
+  const f=fixture({claim:{consumedSamples:21599976,maxSamples:24,nextSequence:17}});await f.ready({segmentIndex:17});f.socket.emit(audio(24));await f.final('');
   const appends=f.provider.sent.filter(event=>event.type==='input_audio_buffer.append');
   assert.equal(Buffer.from(appends[0].audio,'base64').length,48);
   const padding=Buffer.from(appends[1].audio,'base64');assert.equal(padding.length,4752);assert.equal(padding.every(byte=>byte===0),true);
-  assert.equal(f.socket.sent.at(-1).samples,24);assert.equal(f.socket.sent.at(-1).consumedSamples,14400000);
+  assert.equal(f.socket.sent.at(-1).samples,24);assert.equal(f.socket.sent.at(-1).consumedSamples,21600000);
 });
 
 test('a completion arriving before the committed event is joined by its provider item ID',async()=>{
@@ -102,7 +102,7 @@ for(const [name,start,store] of [
   ['browser owner override',{userId:other},{}],
   ['browser model override',{model:'expensive-model'},{}],
   ['oversized credential',{token:'x'.repeat(16378)},{}],
-  ['out-of-bound segment index',{segmentIndex:12},{}],
+  ['out-of-bound segment index',{segmentIndex:18},{}],
 ])test(`rejects ${name} before a paid connection`,async()=>{
   const f=fixture({store});await f.start(start);await f.session.done;
   assert.equal(f.calls.some(call=>call[0]==='connect'),false);
@@ -160,14 +160,14 @@ for(const [name,frame] of [
 });
 
 test('a socket cannot exceed its atomically reserved remaining sample budget',async()=>{
-  const f=fixture({claim:{maxSamples:12000,consumedSamples:14388000}});await f.ready();
+  const f=fixture({claim:{maxSamples:12000,consumedSamples:21588000}});await f.ready();
   f.socket.emit(audio(12000));f.socket.emit(audio(1));await f.session.done;
   assert.equal(f.provider.sent.filter(event=>event.type==='input_audio_buffer.append').length,1);
   assert.equal(f.calls.some(call=>call[0]==='finish'),false);
 });
 
 test('invalid server reservation totals fail closed before connecting',async()=>{
-  const f=fixture({claim:{consumedSamples:14400000,maxSamples:1}});await f.start();await f.session.done;
+  const f=fixture({claim:{consumedSamples:21600000,maxSamples:1}});await f.start();await f.session.done;
   assert.equal(f.calls.some(call=>call[0]==='connect'),false);
 });
 

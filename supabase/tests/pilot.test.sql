@@ -23,7 +23,7 @@ select public.rehearsal_create_recording('11111111-1111-4111-8111-111111111111',
 select public.rehearsal_create_recording('22222222-2222-4222-8222-222222222222','44444444-4444-4444-8444-444444444444','Other take',1,32044);
 
 select ok((select not public from storage.buckets where id='recordings'),'audio bucket is private');
-select is((select file_size_limit from storage.buckets where id='recordings'),20971520::bigint,'bucket rejects oversized audio');
+select is((select file_size_limit from storage.buckets where id='recordings'),31457280::bigint,'bucket rejects oversized audio');
 select is((select daily_budget_microusd from rehearsal_private.limits),0::bigint,'isolated fixture starts with AI spending disabled');
 select ok((select bool_and(c.relrowsecurity) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('public','rehearsal_private') and c.relname in ('rehearsal_profiles','rehearsal_recordings','rehearsal_events','jobs','limits','daily_usage','user_daily_usage')),'all application tables enable RLS');
 

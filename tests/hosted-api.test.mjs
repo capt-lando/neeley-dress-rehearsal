@@ -239,7 +239,7 @@ test('streamed provider failures are terminal, safe, and never claim receipt or 
 });
 
 test('streaming retains request and audio concurrency guards through disconnected admitted work',async()=>{
-  for(const [path,options,limit] of [['/analyze-text',analyze,8],['/transcribe',transcribe,2]]) {
+  for(const [path,options,limit] of [['/analyze-text',analyze,8],['/transcribe',transcribe,1]]) {
     let releaseWork;const wait=new Promise(resolve=>{releaseWork=resolve;});let completed=0;
     const f=fixture({store:{reserve:async()=>({state:'new'}),finish:async()=>{completed++;}},
       coach:async()=>{await wait;return {thesis:{summary:'Tutoring.',clarity:'Clear.',evidence:['We should expand tutoring.']}};},
@@ -356,6 +356,54 @@ test('transcription reserves before upstream, sends only server credentials, and
   assert.ok(f.calls.findIndex(c=>c[0]==='reserve')<f.calls.findIndex(c=>c[0]==='fetch'));assert.doesNotMatch(JSON.stringify(result),/private-|COACHING_API_KEY/);
   assert.deepEqual(await(await f.call('/transcribe',transcribe)).json(),result);assert.equal(f.debits,1);assert.equal(f.calls.filter(c=>c[0]==='fetch').length,1);
 });
+test('fifteen-minute transcription joins bounded parts once and replays the complete cached result',async()=>{
+  const audio=wav(900),sent=[],signals=[];
+  audio.writeInt16LE(12345,audio.length-2);
+  const f=fixture({store:{audio:async()=>new Blob([audio])},fetchImpl:async(url,options)=>{
+    const file=options.body.get('file');assert.ok(file.size<=25_000_000);
+    sent.push(Buffer.from(await file.arrayBuffer()));signals.push(options.signal);
+    return Response.json({text:sent.length===1?'Opening through the middle.':'Closing at fifteen minutes.'});
+  }});
+  Object.assign(f.rows.get(recording),{size_bytes:audio.length,duration_seconds:900});
+  const response=await f.call('/transcribe',transcribe),result=await response.json();
+  assert.equal(response.status,200);assert.equal(result.durationSeconds,900);
+  assert.equal(result.text,'Opening through the middle. Closing at fifteen minutes.');
+  assert.equal(sent.length,2);assert.equal(f.debits,1);assert.equal(signals[0],signals[1],'both parts share one overall deadline and cancellation signal');
+  assert.deepEqual(Buffer.concat(sent.map(part=>part.subarray(44))),audio.subarray(44));
+  assert.equal(f.rows.get(recording).transcript,result.text);
+  assert.deepEqual(await(await f.call('/transcribe',transcribe)).json(),result);
+  assert.equal(sent.length,2);assert.equal(f.debits,1);
+  const config=await(await f.call('/config')).json();
+  assert.equal(config.maxDurationSeconds,900);assert.equal(config.maxAudioBytes,30*1024*1024);
+});
+
+test('a failed second transcription part cannot save a partial transcript or retry paid work',async()=>{
+  const audio=wav(900);let sent=0;
+  const f=fixture({store:{audio:async()=>new Blob([audio])},fetchImpl:async()=>{
+    sent++;return sent===1?Response.json({text:'Only the opening.'}):new Response(null,{status:502});
+  }});
+  Object.assign(f.rows.get(recording),{size_bytes:audio.length,duration_seconds:900,transcript:null,status:'pending'});
+  assert.equal((await f.call('/transcribe',transcribe)).status,502);
+  assert.equal(f.rows.get(recording).transcript,null);assert.equal(f.jobs.get(requestId).state,'failed');
+  assert.equal((await f.call('/transcribe',transcribe)).status,409);
+  assert.equal(sent,2);assert.equal(f.debits,1);
+});
+
+for (const cancelPart of [1,2]) test(`cancelling long transcription during part ${cancelPart} never saves partial text`,async()=>{
+  const audio=wav(900);let sent=0;
+  const f=fixture({cancellationPollMs:1,store:{audio:async()=>new Blob([audio])},fetchImpl:async(url,{signal})=>{
+    sent++;
+    if (sent<cancelPart) return Response.json({text:'Opening part.'});
+    f.jobs.get(requestId).state='cancelled';
+    await new Promise(resolve=>signal.addEventListener('abort',resolve,{once:true}));
+    return Response.json({text:'Cancelled opening.'});
+  }});
+  Object.assign(f.rows.get(recording),{size_bytes:audio.length,duration_seconds:900,transcript:null,status:'pending'});
+  assert.equal((await f.call('/transcribe',transcribe)).status,409);
+  assert.equal(sent,cancelPart);assert.equal(f.rows.get(recording).transcript,null);
+  assert.equal(f.jobs.get(requestId).state,'cancelled');assert.equal(f.debits,1);
+});
+
 test('speech never sends a non-OpenAI coaching key to OpenAI',async()=>{
   for(const change of [{COACHING_PROVIDER:'google'},{COACHING_API_KEY:''}]) {
     const f=fixture({env:change});assert.equal((await f.call('/transcribe',transcribe)).status,503);assert.equal(f.debits,0);assert.equal(f.calls.some(c=>c[0]==='fetch'),false);
@@ -364,8 +412,9 @@ test('speech never sends a non-OpenAI coaching key to OpenAI',async()=>{
 test('WAV validation derives duration and rejects forged size, formats, and over-limit audio',async()=>{
   const bytes=wav(),buffer=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);assert.equal(inspectHostedWav(buffer),1);
   const bad=wav();bad.writeUInt32LE(44100,24);assert.throws(()=>inspectHostedWav(bad.buffer.slice(bad.byteOffset,bad.byteOffset+bad.byteLength)));
-  const long=wav(601);assert.throws(()=>inspectHostedWav(long.buffer.slice(long.byteOffset,long.byteOffset+long.byteLength)));
-  for(const changed of [wav(600.01),Buffer.concat([wav(),Buffer.from('metadata')])])assert.throws(()=>inspectHostedWav(changed.buffer.slice(changed.byteOffset,changed.byteOffset+changed.byteLength)));
+  const full=wav(900);assert.equal(inspectHostedWav(full.buffer.slice(full.byteOffset,full.byteOffset+full.byteLength)),900);
+  const long=wav(901);assert.throws(()=>inspectHostedWav(long.buffer.slice(long.byteOffset,long.byteOffset+long.byteLength)));
+  for(const changed of [wav(900+1/16000),Buffer.concat([wav(),Buffer.from('metadata')])])assert.throws(()=>inspectHostedWav(changed.buffer.slice(changed.byteOffset,changed.byteOffset+changed.byteLength)));
   const extraFormat=wav();extraFormat.writeUInt32LE(18,16);assert.throws(()=>inspectHostedWav(extraFormat.buffer.slice(extraFormat.byteOffset,extraFormat.byteOffset+extraFormat.byteLength)));
   const f=fixture();f.rows.get(recording).size_bytes=44;assert.equal((await f.call('/transcribe',transcribe)).status,400);assert.equal(f.calls.some(c=>c[0]==='fetch'),false);
 });
@@ -417,7 +466,13 @@ test('known pre-admission refusals clear recovery state while uncertain failures
 test('concurrent duplicate requests cannot trigger a second upstream operation',async()=>{
   let release;const wait=new Promise(r=>{release=r;});let started;
   const begin=new Promise(r=>{started=r;});const f=fixture({fetchImpl:async()=>{started();await wait;return Response.json({text:'Hello there.'});}});
-  const first=f.call('/transcribe',transcribe);await begin;const retry=await f.call('/transcribe',transcribe);assert.equal(retry.status,409);assert.equal((await retry.json()).jobState,undefined);release();assert.equal((await first).status,200);assert.equal(f.debits,1);
+  const first=f.call('/transcribe',transcribe);await begin;
+  try {
+    const retry=await f.call('/transcribe',transcribe);
+    assert.equal(retry.status,429);assert.equal(retry.headers.get('retry-after'),'2');
+    assert.equal((await retry.json()).jobState,undefined);
+  } finally { release(); }
+  assert.equal((await first).status,200);assert.equal(f.debits,1);
 });
 test('coaching uses saved duration, retains all preparation inputs, and returns the existing report schema',async()=>{
   const f=fixture();const body={...analyze.body,targetScript:'Support tutoring.',plannedIntroduction:'Hello students.',plannedTransitions:'Next, costs.',instructorRubric:'Explain the claim.',rubricFileName:'Rubric.docx'};

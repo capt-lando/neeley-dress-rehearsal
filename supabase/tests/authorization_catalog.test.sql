@@ -35,7 +35,7 @@ select ok(not has_table_privilege('anon',c.oid,'SELECT'),'anonymous cannot read 
   where n.nspname='public' and c.relname like 'rehearsal\_%' escape '\' and c.relkind in ('r','p') order by c.relname;
 select ok(not has_table_privilege('authenticated','public.rehearsal_events','SELECT'),'raw analytics are not readable by browser roles');
 
-select ok(not public and file_size_limit=20971520 and allowed_mime_types=array['audio/wav'],'recordings bucket remains private and limited to WAV uploads')
+select ok(not public and file_size_limit=31457280 and allowed_mime_types=array['audio/wav'],'recordings bucket remains private and limited to WAV uploads')
   from storage.buckets where id='recordings';
 select ok(not has_function_privilege(role_name,p.oid,'EXECUTE'),role_name||' cannot execute hosted RLS event helper')
   from pg_proc p cross join (values('anon'),('authenticated')) roles(role_name)

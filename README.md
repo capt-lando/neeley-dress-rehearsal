@@ -9,7 +9,7 @@ A presentation practice app for Neeley students. Speak into the microphone, see 
 1. Sign in with Google. Microsoft sign-in is supported when configured; this is not an institutionally approved TCU SSO integration.
 2. Add talking points, a script, or an optional introduction, transitions, teacher rubric, and assignment instructions.
 3. Start recording. Audio streams to OpenAI and draft words appear as you speak. Silence does not end the recording. Pause excludes the break from the recording; Resume continues the same take.
-4. Press **Stop** to finish and save the recording and transcript privately. The existing ten-minute recording limit still applies. Replay reuses the saved audio and transcript.
+4. Press **Stop** to finish and save the recording and transcript privately. Recordings can be up to fifteen minutes; the recorder stops automatically at that limit. Replay reuses the saved audio and transcript.
 5. Choose **Analyze** when ready for coaching, annotations, and a practice rating. Coaching never starts because you paused speaking.
 
 Audio uploads automatically save and transcribe after file-signature, size, decoding, and duration checks. The server validates the canonical WAV before submitting it. Unsupported, malformed, and oversized audio is rejected. Uploading does not automatically request coaching.

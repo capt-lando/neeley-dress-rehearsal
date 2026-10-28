@@ -2,9 +2,11 @@ import { analyzeSpeech, buildAnalysisPrompt, buildCoachingInstructions, coaching
 import { PROVIDERS, requestCoaching } from '../../../lib/providers.mjs';
 import { createRequestLimit } from './request-limit.mjs';
 import { CHAT_MODEL, buildChatPrompt, requestCoachChat } from '../../../lib/coach-chat.mjs';
+import { MAX_RECORDING_SECONDS, MAX_RECORDING_BYTES } from '../../../lib/recording-limits.mjs';
+import { splitTranscriptionAudio } from './transcription-audio.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MAX_AUDIO = 20 * 1024 * 1024;
+const MAX_AUDIO = MAX_RECORDING_BYTES;
 const EVENT_NAMES = ['session_started','section_engaged','recording_completed','analysis_requested','analysis_completed','analysis_failed'];
 const SECTIONS = ['prepare','rehearse','feedback'];
 export function fail(message, status = 400) { return Object.assign(new Error(message), { status, safe: true }); }
@@ -70,8 +72,8 @@ async function jsonBody(request) {
   }
   catch (error) { if (error.safe) throw error; throw fail('The request was not valid JSON.'); }
 }
-export function inspectHostedWav(buffer, minDuration = 0.5, maxDuration = 600) {
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 44 || buffer.byteLength > MAX_AUDIO) throw fail('Use a WAV recording of up to 10 minutes.');
+export function inspectHostedWav(buffer, minDuration = 0.5, maxDuration = MAX_RECORDING_SECONDS) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 44 || buffer.byteLength > MAX_AUDIO) throw fail('Use a WAV recording of up to 15 minutes.');
   const view = new DataView(buffer), label = at => String.fromCharCode(...new Uint8Array(buffer, at, 4));
   const size=buffer.byteLength-44;
   // Exactly the browser encoder contract: no alternate chunks or metadata.
@@ -136,9 +138,9 @@ function metadata(row) { return {id:row.id,title:row.title,createdAt:row.created
 /** All data access uses a verified server-derived user ID; store is injectable for tests. */
 export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach=requestCoaching, chat=requestCoachChat, now=Date.now, cancellationPollMs=2000 }) {
   const enterRequest=createRequestLimit({now});
-  // Whole recordings can occupy several buffers; keep those operations below
-  // the isolate memory ceiling while small UI requests can still proceed.
-  const enterAudio=createRequestLimit({now,concurrent:2});
+  // A full fifteen-minute recording and provider parts occupy several buffers.
+  // Admit one whole-audio operation per isolate while small UI requests proceed.
+  const enterAudio=createRequestLimit({now,concurrent:1});
   let globalPauseUntil=0;
   const policy=buildCoachingInstructions(policyText);
   const provider=env.COACHING_PROVIDER||'google', model=env.COACHING_MODEL||PROVIDERS[provider]?.defaultModel;
@@ -247,7 +249,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       const session=await store.liveStart(user.id,id,requestId,title,await hash({mode:'openai-stream',recordingId:id,title}),liveCost);
       if (session.status!=='active'||!Number.isFinite(Date.parse(session.expires_at))||Date.parse(session.expires_at)<=now()) throw fail('This live rehearsal has ended. Start a new recording.',409);
       if(!/^[A-Za-z0-9_-]{43}$/.test(session.draft_key||''))throw fail('The recording recovery key is unavailable.',503);
-      return {recordingId:id,storagePath:session.storage_path,bucket:'recordings',expiresAt:session.expires_at,transport:'websocket',sampleRate:24000,segmentSeconds:110,maxDurationSeconds:600,draftKey:session.draft_key};
+      return {recordingId:id,storagePath:session.storage_path,bucket:'recordings',expiresAt:session.expires_at,transport:'websocket',sampleRate:24000,segmentSeconds:110,maxDurationSeconds:MAX_RECORDING_SECONDS,draftKey:session.draft_key};
     }
     const match=path.match(/^\/live-sessions\/([^/]+)(?:\/(finish))?$/);
     if (!match) throw fail('This live rehearsal action does not exist.',404);
@@ -260,7 +262,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
     if (request.method!=='POST') throw fail('This live rehearsal action does not exist.',404);
     if (action==='finish') {
       const body=await jsonBody(request); exact(body,['durationSeconds','sizeBytes']);
-      const duration=number(body.durationSeconds,0.5,600),size=number(body.sizeBytes,16044,MAX_AUDIO);
+      const duration=number(body.durationSeconds,0.5,MAX_RECORDING_SECONDS),size=number(body.sizeBytes,16044,MAX_AUDIO);
       const session=await store.liveGet(user.id,id),row=await store.owned(user.id,id);
       if (!row || row.status==='deleting') throw fail('This recording was not found.',404);
       const audio=await store.audio(row.storage_path);
@@ -304,7 +306,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         const user=await identify(request,true);
         return json({hosted:true,configured:true,localSpeech:false,liveTranscription:Boolean(speechKey),liveTransport:'websocket',liveSegmentSeconds:110,liveTranscriptionModel:'gpt-live-transcribe',retention:'private',auth:{signedIn:Boolean(user)},
           speechConfigured:Boolean(speechKey),analysisConfigured:Boolean(env.COACHING_API_KEY&&coachCost),analysisProvider:provider,analysisProviderLabel:PROVIDERS[provider].label,analysisModel:model,
-          transcriptionModel:'gpt-transcribe',providers:[],maxDurationSeconds:600,maxAudioBytes:MAX_AUDIO,
+          transcriptionModel:'gpt-transcribe',providers:[],maxDurationSeconds:MAX_RECORDING_SECONDS,maxAudioBytes:MAX_AUDIO,
           chatConfigured:Boolean(provider==='openai'&&env.COACHING_API_KEY),chatModel:CHAT_MODEL});
       }
       const user=await identify(request);
@@ -362,7 +364,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
       if (request.method==='GET' && path==='/recordings') return json({recordings:(await store.list(user.id)).map(metadata)});
       if (request.method==='POST' && path==='/recordings') {
         const body=await jsonBody(request); exact(body,['id','title','durationSeconds','sizeBytes']);
-        const id=uuid(body.id), title=text(body.title,120,true).trim(),duration=number(body.durationSeconds,0.5,600),size=number(body.sizeBytes,44,MAX_AUDIO);
+        const id=uuid(body.id), title=text(body.title,120,true).trim(),duration=number(body.durationSeconds,0.5,MAX_RECORDING_SECONDS),size=number(body.sizeBytes,44,MAX_AUDIO);
         if (!Number.isInteger(size)) throw fail('Use a whole-byte file size.');
         const row=await store.create(user.id,id,title,duration,size);
         return json({id:row.id,storagePath:row.storage_path,bucket:'recordings'},201);
@@ -412,15 +414,28 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
             try {
               signal.throwIfAborted();
               emit('speech_requested');
-              const form=new FormData();
-              form.set('model','gpt-transcribe');form.set('file',new Blob([audio],{type:'audio/wav'}),'rehearsal.wav');
-              form.set('prompt','Verbatim presentation rehearsal. Preserve spoken filler words, repetitions, and false starts; do not rewrite or improve the speech.');
-              const response=await fetchImpl('https://api.openai.com/v1/audio/transcriptions',{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${speechKey}`},body:form,signal:AbortSignal.any([signal,AbortSignal.timeout(125000)])});
-              if (!response.ok) throw fail('Cloud transcription is unavailable. Try again shortly.',response.status===429?429:502);
-              let result; try { result=JSON.parse(new TextDecoder().decode(await readLimited(response,512*1024))); } catch { throw fail('The speech service returned an unreadable response.',502); }
-              if (typeof result.text!=='string' || !result.text.trim() || result.text.length>60000) throw fail('The speech service returned an invalid transcript.',502);
+              // Full 15-minute PCM exceeds the provider's 25 MB file limit.
+              // At most two non-overlapping parts share one admission and deadline;
+              // a partial failure never publishes a partial saved transcript.
+              const providerSignal=AbortSignal.any([signal,AbortSignal.timeout(125000)]);
+              const transcripts=[];
+              for (const part of splitTranscriptionAudio(audio)) {
+                providerSignal.throwIfAborted();
+                const form=new FormData();
+                form.set('model','gpt-transcribe');form.set('file',new Blob([part],{type:'audio/wav'}),'rehearsal.wav');
+                form.set('prompt','Verbatim presentation rehearsal. Preserve spoken filler words, repetitions, and false starts; do not rewrite or improve the speech.');
+                const response=await fetchImpl('https://api.openai.com/v1/audio/transcriptions',{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${speechKey}`},body:form,signal:providerSignal});
+                if (!response.ok) throw fail('Cloud transcription is unavailable. Try again shortly.',response.status===429?429:502);
+                let result; try { result=JSON.parse(new TextDecoder().decode(await readLimited(response,512*1024))); } catch { throw fail('The speech service returned an unreadable response.',502); }
+                providerSignal.throwIfAborted();
+                if (typeof result.text!=='string' || result.text.length>60000) throw fail('The speech service returned an invalid transcript.',502);
+                transcripts.push(result.text.trim());
+                if (transcripts.join(' ').length>60000) throw fail('The speech service returned an invalid transcript.',502);
+              }
+              const transcript=transcripts.filter(Boolean).join(' ');
+              if (!transcript) throw fail('The speech service returned an invalid transcript.',502);
               emit('transcript_received');
-              const output={text:result.text.trim(),durationSeconds,chunks:[],model:'gpt-transcribe',localSpeech:false,recordingId:id};
+              const output={text:transcript,durationSeconds,chunks:[],model:'gpt-transcribe',localSpeech:false,recordingId:id};
               return output;
             } catch (error) {
               signal.throwIfAborted();

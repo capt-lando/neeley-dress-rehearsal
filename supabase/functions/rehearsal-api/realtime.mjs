@@ -1,13 +1,14 @@
 import { createRequestLimit } from './request-limit.mjs';
+import { MAX_RECORDING_SECONDS } from '../../../lib/recording-limits.mjs';
 
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const RATE=24000, FRAME_BYTES=24000, MAX_SAMPLES=110*RATE, TOTAL_SAMPLES=600*RATE;
+const RATE=24000, FRAME_BYTES=24000, MAX_SAMPLES=110*RATE, TOTAL_SAMPLES=MAX_RECORDING_SECONDS*RATE;
 const UNAVAILABLE='Live transcription was interrupted. Your recording can still be saved and transcribed in full.';
 const safeError=(message,status=400)=>Object.assign(new Error(message),{safe:true,status});
 const combine=(prefix,text)=>[prefix.trim(),text.trim()].filter(Boolean).join(' ');
 
 // The client can send audio and finish/cancel only. All paid provider settings
-// and the credential stay on the server, including the ten-minute budget.
+// and the credential stay on the server, including the fifteen-minute budget.
 export const REALTIME_CONFIG={type:'session.update',session:{type:'transcription',audio:{input:{
   format:{type:'audio/pcm',rate:RATE},
   transcription:{model:'gpt-live-transcribe',languages:['en'],delay:'low',prompt:'Verbatim speech, including filler words and repetitions.'},
@@ -144,7 +145,7 @@ export function attachRealtimeSession({socket,store,connectProvider,now=Date.now
   }
   async function start(message) {
     if(!exactKeys(message,['type','token','recordingId','requestId','segmentIndex'])||typeof message.token!=='string'||!message.token||message.token.length>16377||
-      !UUID.test(message.recordingId||'')||!UUID.test(message.requestId||'')||!Number.isInteger(message.segmentIndex)||message.segmentIndex<0||message.segmentIndex>11)
+      !UUID.test(message.recordingId||'')||!UUID.test(message.requestId||'')||!Number.isInteger(message.segmentIndex)||message.segmentIndex<0||message.segmentIndex>17)
       throw safeError('Invalid live transcription request.');
     state='identifying';
     const user=await identify(store,message.token);

@@ -33,7 +33,7 @@ function fixture({store:extra={},env:settings={}}={}) {
 }
 test('live admission reserves once and returns bounded streaming configuration without a provider credential',async()=>{
   const f=fixture(),response=await f.start();assert.equal(response.status,200);
-  const result=await response.json();assert.equal(result.transport,'websocket');assert.equal(result.sampleRate,24000);assert.equal(result.segmentSeconds,110);assert.equal(result.maxDurationSeconds,600);
+  const result=await response.json();assert.equal(result.transport,'websocket');assert.equal(result.sampleRate,24000);assert.equal(result.segmentSeconds,110);assert.equal(result.maxDurationSeconds,900);
   assert.equal(result.draftKey,draftKey);
   assert.equal((await f.start()).status,200);assert.equal(f.debits,1);assert.doesNotMatch(JSON.stringify(result),/private-key|token|secret/);
 });
@@ -74,6 +74,17 @@ test('finalization uses actual private WAV bytes and server transcript, never br
   const cancelled=fixture();await cancelled.start();await cancelled.call(`/live-sessions/${id}`,{method:'DELETE'});
   const saved=await(await cancelled.call(path,{body:{durationSeconds:10,sizeBytes:320044}})).json();assert.equal(saved.complete,false);assert.equal(saved.text,'');assert.equal(cancelled.debits,1);
 });
+test('live completion accepts all fifteen minutes and rejects one extra sample',async()=>{
+  const f=fixture();await f.start();const path=`/live-sessions/${id}/finish`;
+  f.setAudio(wav(900*16000));
+  const response=await f.call(path,{body:{durationSeconds:900,sizeBytes:28_800_044}});
+  assert.equal(response.status,200);
+  const result=await response.json();assert.equal(result.durationSeconds,900);assert.equal(result.complete,true);
+  const tooLong=fixture();await tooLong.start();tooLong.setAudio(wav(900*16000+1));
+  assert.equal((await tooLong.call(path,{body:{durationSeconds:900+1/16000,sizeBytes:28_800_046}})).status,400);
+  assert.equal(tooLong.calls.includes('finish'),false);
+});
+
 test('cancellation waits for the relay stop acknowledgment instead of just closing the UI',async()=>{
   let polls=0;
   const f=fixture({store:{liveGet:async()=>({status:'cancelled',stream_segments:++polls<2?[{state:'reserved',expiresAt:new Date(Date.now()+125000).toISOString()}]:[{state:'cancelled'}]})}});

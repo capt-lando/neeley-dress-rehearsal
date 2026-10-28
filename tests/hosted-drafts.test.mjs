@@ -175,24 +175,24 @@ test('a stalled checkpoint writer bounds its plaintext queue and warns once', as
   assert.equal(warnings.length, 1); store.close();
 });
 
-test('a full ten-minute encrypted draft restores exactly and refuses one sample beyond the limit', async () => {
+test('a full fifteen-minute encrypted draft restores exactly and refuses one sample beyond the limit', async () => {
   const { indexedDB, store } = fixture();
   await store.begin(identity, key);
   const frame = pcm(24000, -12345);
-  for (let second = 0; second < 600; second++) {
+  for (let second = 0; second < 900; second++) {
     store.append(frame);
     // Drain like a working browser while keeping each queued burst below its bound.
     if (second % 20 === 19) await store.flush();
   }
-  assert.deepEqual(await store.flush(), { samples24k: 14_400_000, durationSeconds: 600 });
+  assert.deepEqual(await store.flush(), { samples24k: 21_600_000, durationSeconds: 900 });
   assert.throws(() => store.append(pcm(1)), { code: 'DRAFT_LIMIT' });
   store.close();
   const restored = fixture({ indexedDB }).store;
   try {
     const result = await restored.load(identity, key), wav = Buffer.from(await result.blob.arrayBuffer());
-    assert.equal(result.samples24k, 14_400_000); assert.equal(result.durationSeconds, 600);
-    assert.equal(wav.length, 44 + 600 * 32000);
-    assert.equal(wav.readUInt32LE(40), 600 * 32000);
+    assert.equal(result.samples24k, 21_600_000); assert.equal(result.durationSeconds, 900);
+    assert.equal(wav.length, 44 + 900 * 32000);
+    assert.equal(wav.readUInt32LE(40), 900 * 32000);
     assert.equal(wav.readInt16LE(44), -12345); assert.equal(wav.readInt16LE(wav.length - 2), -12345);
     assert.equal(await restored.remove(identity), true);
     assert.deepEqual(await rows(indexedDB), { drafts: [], blocks: [] });

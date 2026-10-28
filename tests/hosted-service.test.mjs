@@ -17,8 +17,8 @@ const coachStages = ['accepted', 'coach_requested', 'feedback_received', 'feedba
 const progressFrames = stages => stages.map(stage => ({ type: 'progress', stage }));
 const firstSession = { access_token: 'private-session-token', user: { id: userId } };
 const secondSession = { access_token: 'second-token', user: { id: 'abcdefab-1234-4123-8123-123456789012' } };
-function wav(seconds = 1) {
-  const bytes = Buffer.alloc(44 + seconds * 32000);
+function wav(seconds = 1, extraSamples = 0) {
+  const bytes = Buffer.alloc(44 + Math.round(seconds * 16000) * 2 + extraSamples * 2);
   bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
   bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
   bytes.writeUInt32LE(16000, 24); bytes.writeUInt32LE(32000, 28); bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34);
@@ -345,6 +345,25 @@ test('one explicit transcription saves a private WAV, sends a job ID, and reuses
   assert.equal(jobs[0].body.requestId, jobs[1].body.requestId);
   assert.equal(jobs[0].headers.Authorization, 'Bearer private-session-token');
   assert.ok(!JSON.stringify(jobs[0].body).includes('private-session-token'));
+});
+
+test('the hosted client saves a full fifteen-minute WAV and rejects one extra sample or byte-limit overflow before upload', async () => {
+  const signedOut = fixture({ signedIn: false });
+  const config = await signedOut.service.request('/api/config');
+  assert.equal(config.maxDurationSeconds, 900); assert.equal(config.maxAudioBytes, 30 * 1024 * 1024);
+  const f = fixture(), audio = wav(900);
+  await f.service.request('/api/transcribe', { body: audio });
+  assert.equal(f.uploads.length, 1); assert.equal(f.uploads[0].body, audio);
+  assert.equal(f.calls.find(call => call.path === '/recordings').body.durationSeconds, 900);
+  assert.equal(audio.size, 28_800_044);
+  const tooLong = fixture();
+  await assert.rejects(tooLong.service.request('/api/transcribe', { body: wav(900, 1) }), /15 minutes/);
+  assert.equal(tooLong.calls.length, 0);
+  const tooLarge = fixture();
+  await assert.rejects(tooLarge.service.request('/api/transcribe', {
+    body: new Blob([new Uint8Array(30 * 1024 * 1024 + 1)], { type: 'audio/wav' }),
+  }), { status: 413 });
+  assert.equal(tooLarge.calls.length, 0);
 });
 
 test('definite failed jobs require a new request ID on the next explicit retry; changed coaching gets a new ID', async () => {
