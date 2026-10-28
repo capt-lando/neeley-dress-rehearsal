@@ -115,7 +115,7 @@ export function installHostedAccount(service, actions) {
       dialog.querySelector('.key-privacy-note p').textContent = (liveTranscription
         ? 'While signed in, recording streams audio to OpenAI for live transcription. Stop saves the complete recording and transcript privately. Replay does not upload audio. '
         : 'Transcription sends audio to OpenAI and saves your recording and transcript privately. Replay does not upload audio. ')
-        + 'Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Raw rubric files stay on your device.';
+        + 'Uploaded recordings are automatically transcribed and analyzed. Uploading a recording or choosing Analyze sends your transcript and preparation text to our AI coach and saves the resulting feedback. Original rubric and assignment files stay on your device; coaching uses their extracted or pasted text.';
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
       await actions.recoverPending?.();
       if (own !== generation || disposed) return;

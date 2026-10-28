@@ -21,6 +21,7 @@ const state = {
   rubricPreview: null, rubricPreviewController: null, rubricPage: 0, rubricPageGeneration: 0,
   assignmentLoading: false, assignmentGeneration: 0, assignmentFileName: '', assignmentPendingName: '',
   assignmentPreview: null, assignmentPreviewController: null, assignmentPage: 0, assignmentPageGeneration: 0,
+  preparationWaiters: new Set(),
   audioSave: null, pendingAudioSaves: new Set(), unsavedRecordings: new Map(), savedRecordings: [], libraryGeneration: 0, libraryOpenGeneration: 0, libraryBusy: false, libraryFocus: null,
   cloudRecordingId: '', accountId: '', recoveryController: null, recoveryPending: Boolean(window.rehearsalService?.hosted), recoveryNeedsConfig: false, recoveringAnalysis: false,
   audioPreparationGeneration: 0, audioMetadataCancel: null, processing: null,
@@ -352,6 +353,7 @@ function createPreparationDocument({ key, textId, label, caption }) {
     el('file-name').textContent = state[key + 'Loading'] ? state[key + 'PendingName'] : state[key + 'FileName'] || (textField().value.trim() ? `Pasted ${label} text` : 'No file chosen');
     $('remove-' + key).hidden = !state[key + 'Loading'] && !state[key + 'FileName'] && !textField().value;
     syncAnalysisControls();
+    for (const notify of state.preparationWaiters) notify();
   }
   function clearPreview() {
     state[key + 'PreviewController']?.abort(); state[key + 'PreviewController'] = null;
@@ -1474,7 +1476,7 @@ async function uploadAudio(file) {
   const generation = ++state.audioPreparationGeneration;
   state.preparingAudio = true;
   setBusy(true, 'Opening your recording and preparing its audio…');
-  let decodeContext, transcribeAfterUpload = false;
+  let decodeContext, analyzeAfterUpload = false;
   try {
     await validateAudioUploadHeader(file);
     if (generation !== state.audioPreparationGeneration) return;
@@ -1500,15 +1502,15 @@ async function uploadAudio(file) {
     setAudio(wav, audioBuffer.duration, file.name);
     $('report').hidden = true;
     $('record-title').textContent = 'Live Transcript';
-    transcribeAfterUpload = Boolean(state.config.hosted && state.config.auth?.signedIn);
-    setStatus(transcribeAfterUpload ? 'Recording validated. Saving it privately and preparing your transcript…' : state.config.hosted ? 'Sign in to save and transcribe this recording.' : 'Recording loaded. Replay to hear it and see your transcript; Analyze adds coaching.');
+    analyzeAfterUpload = Boolean(state.config.hosted && state.config.auth?.signedIn);
+    setStatus(analyzeAfterUpload ? 'Recording validated. Preparing your transcript and feedback…' : state.config.hosted ? 'Sign in to save and analyze this recording.' : 'Recording loaded. Replay to hear it and see your transcript; Analyze adds coaching.');
   } catch (error) { if (generation === state.audioPreparationGeneration) setStatus(error.name === 'EncodingError' ? 'This browser could not read that audio format. Try a WAV, MP3, or M4A recording.' : errorMessage(error), 'error'); }
   finally {
     if (decodeContext) await decodeContext.close().catch(() => {});
     if (generation === state.audioPreparationGeneration) { state.preparingAudio = false; setBusy(false); $('audio-upload').value = ''; }
   }
-  if (transcribeAfterUpload && generation === state.audioPreparationGeneration && !state.cancelRestartPending) {
-    await ensureTranscript().catch(error => { if (generation === state.audioPreparationGeneration && error.name !== 'AbortError') setStatus(errorMessage(error), 'error'); });
+  if (analyzeAfterUpload && generation === state.audioPreparationGeneration && !state.cancelRestartPending) {
+    await runAnalysis({ automatic: true });
   }
 }
 function analysisInput(text, useAI = true) {
@@ -1560,8 +1562,22 @@ async function copyPrompt() {
     $('prompt-status').textContent = 'Your browser blocked clipboard access. Press Ctrl+C (or ⌘C) to copy the selected prompt.';
   } finally { $('copy-prompt').disabled = false; }
 }
-async function runAnalysis({ corrected = false } = {}) {
-  if (state.rubricLoading || state.assignmentLoading) { setStatus('Wait for your documents to finish loading, or remove them before analyzing.'); return; }
+function waitForPreparationDocuments(signal) {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (!signal.aborted && (state.rubricLoading || state.assignmentLoading)) return;
+      state.preparationWaiters.delete(check);
+      signal.removeEventListener('abort', check);
+      if (signal.aborted) reject(supersededAudioError());
+      else resolve();
+    };
+    state.preparationWaiters.add(check);
+    signal.addEventListener('abort', check, { once: true });
+    check();
+  });
+}
+async function runAnalysis({ corrected = false, automatic = false } = {}) {
+  if (!automatic && (state.rubricLoading || state.assignmentLoading)) { setStatus('Wait for your documents to finish loading, or remove them before analyzing.'); return; }
   if (state.busy || state.recoveryPending || state.cancelRestartPending || state.recording || state.startingRecording || state.requestingMic || state.liveTake) return;
   if (!corrected && !state.audioBlob) return;
   if (corrected && !$('transcript').value.trim()) { setStatus('Add your transcript before updating the feedback.', 'error'); return; }
@@ -1581,6 +1597,10 @@ async function runAnalysis({ corrected = false } = {}) {
       text = $('transcript').value;
       cacheTranscript(text, audioGeneration, { edited: true });
     } else text = await ensureTranscript(progress);
+    while (automatic && (state.rubricLoading || state.assignmentLoading)) {
+      setStatus('Your transcript is ready. Waiting for your documents before preparing feedback…', 'busy');
+      await waitForPreparationDocuments(signal);
+    }
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration || signal.aborted || state.cancelRestartPending) throw supersededAudioError();
     if (state.rubricLoading || state.assignmentLoading) throw new Error('A document is still loading. When it is ready, choose Analyze again to include its text.');
     state.duration = state.audioDuration || state.duration;
@@ -2081,7 +2101,7 @@ $('discard-audio').addEventListener('click', () => { discardAudio(); window.rehe
 $('download-audio').addEventListener('click', downloadCurrentAudio);
 $('saved-recordings-details').addEventListener('toggle', () => { if ($('saved-recordings-details').open) refreshSavedRecordings(); });
 $('upload-button').addEventListener('click', () => {
-  if (state.config.hosted && !state.config.auth?.signedIn) { openSettings(); setStatus('Sign in to upload and automatically transcribe your recording.'); return; }
+  if (state.config.hosted && !state.config.auth?.signedIn) { openSettings(); setStatus('Sign in to upload your recording and get feedback automatically.'); return; }
   $('audio-upload').click();
 });
 $('audio-upload').addEventListener('change', () => uploadAudio($('audio-upload').files[0]));

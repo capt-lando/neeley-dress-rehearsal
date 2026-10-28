@@ -578,8 +578,15 @@ test('uploaded audio saves the prepared mono WAV rather than the original file',
 test('cloud audio upload sends only newly encoded 16 kHz mono PCM, never the selected file or its metadata', async () => {
   const metadata = 'ID3\u0004\u0000\u0000\u0000\u0000\u0000\u0000private artist and embedded artwork <script>doNotSend()</script>';
   const original = new File([metadata], 'original.mp3', { type: 'audio/mpeg' });
-  let sent;
+  let sent; const calls = [];
   const h = harness(async (path, options) => {
+    calls.push(path);
+    if (path === '/api/analyze-text') {
+      const input = JSON.parse(options.body);
+      assert.equal(input.text, 'Practice helps.'); assert.equal(input.recordingId, 'owned');
+      assert.ok(!options.body.includes(metadata));
+      return { transcript: input.text, analysis: { method: 'ai', overallRating: 80 } };
+    }
     assert.equal(path, '/api/transcribe'); sent = options.body;
     assert.equal(options.headers['Content-Type'], 'audio/wav');
     return { text: 'Practice helps.', durationSeconds: 1, recordingId: 'owned' };
@@ -593,6 +600,7 @@ test('cloud audio upload sends only newly encoded 16 kHz mono PCM, never the sel
   assert.equal(inspectWav(bytes).durationSeconds, 1); assert.equal(bytes.length, 32044);
   assert.equal(bytes.readInt16LE(44), Math.trunc(0.375 * 32767));
   assert.ok(!bytes.includes(Buffer.from(metadata)), 'encoded source metadata cannot pass through to the cloud');
+  assert.deepEqual(calls, ['/api/transcribe', '/api/analyze-text']);
 });
 
 test('audio metadata rejects a known overlong file before reading or native decoding and releases its resources', async () => {
@@ -2988,16 +2996,145 @@ test('canceling processing retains saved history, clears current playback, and s
   assert.equal(h.savedRecords.get(saved.id), saved); assert.equal(h.storageCalls.remove.length, 0);
 });
 
-test('validated signed-in uploads transcribe automatically without requesting coaching', async () => {
+function automaticUploadFixture({ transcribe, coach, ...options } = {}) {
   const calls = [];
-  const h = harness(async (path, options) => { calls.push(path); assert.equal(path, '/api/transcribe'); assert.equal(options.body.type, 'audio/wav'); return { text: 'Uploaded speech.', durationSeconds: 1, recordingId: 'uploaded-id' }; }, {
+  const h = harness(async (path, request) => {
+    calls.push({ path, request });
+    if (path === '/api/transcribe') {
+      assert.equal(request.body.type, 'audio/wav');
+      return transcribe ? transcribe(request) : { text: 'Uploaded speech.', durationSeconds: 1, recordingId: 'uploaded-id' };
+    }
+    assert.equal(path, '/api/analyze-text');
+    const input = JSON.parse(request.body);
+    return coach ? coach(input, request) : { transcript: input.text, analysis: { method: 'ai', overallRating: 80 } };
+  }, {
     validateUploadHeader: validateAudioUploadHeader,
     decodeAudioData: async () => ({ duration: 1, sampleRate: 16000, length: 16000, numberOfChannels: 1, getChannelData: () => new Float32Array(16000) }),
+    ...options,
   });
   h.updateConfig(hostedConfig);
-  await h.uploadAudio(new File([Buffer.from('RIFF0000WAVEdata0000')], 'valid.wav', { type: 'audio/wav' }));
-  assert.deepEqual(calls, ['/api/transcribe']); assert.equal(h.state.transcriptText, 'Uploaded speech.');
-  assert.equal(h.state.cloudRecordingId, 'uploaded-id'); assert.equal(h.state.report, null);
+  const file = new File([Buffer.from('RIFF0000WAVEdata0000')], 'valid.wav', { type: 'audio/wav' });
+  return { h, file, calls, paths: () => calls.map(call => call.path) };
+}
+
+test('validated signed-in uploads transcribe then analyze automatically without a button click', async () => {
+  const { h, file, calls, paths } = automaticUploadFixture();
+  h.get('target-script').value = 'My speaking plan.';
+  await h.uploadAudio(file);
+  assert.deepEqual(paths(), ['/api/transcribe', '/api/analyze-text']);
+  const input = JSON.parse(calls[1].request.body);
+  assert.equal(input.text, 'Uploaded speech.'); assert.equal(input.recordingId, 'uploaded-id'); assert.equal(input.targetScript, 'My speaking plan.');
+  assert.equal(h.state.transcriptText, 'Uploaded speech.'); assert.equal(h.state.cloudRecordingId, 'uploaded-id');
+  assert.equal(h.state.report.transcript, 'Uploaded speech.'); assert.equal(h.state.report.analysis.overallRating, 80);
+  assert.equal(h.get('speech-analysis-content').hidden, false);
+  assert.equal(h.state.busy, false); assert.equal(h.state.preparationWaiters.size, 0);
+});
+
+test('automatic uploads never request coaching after failed or empty transcription', async () => {
+  for (const result of [new Error('Transcription unavailable.'), { text: '' }, { text: ' \n\t ' }, {}]) {
+    const { h, file, paths } = automaticUploadFixture({ transcribe: async () => { if (result instanceof Error) throw result; return result; } });
+    await h.uploadAudio(file);
+    assert.deepEqual(paths(), ['/api/transcribe']);
+    assert.equal(h.state.report, null); assert.equal(h.state.busy, false); assert.equal(h.state.preparationWaiters.size, 0);
+    assert.ok(h.state.audioBlob, 'the validated recording remains available for retry');
+    assert.match(h.get('app-status').textContent, /Transcription unavailable|No speech was found/);
+  }
+});
+
+test('automatic feedback waits for both document imports and includes their complete text regardless of completion order', async () => {
+  for (const first of ['rubric', 'assignment']) {
+    const pending = { rubric: deferred(), assignment: deferred() };
+    const names = { rubric: 'rubric.pdf', assignment: 'assignment.docx' };
+    const texts = { rubric: 'Rubric beginning\n' + 'r'.repeat(39964) + '\nRubric final rule.', assignment: 'Assignment beginning\n' + 'a'.repeat(39957) + '\nFinal required topic.' };
+    assert.equal(texts.rubric.length, 40000); assert.equal(texts.assignment.length, 40000);
+    const { h, file, calls, paths } = automaticUploadFixture({ extractRubric: selected => pending[selected.name === names.rubric ? 'rubric' : 'assignment'].promise });
+    const importing = {
+      rubric: h.importRubric({ name: names.rubric, size: 100 }),
+      assignment: h.importAssignment({ name: names.assignment, size: 100 }),
+    };
+    const uploading = h.uploadAudio(file); await nextTurn();
+    assert.deepEqual(paths(), ['/api/transcribe']); assert.equal(h.state.preparationWaiters.size, 1);
+    assert.equal(h.state.busy, true); assert.match(h.get('app-status').textContent, /Waiting for your documents/);
+    pending[first].resolve({ text: texts[first], name: names[first] }); await importing[first]; await nextTurn();
+    assert.deepEqual(paths(), ['/api/transcribe'], 'the other pending document still blocks coaching');
+    assert.equal(h.state.preparationWaiters.size, 1);
+    const second = first === 'rubric' ? 'assignment' : 'rubric';
+    pending[second].resolve({ text: texts[second], name: names[second] }); await importing[second]; await uploading;
+    assert.deepEqual(paths(), ['/api/transcribe', '/api/analyze-text']);
+    const input = JSON.parse(calls[1].request.body);
+    assert.equal(input.instructorRubric, texts.rubric); assert.equal(input.rubricFileName, names.rubric);
+    assert.equal(input.assignmentInstructions, texts.assignment); assert.equal(input.assignmentFileName, names.assignment);
+    assert.equal(h.state.report.input.instructorRubric, texts.rubric); assert.equal(h.state.report.input.assignmentInstructions, texts.assignment);
+    assert.equal(h.state.preparationWaiters.size, 0); assert.equal(h.state.busy, false);
+  }
+});
+
+test('removing a pending document releases automatic feedback but immediate replacement waits for its new text', async () => {
+  for (const replace of [false, true]) {
+    const previous = deferred(), replacement = deferred();
+    const { h, file, calls, paths } = automaticUploadFixture({ extractRubric: selected => selected.name === 'old.pdf' ? previous.promise : replacement.promise });
+    const importingPrevious = h.importRubric({ name: 'old.pdf', size: 100 });
+    const uploading = h.uploadAudio(file); await nextTurn();
+    assert.deepEqual(paths(), ['/api/transcribe']); assert.equal(h.state.preparationWaiters.size, 1);
+    h.removeRubric();
+    // Start replacement before the resumed feedback continuation gets a microtask.
+    const importingReplacement = replace ? h.importRubric({ name: 'new.pdf', size: 100 }) : null;
+    await nextTurn();
+    previous.resolve({ text: 'Obsolete rubric must never be sent.', name: 'old.pdf' }); await importingPrevious;
+    if (replace) {
+      assert.deepEqual(paths(), ['/api/transcribe']); assert.equal(h.state.preparationWaiters.size, 1);
+      assert.equal(h.state.rubricLoading, true); assert.equal(h.get('instructor-rubric').value, '');
+      replacement.resolve({ text: 'Use the complete replacement criteria.', name: 'new.pdf' }); await importingReplacement;
+    }
+    await uploading;
+    assert.deepEqual(paths(), ['/api/transcribe', '/api/analyze-text']);
+    const input = JSON.parse(calls[1].request.body);
+    assert.equal(input.instructorRubric, replace ? 'Use the complete replacement criteria.' : '');
+    assert.equal(input.rubricFileName, replace ? 'new.pdf' : '');
+    assert.ok(!calls[1].request.body.includes('Obsolete rubric'));
+    assert.equal(h.state.preparationWaiters.size, 0); assert.equal(h.state.busy, false);
+  }
+});
+
+test('cancel or sign-out while automatic feedback waits for documents removes waiters and prevents late coaching', async () => {
+  for (const action of ['cancel', 'signout']) {
+    const rubric = deferred(), assignment = deferred();
+    const { h, file, paths } = automaticUploadFixture({ extractRubric: selected => selected.name === 'rubric.pdf' ? rubric.promise : assignment.promise });
+    h.window.rehearsalHostedActions.accountChanged('current-owner'); h.updateConfig(hostedConfig);
+    h.window.rehearsalService.cancelCurrentRequest = async () => ({ cancelled: true });
+    const importingRubric = h.importRubric({ name: 'rubric.pdf', size: 100 });
+    const importingAssignment = h.importAssignment({ name: 'assignment.docx', size: 100 });
+    const uploading = h.uploadAudio(file); await nextTurn();
+    assert.equal(h.state.preparationWaiters.size, 1); assert.deepEqual(paths(), ['/api/transcribe']);
+    const signal = h.state.requestController.signal;
+    if (action === 'cancel') { h.openCancelRestart(); await h.confirmCancelRestart(); }
+    else h.window.rehearsalHostedActions.accountChanged('');
+    await uploading;
+    assert.equal(signal.aborted, true); assert.equal(h.state.preparationWaiters.size, 0);
+    assert.equal(h.state.audioBlob, null); assert.equal(h.state.report, null); assert.equal(h.state.busy, false);
+    rubric.resolve({ text: 'Late private rubric.', name: 'rubric.pdf' }); assignment.resolve({ text: 'Late private assignment.', name: 'assignment.docx' });
+    await Promise.all([importingRubric, importingAssignment]); await nextTurn();
+    assert.deepEqual(paths(), ['/api/transcribe']); assert.equal(h.state.preparationWaiters.size, 0); assert.equal(h.state.report, null);
+    if (action === 'signout') {
+      assert.equal(h.get('instructor-rubric').value, ''); assert.equal(h.get('assignment-instructions').value, '');
+    }
+  }
+});
+
+test('repeated Analyze and upload actions cannot duplicate an automatic transcription or coaching request', async () => {
+  const transcript = deferred(), coaching = deferred();
+  const { h, file, paths } = automaticUploadFixture({ transcribe: () => transcript.promise, coach: () => coaching.promise });
+  const uploading = h.uploadAudio(file); await nextTurn();
+  assert.deepEqual(paths(), ['/api/transcribe']); assert.equal(h.state.busy, true);
+  await Promise.all([h.runAnalysis(), h.runAnalysis({ automatic: true }), h.uploadAudio(file), h.uploadAudio(file)]);
+  assert.deepEqual(paths(), ['/api/transcribe']);
+  transcript.resolve({ text: 'One completed transcript.', recordingId: 'uploaded-id', durationSeconds: 1 }); await nextTurn();
+  assert.deepEqual(paths(), ['/api/transcribe', '/api/analyze-text']); assert.equal(h.state.busy, true);
+  await Promise.all([h.runAnalysis(), h.runAnalysis({ automatic: true }), h.uploadAudio(file), h.uploadAudio(file)]);
+  assert.deepEqual(paths(), ['/api/transcribe', '/api/analyze-text']);
+  coaching.resolve({ transcript: 'One completed transcript.', analysis: { method: 'ai', overallRating: 80 } }); await uploading;
+  assert.equal(h.state.report.transcript, 'One completed transcript.'); assert.equal(h.state.busy, false);
+  assert.equal(h.state.preparationWaiters.size, 0);
 });
 
 test('executable or HTML uploads never reach native decoding, metadata playback, or cloud processing', async () => {
@@ -3007,6 +3144,7 @@ test('executable or HTML uploads never reach native decoding, metadata playback,
       audioMetadata: () => { metadata++; }, decodeAudioData: async () => { decoded++; } });
     h.updateConfig(hostedConfig); await h.uploadAudio(new File([bytes], 'recording.wav', { type: 'audio/wav' }));
     assert.equal(decoded, 0); assert.equal(metadata, 0); assert.equal(sent, 0); assert.equal(h.state.audioBlob, null);
+    assert.equal(h.state.report, null); assert.equal(h.state.busy, false); assert.equal(h.state.preparationWaiters.size, 0);
     assert.match(h.get('app-status').textContent, /not a supported audio recording/);
   }
 });
