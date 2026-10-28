@@ -151,7 +151,6 @@
 .recording-environment-note{font-size:10px;line-height:1.65;color:#95839f;margin:13px 0 0}
 /* Each optional practice section expands independently at the same level. */
 .speaker-details>summary{color:var(--ink)}
-#planned-introduction{font-size:11px;line-height:1.8;background:#fdfcfe;min-height:110px;max-height:330px}
 .context-details>label{font-size:10px;line-height:1.6;margin:14px 0 8px}
 .context-details textarea{font-size:11px;line-height:1.8;background:#fdfcfe;min-height:100px;max-height:330px}
 #instructor-rubric{min-height:145px;max-height:400px}

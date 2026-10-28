@@ -637,7 +637,7 @@ test('completed takes autosave only audio metadata once, and short takes are not
   h.get('transcript').value = 'Private transcript';
   h.get('target-script').value = 'Private script';
   h.get('target-talking-points').value = 'Private points';
-  h.get('planned-introduction').value = 'Private introduction';
+  h.get('assignment-instructions').value = 'Private assignment';
   h.get('instructor-rubric').value = 'Private rubric';
   h.captureRecordingSamples(new Float32Array(16000).fill(0.25), 16000);
   h.toggleRecordingPause();
@@ -1630,7 +1630,7 @@ test('prototype-shaped provider data cannot alter normalized feedback or browser
 
 test('SQL quotes, comments and commands in every text input remain exact strings in coaching data and rendered transcript', async () => {
   const sql = "Robert'); DROP TABLE recordings; -- /* test */ ' OR 1=1; SELECT pg_sleep(10);";
-  const fields = [['transcript', 'text'], ['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric']];
+  const fields = [['transcript', 'text'], ['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['instructor-rubric', 'instructorRubric'], ['assignment-instructions', 'assignmentInstructions']];
   const sent = [];
   const h = harness(async (path, options) => {
     const input = JSON.parse(options.body); sent.push(input);
@@ -2300,7 +2300,7 @@ test('collapsed practice context is preserved exactly in analysis and prompt pre
     if (id) detailsParents.set(id, [...stack]);
     stack.push(id || '(unnamed details)');
   }
-  for (const id of ['personal-details', 'transitions-details', 'rubric-details', 'assignment-details']) {
+  for (const id of ['rubric-details', 'assignment-details']) {
     assert.deepEqual(detailsParents.get(id), [], `${id} must stay available when another optional section is closed`);
     assert.match(appHtml, new RegExp(`<details class="speaker-details[^\"]*" id="${id}">`));
   }
@@ -2310,25 +2310,21 @@ test('collapsed practice context is preserved exactly in analysis and prompt pre
     payload = JSON.parse(options.body);
     return { prompt: 'Context included' };
   });
-  const transitions = '  From the problem,\nlet’s move to our proposed solution.  ';
-  const introduction = '  Before we begin, picture your first day on campus.\nThat experience is the reason for this proposal.  ';
   const rubric = `  Instructor criteria:\n${'Support each claim with evidence. '.repeat(1100)}\nFINAL CRITERION  `;
   h.get('transcript').value = 'My recorded presentation.';
-  h.get('planned-introduction').value = introduction;
-  h.get('planned-transitions').value = transitions;
   h.get('instructor-rubric').value = rubric;
   h.state.rubricFileName = 'Course rubric.pdf';
   const assignment = `  Assignment directions:\n${'Explain the proposal and audience. '.repeat(1100)}\nFINAL REQUIREMENT  `;
   h.get('assignment-instructions').value = assignment;
   h.state.assignmentFileName = 'Presentation assignment.docx';
-  h.get('personal-details').open = false;
-  h.get('transitions-details').open = false;
   h.get('rubric-details').open = false;
   h.get('assignment-details').open = false;
   assert.equal(await h.loadPromptPreview(), 'Context included');
-  assert.equal(payload.plannedIntroduction, introduction);
+  assert.equal(Object.hasOwn(payload, 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(h.getChatContext().context, 'plannedIntroduction'), false);
   assert.ok(!Object.hasOwn(payload, 'speakerName'));
-  assert.equal(payload.plannedTransitions, transitions);
+  assert.equal(Object.hasOwn(payload, 'plannedTransitions'), false);
+  assert.equal(Object.hasOwn(h.getChatContext().context, 'plannedTransitions'), false);
   assert.equal(payload.instructorRubric, rubric);
   assert.equal(payload.rubricFileName, 'Course rubric.pdf');
   assert.equal(payload.assignmentInstructions, assignment);
@@ -2337,7 +2333,11 @@ test('collapsed practice context is preserved exactly in analysis and prompt pre
   assert.equal(h.getChatContext().context.assignmentFileName, 'Presentation assignment.docx');
   assert.ok(!Object.hasOwn(payload, 'file') && !Object.hasOwn(payload, 'analysisApiKey'));
   assert.ok(!htmlIds.includes('speaker-name'));
-  assert.match(appHtml, /id="planned-introduction" maxlength="8000"/);
+  assert.ok(!htmlIds.includes('planned-introduction'));
+  assert.ok(!htmlIds.includes('personal-details'));
+  assert.ok(!htmlIds.includes('planned-transitions'));
+  assert.ok(!htmlIds.includes('transitions-details'));
+  assert.ok(!htmlIds.includes('remove-transitions'));
 });
 
 test('rubric replacement and removal ignore late extraction results without re-enabling active analysis', async () => {
@@ -2504,7 +2504,7 @@ test('restoring saved rubric text clears the preview of a different document', a
 });
 
 test('preparation attachments are independent optional disclosures and the idle title says Begin recording', () => {
-  for (const title of ['Make it personal', 'Add transitions', 'Add rubric', 'Attach assignment instructions']) {
+  for (const title of ['Add rubric', 'Attach assignment instructions']) {
     assert.ok(appHtml.includes(`<summary>${title} <span class="optional-inline">(optional)</span>`));
   }
   assert.ok(appHtml.indexOf('id="assignment-details"') > appHtml.indexOf('id="rubric-details"'));
@@ -2667,25 +2667,23 @@ test('report context badges describe the analyzed snapshot rather than subsequen
     assert.equal(path, '/api/analyze-text'); submitted = JSON.parse(options.body); return pending.promise;
   });
   h.get('transcript').value = 'My completed speech.';
-  h.get('planned-introduction').value = 'Picture your first day on campus.';
-  h.get('planned-transitions').value = 'Next, consider the evidence.';
   h.get('instructor-rubric').value = 'Provide clear evidence.';
   h.state.rubricFileName = 'instructor.txt';
   h.get('assignment-instructions').value = 'Present a feasible recommendation in five minutes.';
   h.state.assignmentFileName = 'assignment.docx';
   const analyzing = h.runAnalysis({ corrected: true });
-  h.get('planned-introduction').value = ''; h.get('planned-transitions').value = ''; h.removeRubric(); h.removeAssignment();
+  h.removeRubric(); h.removeAssignment();
   pending.resolve({ transcript: submitted.text, wordStats: {}, blunders: {}, analysis: {} });
   await analyzing;
   assert.equal(h.state.report.input.instructorRubric, 'Provide clear evidence.');
-  assert.equal(h.state.report.input.plannedIntroduction, 'Picture your first day on campus.');
-  assert.equal(h.state.report.input.plannedTransitions, 'Next, consider the evidence.');
+  assert.equal(Object.hasOwn(h.state.report.input, 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(h.state.report.input, 'plannedTransitions'), false);
   assert.equal(h.state.report.input.rubricFileName, 'instructor.txt');
   assert.equal(h.state.report.input.assignmentInstructions, 'Present a feasible recommendation in five minutes.');
   assert.equal(h.state.report.input.assignmentFileName, 'assignment.docx');
   assert.equal(h.get('report-rubric-badge').hidden, false);
   assert.equal(h.get('report-assignment-badge').hidden, false);
-  assert.equal(h.get('report-transitions-badge').hidden, false);
+  assert.equal(h.get('report-transitions-badge').hidden, true);
   assert.equal(h.analysisInput('Next rehearsal.').instructorRubric, '');
   assert.equal(h.analysisInput('Next rehearsal.').assignmentInstructions, '');
   assert.equal(h.getChatContext().context.assignmentInstructions, '');
@@ -2904,13 +2902,13 @@ test('current rehearsal reopens saved feedback and preserves preparation and tra
   source.window.rehearsalHostedActions.accountChanged('saved-owner'); source.updateConfig(hostedConfig);
   const original = 'Our study group gives every student a place to practice.';
   const edited = 'Our weekly study group gives every student a place to practice.';
-  const report = { ...analyzeSpeech({ text: original, durationSeconds: 15, aiFeedback: { annotations: [annotation(original, original, 'great', 'Your purpose is clear and specific.')] } }), transcript: original };
+  const report = { ...analyzeSpeech({ text: original, durationSeconds: 15, aiFeedback: { annotations: [annotation(original, original, 'great', 'Your purpose is clear and specific.')] } }), transcript: original,
+    input: { plannedIntroduction: 'Introduce the group.', plannedTransitions: 'Now consider the benefits.' } };
   const reportBefore = JSON.stringify(report);
   const record = { ...savedTake('current-saved'), durationSeconds: 15, transcript: original, report };
   source.window.rehearsalHostedActions.restoreRecording(record);
   const preparation = {
     'target-script': 'Current full script.', 'target-talking-points': 'Current checklist.',
-    'planned-introduction': 'Introduce the group.', 'planned-transitions': 'Now consider the benefits.',
     'instructor-rubric': 'Use specific evidence.', 'assignment-instructions': 'Present for three minutes.',
   };
   for (const [field, value] of Object.entries(preparation)) source.get(field).value = value;
@@ -2918,6 +2916,8 @@ test('current rehearsal reopens saved feedback and preserves preparation and tra
   source.setTargetView('script'); source.showPage('history');
   source.get('transcript').value = edited; await source.emitElementEvent('transcript', 'input');
   const snapshot = source.window.rehearsalHostedActions.captureCurrentRehearsal();
+  assert.equal(Object.hasOwn(snapshot, 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(snapshot, 'plannedTransitions'), false);
   assert.equal(snapshot.ownerId, 'saved-owner'); assert.equal(snapshot.recordingId, record.id);
   assert.equal(snapshot.transcript, edited); assert.equal(snapshot.transcriptBasis, original);
   assert.equal(source.state.transcriptBasis, original, 'editing keeps the source transcript used to match the draft');
@@ -2931,6 +2931,13 @@ test('current rehearsal reopens saved feedback and preserves preparation and tra
   assert.deepEqual(opened, [record.id]); assert.deepEqual(requests, ['/api/config']);
   assert.equal(h.state.audioBlob, record.blob); assert.equal(h.state.cloudRecordingId, record.id);
   assert.equal(h.state.report, report); assert.equal(JSON.stringify(report), reportBefore, 'saved feedback and annotation offsets remain unchanged');
+  assert.equal(h.state.report.input.plannedIntroduction, 'Introduce the group.', 'historical introduction remains in the saved report');
+  assert.equal(h.state.report.input.plannedTransitions, 'Now consider the benefits.', 'historical transitions remain in the saved report');
+  assert.equal(h.get('report-transitions-badge').hidden, false);
+  assert.equal(Object.hasOwn(h.analysisInput(edited), 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(h.getChatContext().context, 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(h.analysisInput(edited), 'plannedTransitions'), false);
+  assert.equal(Object.hasOwn(h.getChatContext().context, 'plannedTransitions'), false);
   assert.equal(h.get('transcript').value, edited); assert.equal(h.state.transcriptText, edited); assert.equal(h.state.transcriptBasis, original);
   assert.equal(exportedTranscript(h.buildTranscriptExport(h.state.report)), original);
   assert.match(elementText(h.get('annotations-notes')), /Your purpose is clear and specific/);
@@ -2971,15 +2978,21 @@ test('a preparation-only current rehearsal restores with an empty transcript and
   assert.equal(h.window.rehearsalHostedActions.captureCurrentRehearsal(), null);
   h.window.rehearsalHostedActions.accountChanged('prep-owner'); h.updateConfig(hostedConfig);
   h.get('target-talking-points').value = 'Explain the problem. Offer one practical next step.';
-  h.get('planned-introduction').value = 'Start with a question.';
+  h.get('target-script').value = 'Start with the problem, then explain the solution.';
   const snapshot = h.window.rehearsalHostedActions.captureCurrentRehearsal();
+  assert.equal(Object.hasOwn(snapshot, 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(snapshot, 'plannedTransitions'), false);
+  snapshot.plannedIntroduction = 'Legacy introduction from an older draft.';
+  snapshot.plannedTransitions = 'Legacy transitions from an older draft.';
   assert.equal(snapshot.recordingId, ''); assert.equal(snapshot.transcript, ''); assert.equal(snapshot.transcriptBasis, '');
-  h.get('target-talking-points').value = ''; h.get('planned-introduction').value = '';
+  h.get('target-talking-points').value = ''; h.get('target-script').value = '';
   let opens = 0; h.window.rehearsalService.openRecording = async () => { opens++; throw new Error('No recording to open'); };
   assert.equal(await h.window.rehearsalHostedActions.restoreCurrentRehearsal(snapshot), true);
   assert.equal(opens, 0); assert.equal(h.state.audioBlob, null); assert.equal(h.state.report, null);
   assert.equal(h.get('target-talking-points').value, snapshot.targetTalkingPoints);
-  assert.equal(h.get('planned-introduction').value, snapshot.plannedIntroduction);
+  assert.equal(h.get('target-script').value, snapshot.targetScript);
+  assert.equal(Object.hasOwn(h.window.rehearsalHostedActions.captureCurrentRehearsal(), 'plannedIntroduction'), false);
+  assert.equal(Object.hasOwn(h.window.rehearsalHostedActions.captureCurrentRehearsal(), 'plannedTransitions'), false);
   assert.equal(h.get('transcript').value, ''); assert.equal(h.get('refresh-annotations').disabled, true);
   assert.equal(h.get('annotation-loading').hidden, true);
 });

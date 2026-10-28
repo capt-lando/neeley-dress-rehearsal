@@ -40,7 +40,6 @@ function getChatContext() {
     context: {
       text: state.summaryTranscript,
       targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value,
-      plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value,
       instructorRubric: $('instructor-rubric').value,
       assignmentInstructions: $('assignment-instructions').value,
       assignmentFileName: $('assignment-instructions').value.trim() ? state.assignmentFileName : '',
@@ -1529,7 +1528,7 @@ function analysisInput(text, useAI = true) {
   const instructorRubric = $('instructor-rubric').value;
   const assignmentInstructions = $('assignment-instructions').value;
   const rehearsalContext = state.chat?.getRehearsalContext() || '';
-  return { text, targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value, targetMode: mode, plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value, instructorRubric, rubricFileName: instructorRubric.trim() ? state.rubricFileName : '', assignmentInstructions, assignmentFileName: assignmentInstructions.trim() ? state.assignmentFileName : '', rehearsalContext, durationSeconds: state.duration, useAI, ...(state.config.hosted ? { recordingId: state.cloudRecordingId } : {}) };
+  return { text, targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value, targetMode: mode, instructorRubric, rubricFileName: instructorRubric.trim() ? state.rubricFileName : '', assignmentInstructions, assignmentFileName: assignmentInstructions.trim() ? state.assignmentFileName : '', rehearsalContext, durationSeconds: state.duration, useAI, ...(state.config.hosted ? { recordingId: state.cloudRecordingId } : {}) };
 }
 function markPromptStale() {
   state.promptGeneration++;
@@ -1620,7 +1619,7 @@ async function runAnalysis({ corrected = false, automatic = false } = {}) {
     setStatus(state.config.coachingViaHost ? 'Coaching requested in this Codex conversation. Waiting for your annotated report…' : 'Your transcript is ready. Reviewing word habits, speaking points, and the bigger picture…', 'busy');
     const report = await api('/api/analyze-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal, onProgress: event => progress.event(event, 'coach') });
     if (generation !== state.analysisGeneration || audioGeneration !== state.audioGeneration || signal.aborted || state.cancelRestartPending) return;
-    state.report = { ...report, transcript: report.transcript || text, input: { targetScript: input.targetScript, targetTalkingPoints: input.targetTalkingPoints, targetMode: input.targetMode, plannedIntroduction: input.plannedIntroduction, plannedTransitions: input.plannedTransitions, instructorRubric: input.instructorRubric, rubricFileName: input.rubricFileName, assignmentInstructions: input.assignmentInstructions, assignmentFileName: input.assignmentFileName } };
+    state.report = { ...report, transcript: report.transcript || text, input: { targetScript: input.targetScript, targetTalkingPoints: input.targetTalkingPoints, targetMode: input.targetMode, instructorRubric: input.instructorRubric, rubricFileName: input.rubricFileName, assignmentInstructions: input.assignmentInstructions, assignmentFileName: input.assignmentFileName } };
     renderReport();
     progress.finish(report.analysis?.method === 'ai' && Number.isFinite(report.analysis.overallRating) ? 'complete' : 'partial', report.analysis?.method === 'ai' && Number.isFinite(report.analysis.overallRating) ? '' : 'Feedback is ready with limitations. Review the notice in your report.');
     window.rehearsalAccount?.track(report.analysis?.method === 'ai' ? 'analysis_completed' : 'analysis_failed');
@@ -1887,7 +1886,6 @@ window.rehearsalHostedActions = {
       transcript: $('transcript').value, transcriptBasis: state.report?.transcript || state.transcriptBasis,
       reportGeneratedAt: state.report?.meta?.generatedAt || '', targetMode: state.targetView,
       targetScript: $('target-script').value, targetTalkingPoints: $('target-talking-points').value,
-      plannedIntroduction: $('planned-introduction').value, plannedTransitions: $('planned-transitions').value,
       instructorRubric: $('instructor-rubric').value, rubricFileName: state.rubricFileName,
       assignmentInstructions: $('assignment-instructions').value, assignmentFileName: state.assignmentFileName,
       page: state.currentPage };
@@ -1920,11 +1918,10 @@ window.rehearsalHostedActions = {
     // may have finished a transcription after the snapshot was last saved.
     const restoreDraft = !snapshot.recordingId || snapshot.transcriptBasis === source || snapshot.transcript === source;
     removeRubric(); removeAssignment();
-    for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric'], ['assignment-instructions', 'assignmentInstructions']]) $(field).value = snapshot[key] || '';
+    for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['instructor-rubric', 'instructorRubric'], ['assignment-instructions', 'assignmentInstructions']]) $(field).value = snapshot[key] || '';
     state.rubricFileName = snapshot.rubricFileName || '';
     state.assignmentFileName = snapshot.assignmentFileName || '';
     setTargetView(snapshot.targetMode); updateTargetHint(); updateRubricControls(); preparationDocuments.assignment.updateControls();
-    $('remove-transitions').hidden = !$('planned-transitions').value;
     if (snapshot.instructorRubric) $('rubric-status').textContent = 'Your rubric text was restored. Choose the original file to view its pages again.';
     if (snapshot.assignmentInstructions) $('assignment-status').textContent = 'Your assignment text was restored. Choose the original file to view its pages again.';
     if (restoreDraft) cacheTranscript(snapshot.transcript, state.audioGeneration, { edited: true });
@@ -2010,7 +2007,7 @@ window.rehearsalHostedActions = {
     cancelLiveSession();
     if (state.recording) stopRecording();
     cleanupMic(); discardAudio();
-    for (const field of ['target-script', 'target-talking-points', 'planned-introduction', 'planned-transitions', 'instructor-rubric']) $(field).value = '';
+    for (const field of ['target-script', 'target-talking-points', 'instructor-rubric']) $(field).value = '';
     removeRubric(); removeAssignment(); updateTargetHint();
     setBusy(false); setStatus('');
     state.config.auth = { signedIn: Boolean(id) };
@@ -2028,7 +2025,7 @@ window.rehearsalHostedActions = {
     const input = record.report?.input || record.report?.meta;
     if (input) {
       removeRubric(); removeAssignment();
-      for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['planned-introduction', 'plannedIntroduction'], ['planned-transitions', 'plannedTransitions'], ['instructor-rubric', 'instructorRubric'], ['assignment-instructions', 'assignmentInstructions']]) $(field).value = typeof input[key] === 'string' ? input[key] : '';
+      for (const [field, key] of [['target-script', 'targetScript'], ['target-talking-points', 'targetTalkingPoints'], ['instructor-rubric', 'instructorRubric'], ['assignment-instructions', 'assignmentInstructions']]) $(field).value = typeof input[key] === 'string' ? input[key] : '';
       state.rubricFileName = input.rubricFileName || ''; updateTargetHint(); updateRubricControls();
       state.assignmentFileName = typeof input.assignmentFileName === 'string' ? input.assignmentFileName : ''; preparationDocuments.assignment.updateControls();
       $('rubric-status').textContent = input.instructorRubric ? 'Saved rubric text restored. Choose the original file to see its preview again.' : 'No rubric was saved with this rehearsal.';
@@ -2091,9 +2088,6 @@ $('target-script').addEventListener('input', markPromptStale);
 $('target-talking-points').addEventListener('input', markPromptStale);
 $('target-view-points').addEventListener('click', () => setTargetView('points'));
 $('target-view-script').addEventListener('click', () => setTargetView('script'));
-$('planned-introduction').addEventListener('input', markPromptStale);
-$('planned-transitions').addEventListener('input', () => { $('remove-transitions').hidden = !$('planned-transitions').value; markPromptStale(); });
-$('remove-transitions').addEventListener('click', () => { $('planned-transitions').value = ''; $('remove-transitions').hidden = true; markPromptStale(); });
 for (const attachment of Object.values(preparationDocuments)) attachment.listen();
 $('target-script').addEventListener('input', updateTargetHint);
 $('target-talking-points').addEventListener('input', updateTargetHint);
@@ -2155,7 +2149,6 @@ refreshSavedRecordings();
 setTargetView(state.targetView);
 updateTargetHint();
 for (const attachment of Object.values(preparationDocuments)) attachment.updateControls();
-$('remove-transitions').hidden = !$('planned-transitions').value;
 initializeWaveform();
 updatePlaybackUI();
 if (state.config.hosted) updateConfig(state.config);
