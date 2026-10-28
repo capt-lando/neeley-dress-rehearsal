@@ -27,13 +27,23 @@ export async function beginHostedSignIn(service, provider, redirectTo, config = 
 export function installHostedAccount(service, actions) {
   const $ = id => document.getElementById(id);
   const dialog = $('account-dialog');
-  let user = null, generation = 0, busy = false, disposed = false, signingIn = false, signingOut = false, liveTranscription = false, historyRequest = null;
+  let user = null, generation = 0, busy = null, disposed = false, signingIn = false, signingOut = false, liveTranscription = false, historyRequest = null;
   const analytics = createUsageAnalytics({ send: (events, { signal }) => service.request('/api/events', { method: 'POST', body: { events }, signal }) });
   const consentKey = () => user ? `neeley-usage-consent:${user.id}` : '';
   const readConsent = () => { try { return localStorage.getItem(consentKey()) === 'yes'; } catch { return false; } };
   const status = message => { $('account-status').textContent = message; };
   const show = () => { status(''); dialog.showModal(); };
   const close = () => dialog.close();
+  const historyCount = count => {
+    const badge = $('history-count');
+    if (badge) { badge.textContent = String(count); badge.hidden = !user; }
+  };
+  const syncHistoryControls = () => {
+    const blocked = disposed || !user || busy?.generation === generation || historyRequest?.generation === generation;
+    $('cloud-history-refresh').disabled = blocked;
+    $('cloud-recordings-list').querySelectorAll('button').forEach(button => { button.disabled = blocked; });
+    if ($('history-sign-in')) $('history-sign-in').hidden = Boolean(user);
+  };
   const consent = () => {
     const enabled = Boolean(user && $('usage-consent').checked);
     try { if (user) localStorage.setItem(consentKey(), enabled ? 'yes' : 'no'); } catch { /* Consent still applies in this tab. */ }
@@ -42,6 +52,8 @@ export function installHostedAccount(service, actions) {
   };
   async function refresh(authIdentity) {
     const own = ++generation;
+    busy = null;
+    historyRequest = null;
     let configured = false;
     try {
       const identity = authIdentity === undefined ? await service.getIdentity() : authIdentity;
@@ -50,11 +62,14 @@ export function installHostedAccount(service, actions) {
         analytics.setConsent(false);
         $('cloud-recordings-list').replaceChildren();
         $('cloud-recordings-status').textContent = '';
-        historyRequest = null;
-        $('cloud-history-refresh').disabled = false;
+        historyCount(0);
         actions.accountChanged(identity?.id || '');
       }
       user = identity;
+      if (!user) historyCount(0);
+      else if ($('history-count')) $('history-count').hidden = false;
+      syncHistoryControls();
+      if (!user) $('cloud-recordings-status').textContent = 'Sign in to see rehearsals saved privately to your account.';
       $('oauth-options').hidden = Boolean(user);
       $('account-details').hidden = !user;
       $('usage-consent').checked = Boolean(user && readConsent());
@@ -72,7 +87,7 @@ export function installHostedAccount(service, actions) {
       $('account-summary').textContent = user ? 'Private recording history · free for everyone' : '';
       await actions.recoverPending?.();
       if (own !== generation || disposed) return;
-      if (user) await refreshHistory(); else { $('cloud-recordings-list').replaceChildren(); $('cloud-recordings-status').textContent = 'Sign in to see recordings saved privately to your account.'; }
+      if (user) await refreshHistory(); else { $('cloud-recordings-list').replaceChildren(); historyCount(0); }
     } catch (error) {
       if (own === generation && !disposed) {
         status(error.message);
@@ -82,13 +97,15 @@ export function installHostedAccount(service, actions) {
   }
   async function refreshHistory() {
     const own = generation;
-    if (!user || disposed) return;
+    if (!user || disposed) { syncHistoryControls(); return; }
     if (historyRequest?.generation === own) return historyRequest.promise;
     const request = { generation: own }; historyRequest = request;
-    $('cloud-history-refresh').disabled = true;
+    syncHistoryControls();
+    $('cloud-recordings-status').textContent = 'Loading your saved rehearsals…';
     request.promise = (async () => { try {
       const { recordings } = await service.request('/api/recordings');
       if (own !== generation || disposed) return;
+      if (!Array.isArray(recordings)) throw new Error('The history response was incomplete.');
       const list = $('cloud-recordings-list');
       list.replaceChildren();
       for (const record of recordings || []) {
@@ -96,37 +113,56 @@ export function installHostedAccount(service, actions) {
         const info = document.createElement('div'); info.className = 'saved-recording-meta';
         const title = document.createElement('strong'); title.textContent = record.title || 'My rehearsal';
         const date = document.createElement('span'); date.className = 'saved-recording-info';
-        date.textContent = `${new Date(record.createdAt).toLocaleString()} · ${Math.floor(record.durationSeconds / 60)}:${String(Math.floor(record.durationSeconds % 60)).padStart(2, '0')}`;
+        const created = new Date(record.createdAt ?? NaN);
+        const dateLabel = Number.isFinite(created.getTime()) ? created.toLocaleString() : 'Date unavailable';
+        date.textContent = dateLabel;
         info.append(title, date);
+        const duration = document.createElement('span'); duration.className = 'saved-recording-duration';
+        const seconds = record.durationSeconds;
+        duration.textContent = typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0
+          ? `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}` : '—';
+        const state = document.createElement('span'); state.className = 'saved-recording-state';
+        const labels = { analyzed: 'Feedback ready', transcribed: 'Ready to analyze', transcribing: 'Transcribing',
+          pending: 'Needs transcription', failed: 'Needs attention', deleting: 'Deleting' };
+        state.textContent = Object.hasOwn(labels, record.status) ? labels[record.status] : 'Status unavailable';
         const buttons = document.createElement('div'); buttons.className = 'saved-recording-actions';
         for (const [label, action] of [['Open', async () => {
           if (!actions.canReplaceAudio()) throw new Error('Finish or cancel your current recording or analysis before opening another take.');
-          const saved = await service.openRecording(record.id);
-          if (own === generation) actions.restoreRecording(saved);
+          const viewGeneration = actions.captureViewGeneration?.();
+          let saved;
+          try { saved = await service.openRecording(record.id); }
+          catch (error) { if (actions.isViewGenerationCurrent?.(viewGeneration) === false) return; throw error; }
+          if (own !== generation || disposed) return;
+          if (actions.isViewGenerationCurrent?.(viewGeneration) === false) return;
+          if (!actions.canReplaceAudio()) throw new Error('Finish or cancel your current recording or analysis before opening another take.');
+          actions.restoreRecording(saved, { showRehearse: true, viewGeneration });
         }], ['Delete', async () => {
           if (!actions.canReplaceAudio()) throw new Error('Finish or cancel your current recording or analysis before deleting a take.');
           if (!window.confirm('Permanently delete this saved recording, transcript, and feedback from your account?')) return;
           await service.request(`/api/recordings/${record.id}`, { method: 'DELETE' });
+          if (own !== generation || disposed) return;
           actions.recordingDeleted(record.id);
           await refreshHistory();
         }]]) {
-          const button = document.createElement('button'); button.type = 'button'; button.className = 'text-button'; button.textContent = label;
-          button.setAttribute('aria-label', `${label} ${record.title || 'My rehearsal'} from ${new Date(record.createdAt).toLocaleString()}`);
+          const button = document.createElement('button'); button.type = 'button'; button.className = label === 'Open' ? 'secondary-button small-button' : 'text-button saved-recording-delete'; button.textContent = label;
+          button.setAttribute('aria-label', `${label} ${record.title || 'My rehearsal'} from ${dateLabel}`);
           button.addEventListener('click', async () => {
-            if (busy) return;
-            busy = true; list.querySelectorAll('button').forEach(item => { item.disabled = true; });
-            try { await action(); } catch (error) { $('cloud-recordings-status').textContent = error.message; }
-            finally { busy = false; list.querySelectorAll('button').forEach(item => { item.disabled = false; }); }
+            if (disposed || own !== generation || busy?.generation === own || historyRequest?.generation === own) return;
+            const operation = { generation: own }; busy = operation; syncHistoryControls();
+            try { await action(); } catch (error) { if (own === generation && !disposed) $('cloud-recordings-status').textContent = error.message; }
+            finally { if (busy === operation) { busy = null; syncHistoryControls(); } }
           });
           buttons.append(button);
         }
-        row.append(info, buttons); list.append(row);
+        row.append(info, duration, state, buttons); list.append(row);
       }
+      historyCount(recordings?.length || 0);
+      syncHistoryControls();
       $('cloud-recordings-status').textContent = recordings?.length ? 'Private to your account. Open a take to revisit its transcript and feedback.' : liveTranscription
         ? 'No cloud recordings yet. Stop your recording to save the complete take privately.'
         : 'No cloud recordings yet. Create transcript or Analyze saves the current take privately.';
-    } catch (error) { if (own === generation) $('cloud-recordings-status').textContent = error.message; }
-    finally { if (historyRequest === request) { historyRequest = null; $('cloud-history-refresh').disabled = false; } }
+    } catch (error) { if (own === generation && !disposed) $('cloud-recordings-status').textContent = `Saved rehearsals couldn’t be loaded. Try again. ${error.message}`; }
+    finally { if (historyRequest === request) { historyRequest = null; syncHistoryControls(); } }
     })();
     return request.promise;
   }
@@ -150,12 +186,17 @@ export function installHostedAccount(service, actions) {
   $('account-close').addEventListener('click', close);
   $('usage-consent').addEventListener('change', consent);
   $('cloud-history-refresh').addEventListener('click', refreshHistory);
+  $('history-sign-in')?.addEventListener('click', show);
   $('cloud-recordings-details').addEventListener('toggle', () => { if ($('cloud-recordings-details').open) refreshHistory(); });
 
   let section = 'prepare';
   const sections = [['prepare', document.querySelector('.prepare-panel')], ['rehearse', document.querySelector('.record-panel')], ['feedback', $('report')]];
   const updateView = () => {
-    const visible = sections.filter(([, el]) => !el.hidden).map(([name, el]) => {
+    const visible = sections.filter(([, el]) => {
+      if (!el) return false;
+      for (let ancestor = el; ancestor; ancestor = ancestor.parentElement) if (ancestor.hidden) return false;
+      return true;
+    }).map(([name, el]) => {
       const rect = el.getBoundingClientRect();
       return { name, area: Math.max(0, Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top)) * Math.max(0, Math.min(innerWidth, rect.right) - Math.max(0, rect.left)) };
     }).sort((a, b) => b.area - a.area);
@@ -164,7 +205,7 @@ export function installHostedAccount(service, actions) {
   };
   const activity = () => { analytics.activity(); updateView(); };
   const visibility = () => { updateView(); if (document.hidden) analytics.flush(); };
-  const events = ['pointerdown', 'keydown', 'scroll'];
+  const events = ['pointerdown', 'click', 'keydown', 'scroll'];
   events.forEach(name => window.addEventListener(name, activity, { passive: true }));
   window.addEventListener('focus', activity); window.addEventListener('blur', updateView);
   document.addEventListener('visibilitychange', visibility);

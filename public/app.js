@@ -24,6 +24,7 @@ const state = {
   cloudRecordingId: '', accountId: '', recoveryController: null, recoveryPending: Boolean(window.rehearsalService?.hosted), recoveryNeedsConfig: false,
   audioPreparationGeneration: 0, audioMetadataCancel: null, processing: null,
   cancelRestartPending: false, cancelConfirmation: null,
+  currentPage: 'rehearse', viewGeneration: 0,
   chat: null, chatContextKey: 0, summaryTranscript: '', transcriptSelectionAttached: false,
 };
 
@@ -90,6 +91,52 @@ function setStatus(message, type = '') {
   $('app-status').textContent = message;
   $('app-status').className = `app-status ${type}`;
   $('app-status').hidden = !message;
+}
+function captureViewGeneration() {
+  return { view: state.viewGeneration, audio: state.audioGeneration };
+}
+function isViewGenerationCurrent(token) {
+  return token?.view === state.viewGeneration && token?.audio === state.audioGeneration;
+}
+function updatePageHash() {
+  if (window.history?.replaceState && window.location) {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search || ''}#${state.currentPage}`);
+  }
+}
+function showPage(page, { focus = true, updateHash = true, initial = false } = {}) {
+  const next = page === 'history' ? 'history' : 'rehearse';
+  if (next === 'history' && (state.recording || state.startingRecording || state.requestingMic || state.preparingAudio || state.recoveryPending && !initial || state.cancelRestartPending)) {
+    setStatus('Finish your current recording or request before opening My saved rehearsals. Your take is still here.');
+    updatePageHash();
+    return false;
+  }
+  state.currentPage = next;
+  state.viewGeneration++;
+  state.libraryFocus = null;
+  $('rehearse-page').hidden = next !== 'rehearse';
+  $('history-page').hidden = next !== 'history';
+  for (const name of ['rehearse', 'history']) {
+    const tab = $(`${name}-tab`);
+    if (name === next) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  if (updateHash) updatePageHash();
+  if (focus) {
+    if (next === 'history') $('history-heading').focus({ preventScroll: true });
+    else $('rehearse-tab').focus({ preventScroll: true });
+    $(`${next}-page`).scrollIntoView({ block: 'start' });
+  }
+  return true;
+}
+function startNewRehearsal(event = {}) {
+  state.viewGeneration++;
+  if (state.audioBlob || state.recording || state.startingRecording || state.requestingMic || state.busy || state.liveTake || state.livePromise || state.recoveryPending || state.cancelRestartPending) {
+    openCancelRestart(event);
+    if (state.cancelConfirmation) state.cancelConfirmation.showRehearse = true;
+    return;
+  }
+  showPage('rehearse');
+  $('record-button').focus({ preventScroll: true });
 }
 function beginProcessing({ analysis = false, needsTranscript = true, signal } = {}) {
   state.processing?.clear();
@@ -192,8 +239,11 @@ async function confirmCancelRestart(event = {}) {
   } finally {
     state.cancelRestartPending = false;
     $('cancel-restart-keep').disabled = false; $('cancel-restart-confirm').disabled = false;
-    syncRecordingControls(); syncAnalysisControls(); syncCancelControls();
-    if (canceled) $('record-button').focus();
+    syncRecordingControls(); syncAnalysisControls(); syncCancelControls(); syncRecordingLibraryControls();
+    if (canceled) {
+      if (confirmation.showRehearse) showPage('rehearse');
+      $('record-button').focus();
+    }
   }
 }
 async function api(path, options = {}) {
@@ -380,6 +430,7 @@ function updateConfig(config) {
   if (state.config.transcriptionModel !== previousSpeechModel && !manualPanelTranscript) resetTranscriptForModelChange();
   $('cloud-recordings-details').hidden = !state.config.hosted;
   $('saved-recordings-details').hidden = Boolean(state.config.hosted);
+  $('history-privacy').textContent = state.config.hosted ? 'Only available to your signed-in account.' : 'Saved only in this browser.';
   $('connection-label').textContent = state.config.hosted
     ? state.config.auth?.signedIn ? 'My account' : 'Sign in'
     : state.config.coachingViaHost ? 'Codex coaching' : 'Connection unavailable';
@@ -729,7 +780,7 @@ function cancelLiveSession() {
   else take?.session?.cancel();
   $('live-transcription-cancel').hidden = true;
   $('follow-transcript').classList.remove('is-live');
-  syncAnalysisControls(); syncCancelControls();
+  syncAnalysisControls(); syncCancelControls(); syncRecordingLibraryControls();
 }
 function showLiveFallback(message) {
   state.liveFailure = message;
@@ -779,10 +830,10 @@ function finishLiveTranscription() {
     throw error;
   }).finally(() => {
     if (state.livePromise === promise) state.livePromise = null;
-    syncAnalysisControls(); syncCancelControls();
+    syncAnalysisControls(); syncCancelControls(); syncRecordingLibraryControls();
   });
   state.livePromise = promise;
-  syncAnalysisControls(); syncCancelControls();
+  syncAnalysisControls(); syncCancelControls(); syncRecordingLibraryControls();
   // A take saves even if its independent transcription queue fails.
   promise.catch(() => {});
 }
@@ -913,8 +964,11 @@ function recordingStore() {
   if (!window.rehearsalRecordings) throw new Error('Browser saving is unavailable. Download your audio to keep it.');
   return window.rehearsalRecordings;
 }
+function canReplaceCurrentAudio() {
+  return !state.recoveryPending && !state.cancelRestartPending && !state.recording && !state.startingRecording && !state.busy && !state.requestingMic && !state.preparingAudio && !state.transcriptPromise && !state.liveTake && !state.livePromise;
+}
 function syncRecordingLibraryControls() {
-  const blocked = state.busy || state.recording || state.startingRecording || state.requestingMic || state.libraryBusy;
+  const blocked = !canReplaceCurrentAudio() || state.libraryBusy;
   if (blocked) rememberRecordingLibraryFocus();
   for (const button of $('saved-recordings-list').querySelectorAll('button')) button.disabled = blocked;
   $('download-audio').disabled = !state.audioBlob;
@@ -931,6 +985,7 @@ function restoreRecordingLibraryFocus() {
   const focus = state.libraryFocus;
   if (!focus) return;
   state.libraryFocus = null;
+  if ($('history-page').hidden) return;
   const active = document.activeElement;
   if (active && active !== document.body && active !== focus.element) return;
   const list = $('saved-recordings-list');
@@ -999,11 +1054,17 @@ function renderSavedRecordings() {
   list.replaceChildren();
   const records = [...state.unsavedRecordings.values(), ...state.savedRecordings.filter((record) => !state.unsavedRecordings.has(record.id))];
   $('saved-recordings-count').textContent = state.unsavedRecordings.size ? `${state.savedRecordings.length} saved · ${state.unsavedRecordings.size} unsaved` : String(state.savedRecordings.length);
+  if (!state.config.hosted) {
+    $('history-count').textContent = String(records.length);
+    $('history-privacy').textContent = 'Saved only in this browser.';
+  }
   for (const [index, record] of records.entries()) {
     const row = addText('div', '', 'saved-recording-row');
     const meta = addText('div', '', 'saved-recording-meta');
     const date = new Date(record.createdAt).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
-    meta.append(addText('strong', record.caption, 'saved-recording-title'), addText('span', `${date} · ${formatTime(record.duration)}${record.status === 'failed' ? ' · Not saved; download to keep' : ''}`, 'saved-recording-info'));
+    meta.append(addText('strong', record.caption, 'saved-recording-title'), addText('span', date, 'saved-recording-info'));
+    const duration = addText('span', formatTime(record.duration), 'saved-recording-duration');
+    const status = addText('span', record.status === 'failed' ? 'Not saved; download to keep' : 'Saved in this browser', 'saved-recording-state');
     const actions = addText('div', '', 'saved-recording-actions');
     for (const [label, action] of [['Open', () => openSavedRecording(record.id)], ['Download', () => downloadSavedRecording(record.id)], ['Delete', () => deleteSavedRecording(record.id)]]) {
       const button = addText('button', label, `text-button${label === 'Delete' ? ' saved-recording-delete' : ''}`);
@@ -1015,7 +1076,7 @@ function renderSavedRecordings() {
       button.addEventListener('click', action);
       actions.append(button);
     }
-    row.append(meta, actions);
+    row.append(meta, duration, status, actions);
     list.append(row);
   }
   renderRecordingLibraryStatus();
@@ -1037,18 +1098,20 @@ async function refreshSavedRecordings() {
   }
 }
 async function openSavedRecording(id) {
-  if (state.recording || state.startingRecording || state.requestingMic || state.busy || state.libraryBusy) return;
+  if (!canReplaceCurrentAudio() || state.libraryBusy) return;
   const generation = ++state.libraryOpenGeneration;
   const audioGeneration = state.audioGeneration;
+  const viewGeneration = state.viewGeneration;
   state.libraryBusy = true;
   syncRecordingLibraryControls();
   try {
     const record = state.unsavedRecordings.get(id) || await recordingStore().get(id);
-    if (generation !== state.libraryOpenGeneration || audioGeneration !== state.audioGeneration || state.recording || state.busy || state.requestingMic) return;
+    if (generation !== state.libraryOpenGeneration || audioGeneration !== state.audioGeneration || viewGeneration !== state.viewGeneration || !canReplaceCurrentAudio()) return;
     if (!record) throw new Error('This recording is no longer saved in this browser.');
     setAudio(record.blob, record.duration, record.caption, { savedRecording: record });
     $('record-title').textContent = 'Live Transcript';
     setStatus(record.status === 'failed' ? 'This take is only in this tab. Download it or try saving again.' : 'Saved recording opened. Replay creates its transcript on this device.');
+    showPage('rehearse');
   } catch (error) { $('saved-recordings-status').textContent = errorMessage(error); }
   finally { state.libraryBusy = false; syncRecordingLibraryControls(); }
 }
@@ -1077,7 +1140,7 @@ async function downloadSavedRecording(id) {
   } catch (error) { $('saved-recordings-status').textContent = errorMessage(error); }
 }
 async function deleteSavedRecording(id) {
-  if (state.libraryBusy || state.recording || state.startingRecording || state.requestingMic || state.busy) return;
+  if (state.libraryBusy || !canReplaceCurrentAudio()) return;
   state.libraryBusy = true;
   syncRecordingLibraryControls();
   try {
@@ -1293,11 +1356,12 @@ function ensureTranscript(progress = null) {
     } finally {
       if (state.transcriptPromise === promise) {
         state.transcriptPromise = null; state.transcriptController = null;
-        syncCancelControls();
+        syncCancelControls(); syncRecordingLibraryControls();
       }
     }
   })();
   state.transcriptPromise = promise;
+  syncRecordingLibraryControls();
   return promise;
 }
 function maybeTranscribeForPlayback() {
@@ -1434,6 +1498,7 @@ async function runAnalysis({ corrected = false } = {}) {
   const signal = state.requestController.signal;
   const generation = ++state.analysisGeneration;
   const audioGeneration = state.audioGeneration;
+  const viewGeneration = state.viewGeneration;
   const progress = beginProcessing({ analysis: true, needsTranscript: !corrected && !(state.transcriptGeneration === audioGeneration && state.transcriptText.trim()), signal });
   setBusy(true, state.transcriptText.trim() || corrected ? 'Reviewing your transcript and preparing coaching…' : 'Transcribing your rehearsal. You can keep listening while your words are prepared…');
   try {
@@ -1456,7 +1521,7 @@ async function runAnalysis({ corrected = false } = {}) {
     window.rehearsalAccount?.track(report.analysis?.method === 'ai' ? 'analysis_completed' : 'analysis_failed');
     window.rehearsalAccount?.refreshHistory();
     setStatus(state.transcriptText !== text ? 'The transcript changed while feedback was being prepared. Update feedback to analyze your latest corrections.' : '');
-    $('summary-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (state.currentPage === 'rehearse' && viewGeneration === state.viewGeneration) $('summary-workspace').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) {
     progress.finish(error.name === 'AbortError' ? 'cancelled' : 'error', error.name === 'AbortError' ? '' : errorMessage(error));
     if (error.name !== 'AbortError') window.rehearsalAccount?.track('analysis_failed');
@@ -1728,7 +1793,9 @@ window.rehearsalHostedActions = {
       }
     }
   },
-  canReplaceAudio: () => !state.recoveryPending && !state.cancelRestartPending && !state.recording && !state.startingRecording && !state.busy && !state.requestingMic && !state.transcriptPromise && !state.liveTake && !state.livePromise,
+  canReplaceAudio: canReplaceCurrentAudio,
+  captureViewGeneration,
+  isViewGenerationCurrent,
   accountChanged(id) {
     if (state.accountId === id) return;
     state.accountId = id;
@@ -1752,7 +1819,8 @@ window.rehearsalHostedActions = {
     state.config.analysisConfigured = false;
     updateConfig(state.config);
   },
-  restoreRecording(record) {
+  restoreRecording(record, { showRehearse = false, viewGeneration } = {}) {
+    if (viewGeneration && !isViewGenerationCurrent(viewGeneration)) return;
     if (!window.rehearsalHostedActions.canReplaceAudio()) throw new Error('Finish your current take before opening another recording.');
     state.chatContextKey++;
     syncChat();
@@ -1772,6 +1840,7 @@ window.rehearsalHostedActions = {
     $('audio-save-status').textContent = 'Saved privately to your account.';
     $('record-title').textContent = 'Live Transcript';
     setStatus('Saved rehearsal opened. Replay does not upload or reprocess the recording.');
+    if (showRehearse) showPage('rehearse');
   },
   recordingDeleted(id) {
     if (state.cloudRecordingId !== id) return;
@@ -1783,6 +1852,14 @@ window.rehearsalHostedActions = {
 };
 
 $('settings-open').addEventListener('click', openSettings);
+$('rehearse-tab').addEventListener('click', () => showPage('rehearse'));
+$('history-tab').addEventListener('click', () => showPage('history'));
+$('new-rehearsal').addEventListener('click', startNewRehearsal);
+window.addEventListener('hashchange', () => {
+  const page = window.location?.hash?.slice(1);
+  if (page === 'rehearse' || page === 'history') showPage(page);
+});
+if (window.location?.hash === '#history') showPage('history', { focus: false, initial: true });
 $('cloud-recovery-retry').addEventListener('click', async () => {
   if ($('cloud-recovery-retry').disabled) return;
   if (!state.recoveryNeedsConfig) return window.rehearsalHostedActions.recoverPending();

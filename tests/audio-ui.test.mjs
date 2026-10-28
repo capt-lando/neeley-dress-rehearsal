@@ -89,7 +89,7 @@ class Element {
   }
   click() { this.clicked = true; return Promise.all((this.listeners.get('click') || []).map(handler => handler({ type: 'click', target: this, preventDefault() {} }))); }
   select() {}
-  scrollIntoView() {}
+  scrollIntoView() { this.scrollCalls = (this.scrollCalls || 0) + 1; }
   scrollTo({ top }) { this.scrollTop = top; }
   load() { this.currentTime = 0; }
   pause() { this.paused = true; }
@@ -106,7 +106,7 @@ function deferred() {
 
 function response(value) { return value; }
 
-function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, extractRubric = async () => { throw new Error('Unexpected document extraction'); }, prepareRubricPreview, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
+function harness(requestImpl = async () => { throw new Error('Unexpected rehearsal service request'); }, { startup = false, hosted = false, initialHash = '', extractRubric = async () => { throw new Error('Unexpected document extraction'); }, prepareRubricPreview, mediaDevices = {}, permissions, recordings = {}, decodeAudioData, validateUploadHeader = async () => {}, audioMetadata = audio => (audio.listeners.get('loadedmetadata') || []).forEach(handler => handler()) } = {}) {
   const elements = new Map();
   const missingIds = [];
   let ownerDocument;
@@ -115,6 +115,7 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
       const element = Object.assign(new Element(), { ownerDocument });
       if (id === 'input-level') element.append(...Array.from({ length: meterBarCount }, () => new Element()));
       if (id === 'saved-recordings-details') element.append(Object.assign(new Element(), { tagName: 'SUMMARY', ownerDocument }));
+      if (id === 'history-page') element.hidden = true;
       elements.set(id, element);
     }
     return elements.get(id);
@@ -170,7 +171,8 @@ function harness(requestImpl = async () => { throw new Error('Unexpected rehears
     },
     window: {
       AudioContext, matchMedia: () => ({ matches: false }), addEventListener: (...args) => windowEvents.addEventListener(...args),
-      rehearsalService: { request: requestImpl, setProgressHandler(handler) { progressHandler = handler; } },
+      rehearsalService: { hosted, request: requestImpl, setProgressHandler(handler) { progressHandler = handler; } },
+      location: { pathname: '/practice/', search: '', hash: initialHash },
       rehearsalDocuments: { extractRubric, prepareRubricPreview },
       rehearsalRecordings: recordingStore,
     },
@@ -198,7 +200,7 @@ globalThis.audioTest = {
   runAnalysis, renderReport, annotationSegments, buildAnnotatedDocument, renderAnnotatedTranscript,
   analysisInput, updateTargetHint, setTargetView, loadPromptPreview, importRubric, removeRubric, openRubricPreview, showRubricPage, importAssignment, removeAssignment, preparationDocuments, setBusy,
   autosaveRecording, refreshSavedRecordings, renderSavedRecordings, openSavedRecording, deleteSavedRecording,
-  downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving
+  downloadCurrentAudio, downloadSavedRecording, warnBeforeLeaving, showPage, startNewRehearsal, captureViewGeneration, isViewGenerationCurrent
 };`, context);
   const emit = async (target, type, event = {}) => Promise.all((target.listeners.get(type) || []).map(handler => handler({ type, ...event })));
   return { ...context.audioTest, get, revoked, missingIds, document: context.document, navigator: context.navigator, window: context.window,
@@ -723,6 +725,7 @@ test('an out-of-order saved-list refresh cannot resurrect stale metadata', async
 test('returning to the app preserves the same saved-recording action without taking focus from other fields', async () => {
   const h = harness(async () => response({ analysisConfigured: false }), { startup: true });
   await nextTurn();
+  h.showPage('history');
   h.savedRecords.set('first', savedTake('first', 'First take'));
   h.savedRecords.set('second', savedTake('second', 'Second take'));
   h.get('saved-recordings-details').open = true;
@@ -740,6 +743,7 @@ test('returning to the app preserves the same saved-recording action without tak
 test('deleting a focused take waits for enabled controls and focuses the next take, previous take, or disclosure', async () => {
   const removed = deferred();
   const h = harness(undefined, { recordings: { async remove(id) { await removed.promise; h.savedRecords.delete(id); } } });
+  h.showPage('history');
   for (const caption of ['First', 'Middle', 'Last']) h.savedRecords.set(caption, savedTake(caption, caption));
   h.get('saved-recordings-details').open = true;
   await h.refreshSavedRecordings();
@@ -761,6 +765,7 @@ test('deleting a focused take waits for enabled controls and focuses the next ta
 test('finishing deletion does not steal focus when the user moves outside the saved library', async () => {
   const removed = deferred();
   const h = harness(undefined, { recordings: { async remove(id) { await removed.promise; h.savedRecords.delete(id); } } });
+  h.showPage('history');
   h.savedRecords.set('first', savedTake('first', 'First'));
   h.savedRecords.set('next', savedTake('next', 'Next'));
   h.get('saved-recordings-details').open = true;
@@ -2373,6 +2378,133 @@ test('recovery errors show a retry and late results cannot overwrite newer local
   await recovery;
   assert.equal(h.state.audioBlob, newer); assert.equal(h.state.transcriptText, '');
   assert.notEqual(h.get('cloud-recovery-message').textContent, 'Old result');
+});
+
+test('history is a separate page that retains preparation and refuses to hide active capture', () => {
+  const h = harness();
+  h.get('target-script').value = 'Keep this script';
+  const chat = { update() {} }; h.state.chat = chat;
+  assert.equal(h.showPage('history'), true);
+  assert.equal(h.get('rehearse-page').hidden, true);
+  assert.equal(h.get('history-page').hidden, false);
+  assert.equal(h.get('history-tab').getAttribute('aria-current'), 'page');
+  assert.equal(h.document.activeElement, h.get('history-heading'));
+  h.showPage('rehearse');
+  for (const field of ['recording', 'startingRecording', 'requestingMic', 'preparingAudio', 'recoveryPending', 'cancelRestartPending']) {
+    h.state[field] = true;
+    assert.equal(h.showPage('history'), false, field);
+    assert.equal(h.get('rehearse-page').hidden, false);
+    assert.equal(h.state[field], true, 'navigation must not cancel work');
+    h.state[field] = false;
+  }
+  assert.equal(h.get('target-script').value, 'Keep this script');
+  assert.equal(h.state.chat, chat);
+});
+
+test('new rehearsal preserves the take until confirmed and only navigates after acknowledged cancellation', async () => {
+  const h = harness(); h.updateConfig(hostedConfig);
+  const blob = new Blob(['current']); h.setAudio(blob, 4, 'Current');
+  const saved = savedTake('older'); h.savedRecords.set(saved.id, saved);
+  h.get('target-script').value = 'Keep preparation'; h.showPage('history');
+  h.startNewRehearsal(); h.closeCancelRestart();
+  assert.equal(h.state.audioBlob, blob); assert.equal(h.state.currentPage, 'history');
+  h.window.rehearsalService.cancelCurrentRequest = async () => { throw new Error('Offline'); };
+  h.startNewRehearsal(); await h.confirmCancelRestart();
+  assert.equal(h.state.audioBlob, blob); assert.equal(h.state.currentPage, 'history');
+  assert.equal(h.get('cancel-restart-dialog').open, true);
+  h.window.rehearsalService.cancelCurrentRequest = async () => ({ cancelled: true });
+  await h.confirmCancelRestart();
+  assert.equal(h.state.audioBlob, null); assert.equal(h.state.currentPage, 'rehearse');
+  assert.equal(h.get('target-script').value, 'Keep preparation');
+  assert.equal(h.savedRecords.get(saved.id), saved); assert.equal(h.storageCalls.remove.length, 0);
+  assert.equal(h.document.activeElement, h.get('record-button'));
+});
+
+test('background feedback and recovery do not navigate or scroll away from history', async () => {
+  const pending = deferred(); const h = harness(() => pending.promise);
+  h.updateConfig(hostedConfig); h.get('transcript').value = 'A corrected transcript.';
+  const analysis = h.runAnalysis({ corrected: true }); await nextTurn();
+  h.showPage('history');
+  pending.resolve({ transcript: 'A corrected transcript.', analysis: { method: 'ai', overallRating: 80 } });
+  await analysis;
+  assert.equal(h.state.currentPage, 'history');
+  assert.equal(h.get('summary-workspace').scrollCalls || 0, 0);
+  const record = { id: 'recovered', blob: new Blob(['saved']), durationSeconds: 4, transcript: 'Recovered words.' };
+  h.window.rehearsalHostedActions.restoreRecording(record);
+  assert.equal(h.state.currentPage, 'history');
+  assert.equal(h.document.activeElement, h.get('history-heading'));
+  h.window.rehearsalHostedActions.restoreRecording(record, { showRehearse: true, viewGeneration: h.captureViewGeneration() });
+  assert.equal(h.state.currentPage, 'rehearse');
+});
+
+test('late history opens cannot replace or navigate after a new rehearsal or tab selection', async () => {
+  for (const action of ['new', 'tab']) {
+    const pending = deferred(); const h = harness(undefined, { recordings: { get: () => pending.promise } });
+    h.showPage('history');
+    const token = h.captureViewGeneration();
+    const opening = h.openSavedRecording('old');
+    if (action === 'new') h.startNewRehearsal(); else h.showPage('rehearse');
+    assert.equal(h.isViewGenerationCurrent(token), false);
+    pending.resolve(savedTake('old')); await opening;
+    assert.equal(h.state.audioBlob, null); assert.equal(h.state.currentPage, 'rehearse');
+    assert.equal(h.document.activeElement, h.get(action === 'new' ? 'record-button' : 'rehearse-tab'));
+    h.window.rehearsalHostedActions.restoreRecording({ blob: new Blob(['late']), durationSeconds: 4 }, { showRehearse: true, viewGeneration: token });
+    assert.equal(h.state.audioBlob, null);
+  }
+});
+
+test('hash navigation uses the recording guard and preserves query parameters', async () => {
+  const h = harness(async () => response({ analysisConfigured: false }), { startup: true }); await nextTurn();
+  h.window.location = { pathname: '/practice/', search: '?code=keep', hash: '#history' };
+  const urls = []; h.window.history = { replaceState: (_state, _title, url) => urls.push(url) };
+  h.state.recording = true; await h.emitWindowEvent('hashchange');
+  assert.equal(h.state.currentPage, 'rehearse'); assert.equal(urls.at(-1), '/practice/?code=keep#rehearse');
+  h.state.recording = false; await h.emitWindowEvent('hashchange');
+  assert.equal(h.state.currentPage, 'history'); assert.equal(urls.at(-1), '/practice/?code=keep#history');
+});
+
+test('opening a hosted history link preserves that page while startup recovery runs', async () => {
+  const h = harness(async () => response(hostedConfig), { startup: true, hosted: true, initialHash: '#history' });
+  assert.equal(h.state.recoveryPending, true);
+  assert.equal(h.state.currentPage, 'history');
+  assert.equal(h.get('history-page').hidden, false);
+  assert.equal(h.get('rehearse-page').hidden, true);
+  await nextTurn();
+  assert.equal(h.state.currentPage, 'history');
+});
+
+test('opening local history cannot cancel a transcript that is still finishing', async () => {
+  const h = harness(); const live = { marker: 'finishing' };
+  h.state.liveTake = live; h.state.livePromise = Promise.resolve(); h.showPage('history');
+  await h.openSavedRecording('old');
+  assert.equal(h.storageCalls.get.length, 0); assert.equal(h.state.liveTake, live);
+  assert.equal(h.state.currentPage, 'history');
+  const pending = deferred(); const late = harness(undefined, { recordings: { get: () => pending.promise } });
+  late.showPage('history'); const opening = late.openSavedRecording('old');
+  late.state.transcriptPromise = Promise.resolve();
+  pending.resolve(savedTake('old')); await opening;
+  assert.equal(late.state.audioBlob, null); assert.equal(late.state.currentPage, 'history');
+});
+
+test('local history actions unlock when independent transcription settles', async () => {
+  const pending = deferred(); const h = harness(() => pending.promise);
+  h.setAudio(new Blob(['audio']), 4, 'Current'); await settleAudioSaves(h);
+  h.showPage('history');
+  const transcript = h.ensureTranscript();
+  assert.ok(h.get('saved-recordings-list').querySelectorAll('button').every(button => button.disabled));
+  pending.resolve({ text: 'Complete words.' }); await transcript;
+  assert.ok(h.get('saved-recordings-list').querySelectorAll('button').every(button => !button.disabled));
+  assert.equal(h.state.currentPage, 'history');
+});
+
+test('refreshing or deleting a hidden history row cannot move focus out of rehearsal', async () => {
+  const pending = deferred(); const h = harness(undefined, { recordings: { remove: () => pending.promise } });
+  h.savedRecords.set('old', savedTake('old', 'Old')); h.showPage('history');
+  h.get('saved-recordings-details').open = true; await h.refreshSavedRecordings();
+  libraryAction(h, 'Old', 'Delete').focus(); const deletion = h.deleteSavedRecording('old');
+  h.showPage('rehearse'); pending.resolve(); await deletion; await h.refreshSavedRecordings();
+  assert.equal(h.document.activeElement, h.get('rehearse-tab'));
+  assert.equal(h.get('history-page').hidden, true);
 });
 
 test('cancel and start over requires a separate moved-pointer confirmation and discards capture without autosaving', async () => {

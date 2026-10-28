@@ -11,22 +11,23 @@ const accountSource = (await readFile(new URL('../public/hosted-account.js', imp
   .replace(/^import .*\r?\n/gm, '').replace(/^export /gm, '').replaceAll('import.meta.env', 'undefined');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
-function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), prepareSpeech, recoverPending, configurationFailed, configurationReady } = {}) {
+function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription: true }), getIdentity = identity => Promise.resolve(identity), prepareSpeech, recoverPending, configurationFailed, configurationReady, analyticsFactory = createUsageAnalytics } = {}) {
   class Element {
-    constructor(tagName = 'DIV') { this.tagName = tagName; this.listeners = new Map(); this.children = []; this.disabled = false; this.textContent = ''; }
+    constructor(tagName = 'DIV') { this.tagName = tagName; this.listeners = new Map(); this.children = []; this.attributes = new Map(); this.disabled = false; this.textContent = ''; }
     addEventListener(name, callback) { this.listeners.set(name, callback); }
     removeEventListener(name) { this.listeners.delete(name); }
-    setAttribute() {}
-    append(...children) { this.children.push(...children); }
-    replaceChildren(...children) { this.children = children; }
+    setAttribute(name, value) { this.attributes.set(name, value); }
+    append(...children) { for (const child of children) child.parentElement = this; this.children.push(...children); }
+    replaceChildren(...children) { this.children = []; this.append(...children); }
     querySelector() { return this.note ||= new Element(); }
     querySelectorAll() { return this.children.flatMap(child => [...(child.tagName === 'BUTTON' ? [child] : []), ...child.querySelectorAll()]); }
-    getBoundingClientRect() { return { top: 0, bottom: 0, left: 0, right: 0 }; }
-    showModal() {} close() {}
+    getBoundingClientRect() { return this.rect || { top: 0, bottom: 0, left: 0, right: 0 }; }
+    showModal() { this.open = true; } close() { this.open = false; }
     click() { return this.listeners.get('click')?.(); }
   }
   const elements = new Map(), get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-  const histories = [], signouts = [], opens = [], deletes = [], restored = [], oauth = [], settings = deferred();
+  const histories = [], signouts = [], opens = [], deletes = [], restored = [], restoreOptions = [], deleted = [], oauth = [], settings = deferred();
+  let replaceAllowed = true, viewGeneration = 0;
   let settingsCalls = 0;
   let identity = { id: 'first-user' }, authChanged;
   const service = {
@@ -47,13 +48,17 @@ function accountHarness({ getConfig = () => Promise.resolve({ liveTranscription:
   };
   const window = Object.assign(new Element(), { confirm: () => true });
   const document = Object.assign(new Element(), { getElementById: get, querySelector: get, createElement: tag => new Element(tag.toUpperCase()), hasFocus: () => true });
-  const context = { window, document, createUsageAnalytics, readHostedConfig: () => config, innerHeight: 900, innerWidth: 1200,
+  const context = { window, document, createUsageAnalytics: analyticsFactory, readHostedConfig: () => config, innerHeight: 900, innerWidth: 1200,
     localStorage: { getItem: () => null }, setInterval: () => 1, clearInterval() {}, URL, location: { href: redirect }, AbortSignal,
     fetch: () => { settingsCalls++; return settings.promise; } };
   vm.createContext(context);
   vm.runInContext(`${accountSource}\nglobalThis.install = installHostedAccount;`, context);
-  context.install(service, { accountChanged() {}, updateConfig() {}, recoverPending, configurationFailed, configurationReady, canReplaceAudio: () => true, restoreRecording: value => restored.push(value), recordingDeleted() {} });
-  return { get, window, histories, signouts, opens, deletes, restored, oauth, settings, get settingsCalls() { return settingsCalls; }, changeUser(id) { identity = id ? { id } : null; return authChanged(identity); } };
+  context.install(service, { accountChanged() {}, updateConfig() {}, recoverPending, configurationFailed, configurationReady,
+    canReplaceAudio: () => replaceAllowed, captureViewGeneration: () => viewGeneration, isViewGenerationCurrent: value => value === viewGeneration,
+    restoreRecording(value, options) { restored.push(value); restoreOptions.push(options); }, recordingDeleted: id => deleted.push(id) });
+  return { get, window, histories, signouts, opens, deletes, restored, restoreOptions, deleted, oauth, settings,
+    setReplaceAllowed(value) { replaceAllowed = value; }, changeView() { viewGeneration++; },
+    get settingsCalls() { return settingsCalls; }, changeUser(id) { identity = id ? { id } : null; return authChanged(identity); } };
 }
 
 test('enabled Google and Microsoft sign-in use public settings before the existing OAuth flow', async () => {
@@ -106,7 +111,7 @@ test('1,000 history refresh actions share a request, clear on failure and allow 
   assert.equal(h.histories.length, 1); assert.equal(h.get('cloud-history-refresh').disabled, true);
   h.histories[0].reject(new Error('Retry later')); await Promise.all(refreshes);
   assert.equal(h.get('cloud-history-refresh').disabled, false);
-  assert.equal(h.get('cloud-recordings-status').textContent, 'Retry later');
+  assert.equal(h.get('cloud-recordings-status').textContent, 'Saved rehearsals couldn’t be loaded. Try again. Retry later');
   const retry = h.get('cloud-history-refresh').click();
   assert.equal(h.histories.length, 2);
   h.histories[1].resolve({ recordings: [] }); await retry;
@@ -136,7 +141,7 @@ test('rendered history clears immediately when another account configuration or 
     blockConfiguration = stalledStage === 'configuration';
     const changed = h.changeUser('second-user'); await turn();
     assert.equal(h.get('cloud-recordings-list').children.length, 0, 'old titles and buttons must disappear before new network work completes');
-    assert.equal(h.get('cloud-recordings-status').textContent, '');
+    assert.equal(h.get('cloud-recordings-status').textContent, blockConfiguration ? '' : 'Loading your saved rehearsals…');
     if (blockConfiguration) {
       assert.equal(h.histories.length, 1);
       assert.equal(h.get('cloud-history-refresh').disabled, false);
@@ -257,4 +262,123 @@ test('an old account configuration failure cannot show a recovery error in the n
   pending.reject(new Error('Old private account failed')); await turn();
   assert.deepEqual(failures, []); assert.notEqual(h.get('account-status').textContent, 'Old private account failed');
   h.histories[0].resolve({ recordings: [] }); await switched;
+});
+
+test('history rows separate real dates, durations, and lifecycle status without treating unknown state as ready', async () => {
+  const h = accountHarness(); await turn();
+  const statuses = ['analyzed', 'transcribed', 'transcribing', 'pending', 'failed', 'deleting', 'constructor'];
+  h.histories[0].resolve({ recordings: statuses.map((status, index) => ({ id: String(index), title: '<img src=x onerror=alert(1)>',
+    createdAt: '2026-10-28T16:00:00Z', durationSeconds: 134.9, status })) }); await turn();
+  const rows = h.get('cloud-recordings-list').children;
+  assert.equal(h.get('history-count').textContent, '7'); assert.equal(h.get('history-count').hidden, false);
+  assert.deepEqual(rows.map(row => row.children[2].textContent), [
+    'Feedback ready', 'Ready to analyze', 'Transcribing', 'Needs transcription', 'Needs attention', 'Deleting', 'Status unavailable',
+  ]);
+  for (const row of rows) {
+    assert.deepEqual(row.children.map(child => child.className), ['saved-recording-meta', 'saved-recording-duration', 'saved-recording-state', 'saved-recording-actions']);
+    assert.equal(row.children[0].children[0].textContent, '<img src=x onerror=alert(1)>');
+    assert.equal(row.children[0].children[0].children.length, 0, 'a title remains inert text');
+    assert.equal(row.children[0].children[1].textContent, new Date('2026-10-28T16:00:00Z').toLocaleString());
+    assert.equal(row.children[1].textContent, '2:14');
+    const [open, remove] = row.children[3].children;
+    assert.equal(open.className, 'secondary-button small-button');
+    assert.equal(remove.className, 'text-button saved-recording-delete');
+  }
+});
+
+test('history exposes loading, empty, and signed-out states with a shared count and sign-in action', async () => {
+  const h = accountHarness(); await turn();
+  assert.equal(h.get('cloud-recordings-status').textContent, 'Loading your saved rehearsals…');
+  assert.equal(h.get('history-sign-in').hidden, true);
+  h.histories[0].resolve({ recordings: [] }); await turn();
+  assert.match(h.get('cloud-recordings-status').textContent, /No cloud recordings yet/);
+  assert.equal(h.get('history-count').textContent, '0');
+  await h.changeUser(null);
+  assert.match(h.get('cloud-recordings-status').textContent, /^Sign in/);
+  assert.equal(h.get('history-sign-in').hidden, false);
+  assert.equal(h.get('history-count').textContent, '0'); assert.equal(h.get('history-count').hidden, true);
+  assert.equal(h.get('cloud-history-refresh').disabled, true);
+  h.get('history-sign-in').click(); assert.equal(h.get('account-dialog').open, true);
+  await h.window.rehearsalAccount.refreshHistory(); assert.equal(h.histories.length, 1, 'signed-out refresh does not fetch private history');
+});
+
+test('old Open failures and cleanup cannot overwrite or unlock the new account action', async () => {
+  const h = accountHarness(); await turn();
+  h.histories[0].resolve({ recordings: [{ id: 'a', title: 'A private title', createdAt: 0, durationSeconds: 1 }] }); await turn();
+  const oldOpen = h.get('cloud-recordings-list').querySelectorAll('button')[0];
+  const openingA = oldOpen.click();
+  const changed = h.changeUser('second-user'); await turn();
+  assert.equal(h.get('history-count').textContent, '0');
+  h.histories[1].resolve({ recordings: [{ id: 'b', title: 'B title', createdAt: 0, durationSeconds: 1 }] }); await changed;
+  const [newOpen, newDelete] = h.get('cloud-recordings-list').querySelectorAll('button');
+  const openingB = newOpen.click();
+  h.opens[0].reject(new Error('Private A failure')); await openingA;
+  assert.doesNotMatch(h.get('cloud-recordings-status').textContent, /Private A/);
+  assert.equal(newOpen.disabled, true); assert.equal(newDelete.disabled, true);
+  assert.equal(h.get('cloud-history-refresh').disabled, true);
+  await oldOpen.click(); assert.equal(h.opens.length, 2, 'detached prior-account buttons cannot make requests');
+  h.opens[1].resolve({ id: 'b' }); await openingB;
+  assert.deepEqual(h.restored, [{ id: 'b' }]);
+  assert.equal(h.restoreOptions[0].showRehearse, true); assert.equal(h.restoreOptions[0].viewGeneration, 0);
+  assert.equal(newOpen.disabled, false); assert.equal(h.get('cloud-history-refresh').disabled, false);
+});
+
+test('old Delete completion cannot mutate or refresh the new account history', async () => {
+  const h = accountHarness(); await turn();
+  h.histories[0].resolve({ recordings: [{ id: 'a', createdAt: 0, durationSeconds: 1 }] }); await turn();
+  const deleting = h.get('cloud-recordings-list').querySelectorAll('button')[1].click();
+  const changed = h.changeUser('second-user'); await turn();
+  h.histories[1].resolve({ recordings: [{ id: 'b', createdAt: 0, durationSeconds: 1 }] }); await changed;
+  h.deletes[0].resolve(); await deleting;
+  assert.deepEqual(h.deleted, []); assert.equal(h.histories.length, 2);
+  assert.equal(h.get('cloud-recordings-list').children.length, 1); assert.equal(h.get('history-count').textContent, '1');
+});
+
+test('Open completion respects later navigation or a new active take', async () => {
+  for (const change of ['navigate', 'record']) {
+    const h = accountHarness(); await turn();
+    h.histories[0].resolve({ recordings: [{ id: 'a', createdAt: 0, durationSeconds: 1 }] }); await turn();
+    const opening = h.get('cloud-recordings-list').querySelectorAll('button')[0].click();
+    if (change === 'navigate') h.changeView(); else h.setReplaceAllowed(false);
+    h.opens[0].resolve({ id: 'a' }); await opening;
+    assert.deepEqual(h.restored, [], `${change} invalidates the pending replacement`);
+    assert.equal(h.get('cloud-recordings-list').querySelectorAll('button')[0].disabled, false);
+  }
+});
+
+test('a refreshed history keeps newly rendered actions disabled while an Open remains pending', async () => {
+  const h = accountHarness(); await turn();
+  const record = { id: 'a', createdAt: 0, durationSeconds: 1 };
+  h.histories[0].resolve({ recordings: [record] }); await turn();
+  const opening = h.get('cloud-recordings-list').querySelectorAll('button')[0].click();
+  const refreshed = h.window.rehearsalAccount.refreshHistory();
+  h.histories[1].resolve({ recordings: [record] }); await refreshed;
+  const [open, remove] = h.get('cloud-recordings-list').querySelectorAll('button');
+  assert.equal(open.disabled, true); assert.equal(remove.disabled, true);
+  await open.click(); assert.equal(h.opens.length, 1);
+  h.opens[0].resolve({ id: 'a' }); await opening;
+  assert.equal(open.disabled, false); assert.equal(remove.disabled, false);
+});
+
+test('a failed Open from a previous view cannot replace current history status', async () => {
+  const h = accountHarness(); await turn();
+  h.histories[0].resolve({ recordings: [{ id: 'a', createdAt: 0, durationSeconds: 1 }] }); await turn();
+  const opening = h.get('cloud-recordings-list').querySelectorAll('button')[0].click();
+  h.changeView();
+  const before = h.get('cloud-recordings-status').textContent;
+  h.opens[0].reject(new Error('Previous view failure')); await opening;
+  assert.equal(h.get('cloud-recordings-status').textContent, before);
+});
+
+test('rehearsal analytics excludes content under a hidden history-page ancestor', async () => {
+  const views = [];
+  const h = accountHarness({ analyticsFactory: () => ({ setConsent() {}, flush() {}, track() {}, activity() {}, dispose() {}, setView: view => views.push(view) }) });
+  await turn(); h.histories[0].resolve({ recordings: [] }); await turn();
+  const rehearsalPage = h.get('rehearse-page');
+  const prepare = h.get('.prepare-panel'); prepare.parentElement = rehearsalPage;
+  prepare.rect = { top: 0, bottom: 800, left: 0, right: 1000 };
+  h.window.listeners.get('click')(); assert.equal(views.at(-1).visible, true);
+  rehearsalPage.hidden = true;
+  h.window.listeners.get('click')(); assert.equal(views.at(-1).visible, false);
+  assert.equal(views.at(-1).section, 'prepare', 'no invented history analytics section is submitted');
 });
