@@ -2111,10 +2111,6 @@ for (const id of ['reanalyze-button', 'refresh-annotations']) $(id).addEventList
 $('download-report').addEventListener('click', downloadReport);
 $('download-transcript').addEventListener('click', downloadAnnotatedTranscript);
 $('print-report').addEventListener('click', () => window.print());
-$('practice-again').addEventListener('click', () => {
-  document.querySelector('.record-panel').scrollIntoView({ behavior: 'smooth', block: 'center' });
-  $('record-button').focus({ preventScroll: true });
-});
 navigator.mediaDevices?.addEventListener('devicechange', enumerateInputs);
 window.addEventListener('focus', () => { enumerateInputs(); refreshSavedRecordings(); });
 window.addEventListener('beforeunload', warnBeforeLeaving);
