@@ -6,6 +6,8 @@ A presentation practice app for Neeley students. Speak into the microphone, see 
 
 ## Practice
 
+The first visit opens a short **Prepare → Rehearse → Improve** welcome tutorial. **Skip tutorial**, the close button, **Escape**, or **Got it** dismiss it and remember that preference in this browser. **How it works** in the navigation reopens it at any time. The guide explains the five coaching criteria, separate planned-point coverage, and the practice score. It does not start recording or request AI feedback. If browser storage is blocked or cleared, the welcome may appear again on a later visit.
+
 1. Sign in with Google. Microsoft sign-in is supported when configured; this is not an institutionally approved TCU SSO integration.
 2. Add talking points, a script, or an optional introduction, transitions, teacher rubric, and assignment instructions.
 3. Start recording. Audio streams to OpenAI and draft words appear as you speak. Silence does not end the recording. Pause excludes the break from the recording; Resume continues the same take.

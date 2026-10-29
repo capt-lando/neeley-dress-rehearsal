@@ -1,6 +1,7 @@
 import policyText from '../lib/coaching-prompt.md?raw';
 import { installBrowserTools } from './browser-tools.js';
 import { readHostedConfig, createHostedService } from '../lib/hosted-service.mjs';
+import { installWelcomeTutorial } from './welcome.js';
 
 try {
   const hosted = readHostedConfig(import.meta.env);
@@ -15,6 +16,7 @@ try {
   await import('./app.js');
   const { installHostedAccount } = await import('./hosted-account.js');
   installHostedAccount(service, window.rehearsalHostedActions);
+  installWelcomeTutorial({ document, window });
 } catch {
   const message = document.getElementById('app-status');
   message.textContent = 'The app could not start. Please refresh. If this continues, contact the pilot organizer to check its configuration.';
