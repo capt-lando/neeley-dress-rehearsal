@@ -1,66 +1,128 @@
-// This browser preference contains no account or rehearsal information.
-const DISMISSED_KEY = 'neeley-dress-rehearsal:welcome:v1';
+// Only the account's opaque session identifier is stored here, never its token.
+const SEEN_PREFIX = 'neeley-dress-rehearsal:welcome:v2:seen:';
 
-export function installWelcomeTutorial({ document, window }) {
+export function installWelcomeTutorial({ document, window, service }) {
   const dialog = document.getElementById('welcome-dialog');
   const trigger = document.getElementById('welcome-open');
   const title = document.getElementById('welcome-title');
-  const back = document.getElementById('welcome-back');
-  const next = document.getElementById('welcome-next');
-  const steps = [...dialog.querySelectorAll('[data-welcome-step]')];
-  const progress = [...dialog.querySelectorAll('[data-welcome-progress]')];
-  let step = 0;
-  let returnFocus = trigger;
+  const checkbox = document.getElementById('welcome-dont-show-again');
+  const status = document.getElementById('welcome-preference-status');
+  const seenInPage = new Map();
+  let owner = null, profile = null, generation = 0, authRevision = 0;
+  let loading = null, saving = null, disposed = false, returnFocus = trigger;
+  let shownWhileLoading = false;
 
-  function rememberDismissal() {
-    try { window.localStorage.setItem(DISMISSED_KEY, 'dismissed'); }
-    catch { /* The tutorial remains usable when browser storage is unavailable. */ }
+  function seen() {
+    if (!owner || !profile) return false;
+    try {
+      if (window.localStorage.getItem(SEEN_PREFIX + owner) === profile.sessionId) return true;
+    } catch { /* In-page memory still prevents repeated auth notifications. */ }
+    return seenInPage.get(owner) === profile.sessionId;
   }
 
-  function renderStep({ focus = true } = {}) {
-    steps.forEach((panel, index) => { panel.hidden = index !== step; });
-    progress.forEach((item, index) => {
-      if (index === step) item.setAttribute('aria-current', 'step');
-      else item.removeAttribute('aria-current');
-    });
-    back.hidden = step === 0;
-    next.textContent = step === steps.length - 1 ? 'Got it' : 'Next →';
-    if (focus) steps[step].querySelector('h3').focus({ preventScroll: true });
-    dialog.querySelector('.welcome-content').scrollTop = 0;
-    dialog.scrollTop = 0;
+  function rememberSession() {
+    if (!owner || !profile) return;
+    seenInPage.set(owner, profile.sessionId);
+    try { window.localStorage.setItem(SEEN_PREFIX + owner, profile.sessionId); }
+    catch { /* The account preference can still be saved without browser storage. */ }
+  }
+
+  function updateCheckbox() {
+    checkbox.checked = profile?.dontShowAgain === true;
+    checkbox.disabled = !owner || Boolean(loading) || Boolean(saving);
   }
 
   function open() {
-    if (dialog.open || document.querySelector('dialog[open]')) return;
+    if (disposed || dialog.open || document.querySelector('dialog[open]')) return;
     returnFocus = document.activeElement === document.body ? trigger : document.activeElement;
-    step = 0;
-    dialog.querySelector('.welcome-scoring').open = false;
-    renderStep({ focus: false });
+    dialog.querySelector('.welcome-explanation').open = false;
+    updateCheckbox();
     dialog.showModal();
+    if (!profile || loading) shownWhileLoading = true;
+    rememberSession();
+    dialog.scrollTop = 0;
     title.focus({ preventScroll: true });
   }
 
-  function dismiss() {
-    rememberDismissal();
-    dialog.close();
+  function dismiss() { dialog.close(); }
+
+  async function refresh(identity) {
+    if (disposed) return;
+    const nextOwner = identity?.id || null;
+    if (nextOwner !== owner) {
+      generation++;
+      loading?.abort(); saving?.abort();
+      loading = null; saving = null; profile = null;
+      shownWhileLoading = false;
+      owner = nextOwner;
+      if (dialog.open) dialog.close();
+      status.textContent = owner ? '' : 'Sign in to save this choice.';
+      updateCheckbox();
+    }
+    if (!owner || loading || saving) return;
+    const revision = generation, controller = new AbortController();
+    loading = controller;
+    updateCheckbox();
+    try {
+      const result = await service.request('/api/welcome-preference', { signal: controller.signal });
+      if (disposed || revision !== generation || controller.signal.aborted) return;
+      profile = result;
+      loading = null;
+      updateCheckbox();
+      if (dialog.open || shownWhileLoading) rememberSession();
+      else if (profile.signInCount <= 3 && !profile.dontShowAgain && !seen()) open();
+      shownWhileLoading = false;
+    } catch {
+      if (!disposed && revision === generation) status.textContent = 'Couldn’t load your preference. You can still use this guide.';
+    } finally {
+      if (loading === controller) { loading = null; updateCheckbox(); }
+    }
+  }
+
+  async function savePreference() {
+    if (!owner || loading || saving || disposed) return;
+    const dontShowAgain = checkbox.checked, revision = generation;
+    const controller = new AbortController();
+    saving = controller;
+    checkbox.disabled = true;
+    status.textContent = 'Saving…';
+    try {
+      const result = await service.request('/api/welcome-preference', {
+        method: 'POST', body: JSON.stringify({ dontShowAgain }), signal: controller.signal,
+      });
+      if (disposed || revision !== generation || controller.signal.aborted) return;
+      profile = result;
+      if (dialog.open) rememberSession();
+      status.textContent = 'Saved to your account.';
+    } catch {
+      if (!disposed && revision === generation) status.textContent = 'Couldn’t save your choice. Please try again.';
+    } finally {
+      if (saving === controller) { saving = null; updateCheckbox(); }
+    }
   }
 
   trigger.addEventListener('click', open);
   document.getElementById('welcome-close').addEventListener('click', dismiss);
-  document.getElementById('welcome-skip').addEventListener('click', dismiss);
-  back.addEventListener('click', () => { if (step > 0) { step--; renderStep(); } });
-  next.addEventListener('click', () => {
-    if (step === steps.length - 1) dismiss();
-    else { step++; renderStep(); }
-  });
+  document.getElementById('welcome-done').addEventListener('click', dismiss);
+  checkbox.addEventListener('change', savePreference);
   dialog.addEventListener('cancel', event => { event.preventDefault(); dismiss(); });
   dialog.addEventListener('close', () => {
-    rememberDismissal();
-    (returnFocus?.isConnected ? returnFocus : trigger).focus({ preventScroll: true });
+    if (!document.querySelector('dialog[open]')) {
+      (returnFocus?.isConnected ? returnFocus : trigger).focus({ preventScroll: true });
+    }
   });
 
-  let dismissed = false;
-  try { dismissed = window.localStorage.getItem(DISMISSED_KEY) === 'dismissed'; }
-  catch { /* Without storage, show the guide once in this loaded page. */ }
-  if (!dismissed) open();
+  status.textContent = 'Sign in to save this choice.';
+  updateCheckbox();
+  const unsubscribe = service.onAuthChange(identity => { authRevision++; void refresh(identity); });
+  const initialRevision = authRevision;
+  const ready = Promise.resolve().then(() => service.getIdentity()).then(identity => {
+    if (authRevision === initialRevision) return refresh(identity);
+  }).catch(() => { /* Uncertain eligibility must never interrupt a rehearsal. */ });
+  function dispose() {
+    disposed = true;
+    loading?.abort(); saving?.abort(); unsubscribe();
+  }
+  window.addEventListener('pagehide', event => { if (!event.persisted) dispose(); });
+  return { ready, dispose };
 }

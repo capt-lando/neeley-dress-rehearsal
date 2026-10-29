@@ -246,47 +246,27 @@
 
   <dialog id="welcome-dialog" class="welcome-dialog" aria-labelledby="welcome-title" aria-describedby="welcome-intro">
     <div class="welcome-heading">
-      <div><p class="eyebrow">A LITTLE PRACTICE GOES A LONG WAY</p><h2 id="welcome-title" tabindex="-1">Welcome to Neeley<br>Dress Rehearsal</h2></div>
+      <div><p class="eyebrow">NEELEY DRESS REHEARSAL</p><h2 id="welcome-title" tabindex="-1">Let’s rehearse.</h2></div>
       <button id="welcome-close" class="icon-button" type="button" aria-label="Close welcome tutorial">×</button>
     </div>
-    <p id="welcome-intro" class="welcome-intro">A quick guide to your next, better take.</p>
-    <ol class="welcome-progress" aria-label="Tutorial steps">
-      <li data-welcome-progress aria-current="step"><span aria-hidden="true">1</span>Prepare</li>
-      <li data-welcome-progress><span aria-hidden="true">2</span>Rehearse</li>
-      <li data-welcome-progress><span aria-hidden="true">3</span>Improve</li>
+    <p id="welcome-intro" class="welcome-intro">Practice once. Find your next improvement.</p>
+    <ol class="welcome-steps">
+      <li><span class="welcome-step-number" aria-hidden="true">1</span><div><h3>Add your notes <span class="welcome-optional">Optional</span></h3><p>Bring talking points, a script, or a rubric to tailor your feedback.</p></div></li>
+      <li><span class="welcome-step-number" aria-hidden="true">2</span><div><h3>Record your presentation</h3><p>Speak naturally. Press <strong>Stop</strong> when you’re finished.</p></div></li>
+      <li><span class="welcome-step-number" aria-hidden="true">3</span><div><h3>Get feedback. Try again.</h3><p>Choose <strong>Analyze</strong> for strengths, useful edits, and up to three next steps.</p></div></li>
     </ol>
-    <div class="welcome-content">
-      <section data-welcome-step aria-labelledby="welcome-prepare-title">
-        <p class="welcome-step-label">STEP 1 OF 3</p>
-        <h3 id="welcome-prepare-title" tabindex="-1">Give your coach context.</h3>
-        <p>Sign in to save your rehearsals. Add talking points or a full script, then include any assignment instructions or teacher rubric.</p>
-        <div class="welcome-note"><strong>Bring what you have.</strong><p>Preparation is optional. Your purpose, audience, and assignment help the coach tailor its feedback.</p></div>
-      </section>
-      <section data-welcome-step aria-labelledby="welcome-rehearse-title" hidden>
-        <p class="welcome-step-label">STEP 2 OF 3</p>
-        <h3 id="welcome-rehearse-title" tabindex="-1">Say it out loud.</h3>
-        <ul class="welcome-actions-list">
-          <li><strong>Record a take.</strong><span>Your words appear as you speak. Pause when needed; press Stop to finish and save.</span></li>
-          <li><strong>Review your transcript.</strong><span>Replay the recording and correct any words speech recognition missed.</span></li>
-          <li><strong>Choose Analyze.</strong><span>Request feedback when you’re ready, then talk through it with your coach.</span></li>
-        </ul>
-      </section>
-      <section data-welcome-step aria-labelledby="welcome-improve-title" hidden>
-        <p class="welcome-step-label">STEP 3 OF 3</p>
-        <h3 id="welcome-improve-title" tabindex="-1">Know what to work on next.</h3>
-        <p>The coach reviews your full transcript and the context you add, with expectations suited to your presentation’s purpose and format.</p>
-        <ul class="welcome-criteria" aria-label="Five coaching criteria"><li>Claim</li><li>Evidence</li><li>Structure</li><li>Audience fit</li><li>Conclusion</li></ul>
-        <p>Explore strengths, highlighted passages, and up to three priority improvements. Ask follow-up questions, then try another take.</p>
-        <div class="welcome-note"><strong>Your ideas, in your own words.</strong><p>Coverage of your planned points is checked separately from speech quality. Effective changes to your script are welcome.</p></div>
-        <details class="welcome-scoring"><summary>How the score works</summary><p>Each of the five areas receives a 0–5 coaching rating. The app combines them equally into a score out of 100. Word counts and pace are calculated by the app. Length affects the assessment only when your assignment or rubric sets an explicit requirement.</p></details>
-        <p class="welcome-limits">The score is a practice estimate, not a course grade. A transcript cannot show body language or vocal tone.</p>
-      </section>
-    </div>
+    <details class="welcome-explanation"><summary>How feedback works</summary>
+      <p>The coach reads your full transcript alongside your notes and assignment. It reviews your main claim, evidence, structure, audience fit, and conclusion, pointing to specific passages.</p>
+      <p>Coverage of your planned points is checked separately. Effective changes in your own words are welcome.</p>
+      <p>The five areas contribute equally to a practice score out of 100. Length matters only when your assignment sets a requirement. A transcript cannot show body language or vocal tone.</p>
+    </details>
+    <p class="welcome-limits">Your score is for practice, not a course grade.</p>
     <div class="welcome-footer">
-      <button id="welcome-skip" class="text-button" type="button">Skip tutorial</button>
-      <div class="welcome-navigation"><button id="welcome-back" class="secondary-button" type="button" hidden>Back</button><button id="welcome-next" class="primary-button" type="button">Next <span aria-hidden="true">→</span></button></div>
+      <label class="welcome-preference"><input id="welcome-dont-show-again" type="checkbox"><span>Don’t show again</span></label>
+      <button id="welcome-done" class="primary-button" type="button">Got it</button>
     </div>
-    <p class="welcome-reopen">You can reopen this guide anytime from <strong>How it works</strong>.</p>
+    <p id="welcome-preference-status" class="welcome-preference-status" role="status" aria-live="polite"></p>
+    <p class="welcome-reopen">Find this guide anytime under <strong>How it works</strong>.</p>
   </dialog>
 
   <dialog id="cancel-restart-dialog" aria-labelledby="cancel-restart-title" aria-describedby="cancel-restart-description">

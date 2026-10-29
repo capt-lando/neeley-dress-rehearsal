@@ -16,7 +16,7 @@ try {
   await import('./app.js');
   const { installHostedAccount } = await import('./hosted-account.js');
   installHostedAccount(service, window.rehearsalHostedActions);
-  installWelcomeTutorial({ document, window });
+  installWelcomeTutorial({ document, window, service });
 } catch {
   const message = document.getElementById('app-status');
   message.textContent = 'The app could not start. Please refresh. If this continues, contact the pilot organizer to check its configuration.';

@@ -287,9 +287,39 @@ test('signed-out startup sends nothing; transcription requires OAuth and unsuppo
   assert.equal(config.auth.signedIn, false);
   assert.ok(!JSON.stringify(config).includes('token'));
   await assert.rejects(service.request('/api/transcribe', { body: wav() }), { status: 401 });
+  await assert.rejects(service.request('/api/welcome-preference'), { status: 401 });
   await assert.rejects(service.request('https://evil.example/steal'), { status: 404 });
   await assert.rejects(service.request('/api/settings', { body: { analysisApiKey: 'never-send' } }), { status: 404 });
   assert.equal(calls.length, 0); assert.equal(uploads.length, 0);
+});
+
+test('welcome preferences use the authenticated gateway and only send the checkbox choice', async () => {
+  const sessionId = randomUUID();
+  const f = fixture({ handle: call => call.path === '/welcome-preference' ? response({ signInCount: 3, dontShowAgain: call.body?.dontShowAgain ?? false, sessionId }) : undefined });
+  assert.deepEqual(await f.service.request('/api/welcome-preference'), { signInCount: 3, dontShowAgain: false, sessionId });
+  assert.deepEqual(await f.service.request('/api/welcome-preference', { method: 'POST', body: { dontShowAgain: true } }), { signInCount: 3, dontShowAgain: true, sessionId });
+  assert.deepEqual(f.calls.map(call => [call.path, call.method, call.body]), [['/welcome-preference', 'GET', undefined], ['/welcome-preference', 'POST', { dontShowAgain: true }]]);
+  assert.ok(f.calls.every(call => call.headers.Authorization === 'Bearer private-session-token'));
+});
+
+test('welcome preference transport rejects forged identity and invalid response before showing a tutorial', async () => {
+  const value = { signInCount: 3, dontShowAgain: false, sessionId: randomUUID() };
+  for (const options of [{ method: 'DELETE' }, { body: { signInCount: 0 } }, { method: 'POST', body: {} }, { method: 'POST', body: { dontShowAgain: 'true' } },
+    { method: 'POST', body: { dontShowAgain: true, userId } }, { method: 'POST', body: { dontShowAgain: true, signInCount: 0 } }]) {
+    const f = fixture();await assert.rejects(f.service.request('/api/welcome-preference', options), { status: 400 });assert.equal(f.calls.length, 0);
+  }
+  for (const invalid of [null, [], {}, { ...value, signInCount: -1 }, { ...value, signInCount: 5 }, { ...value, signInCount: 1.5 }, { ...value, dontShowAgain: 'false' }, { ...value, sessionId: 'not-a-session' }, { ...value, userId }]) {
+    const f = fixture({ handle: () => response(invalid) });await assert.rejects(f.service.request('/api/welcome-preference'), { status: 502 });
+  }
+});
+
+test('account changes discard a pending welcome preference response', async () => {
+  const entered = deferred(), ready = deferred();
+  const f = fixture({ handle: async call => { if (call.path === '/welcome-preference') { entered.resolve();await ready.promise;return response({ signInCount: 1, dontShowAgain: false, sessionId: randomUUID() }); } } });
+  f.service.onAuthChange(() => {});
+  const pending = f.service.request('/api/welcome-preference');await entered.promise;
+  f.authChange(secondSession);ready.resolve();
+  await assert.rejects(pending, error => error.name === 'AbortError' || error.status === 401);
 });
 
 test('sign-out, account changes and disposal close a live socket before more private audio can leave', async () => {

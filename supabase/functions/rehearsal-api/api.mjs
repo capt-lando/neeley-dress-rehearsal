@@ -166,7 +166,7 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
         identities.some(identity=>!['google','azure','email'].includes(identity.provider))) throw fail('Use Google or Microsoft sign-in for this pilot.',403);
     await store.admitRequest(user.id);
     await store.profile(user.id);
-    return {id:user.id};
+    return {id:user.id,sessionId:UUID.test(claims.session_id||'')?claims.session_id.toLowerCase():null};
   }
   async function paid(user,recordingId,requestId,kind,input,cost,run,deliver) {
     if (!cost) throw fail('The pilot service is not configured yet.',503);
@@ -310,6 +310,16 @@ export function createHostedApi({ store, env, policyText, fetchImpl=fetch, coach
           chatConfigured:Boolean(provider==='openai'&&env.COACHING_API_KEY),chatModel:CHAT_MODEL});
       }
       const user=await identify(request);
+      if(path==='/welcome-preference'&&['GET','POST'].includes(request.method)) {
+        if(!user.sessionId)throw fail('Your session is invalid. Sign in again.',401);
+        let dontShowAgain;
+        if(request.method==='POST') {
+          const input=await jsonBody(request);exact(input,['dontShowAgain']);
+          if(typeof input.dontShowAgain!=='boolean')throw fail('Choose whether to show the welcome next time.');
+          dontShowAgain=input.dontShowAgain;
+        }
+        return json({...await store.welcomePreference(user.id,dontShowAgain),sessionId:user.sessionId});
+      }
       if(request.method==='POST'&&path==='/coach-chat') {
         const input=chatInput(await jsonBody(request));
         if(provider!=='openai'||!env.COACHING_API_KEY)throw fail('The rehearsal chat is not configured yet.',503);

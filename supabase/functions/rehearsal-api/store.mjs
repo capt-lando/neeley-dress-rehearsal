@@ -47,6 +47,9 @@ export function createSupabaseStore(client) {
       checked(await client.from('rehearsal_profiles').upsert({user_id:id},{onConflict:'user_id',ignoreDuplicates:true}));
       return checked(await client.from('rehearsal_profiles').select('user_id').eq('user_id',id).single());
     },
+    welcomePreference(user,dontShowAgain=null) {
+      return rpc('rehearsal_welcome_preference',{p_user:user,p_dont_show_again:dontShowAgain});
+    },
     async list(id) { return checked(await recordings().select('id,title,created_at,duration_seconds,size_bytes,status').eq('user_id',id).eq('upload_expired',false).order('created_at',{ascending:false}).limit(50)); },
     async owned(user,id) { return checked(await recordings().select('*').eq('user_id',user).eq('id',id).maybeSingle()); },
     async create(user,id,title,duration,size) {
